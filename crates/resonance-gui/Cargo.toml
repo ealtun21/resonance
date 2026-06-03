@@ -1,0 +1,14 @@
+[package]
+name = "resonance-gui"
+description = "GUI client for the Resonance daemon (future)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+resonance-ipc = { path = "../resonance-ipc" }
+serde = { workspace = true }
+postcard = { workspace = true }
+anyhow = { workspace = true }

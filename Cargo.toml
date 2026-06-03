@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/resonance-dsp",
+    "crates/resonance-preset",
+    "crates/resonance-ipc",
+    "crates/resonance-daemon",
+    "crates/resonance-cli",
+    "crates/resonance-tui",
+    "crates/resonance-gui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/ealtun21/resonance"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# DSP
+biquad = "0.5"
+rustfft = "6"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }
+
+# Async / runtime
+tokio = { version = "1", features = ["full"] }
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Audio / PipeWire
+pipewire = "0.9"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

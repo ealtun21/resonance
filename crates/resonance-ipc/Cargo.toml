@@ -1,0 +1,14 @@
+[package]
+name = "resonance-ipc"
+description = "Shared IPC protocol types for daemon-client communication"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+resonance-dsp = { path = "../resonance-dsp" }
+serde = { workspace = true }
+postcard = { workspace = true }
+thiserror = { workspace = true }

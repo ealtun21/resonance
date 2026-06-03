@@ -1,0 +1,377 @@
+use std::f64::consts::PI;
+use thiserror::Error;
+
+#[derive(Debug, Clone, Error)]
+pub enum FilterError {
+    #[error("invalid frequency {0} Hz: must be > 0 and < nyquist")]
+    InvalidFrequency(f64),
+    #[error("invalid Q {0}: must be > 0")]
+    InvalidQ(f64),
+    #[error("sample rate {0} must be > 0")]
+    InvalidSampleRate(f64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FilterType {
+    Peaking,
+    LowShelf,
+    LowShelf12Db,
+    LowShelfQ,
+    HighShelf,
+    HighShelf12Db,
+    HighShelfQ,
+    LowPass,
+    LowPassQ,
+    HighPass,
+    HighPassQ,
+    BandPass,
+    Notch,
+    AllPass,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BiquadCoeffs {
+    pub b0: f64,
+    pub b1: f64,
+    pub b2: f64,
+    pub a1: f64,
+    pub a2: f64,
+}
+
+impl BiquadCoeffs {
+    pub fn peaking(freq: f64, gain_db: f64, q: f64, sample_rate: f64) -> Result<Self, FilterError> {
+        validate(freq, q, sample_rate)?;
+        let a = 10f64.powf(gain_db / 40.0);
+        let w0 = 2.0 * PI * freq / sample_rate;
+        let (sin_w0, cos_w0) = (w0.sin(), w0.cos());
+        let alpha = sin_w0 / (2.0 * q);
+        Ok(Self {
+            b0: 1.0 + alpha * a,
+            b1: -2.0 * cos_w0,
+            b2: 1.0 - alpha * a,
+            a1: -2.0 * cos_w0,
+            a2: 1.0 - alpha / a,
+        }
+        .normalize(1.0 + alpha / a))
+    }
+
+    pub fn low_shelf(freq: f64, gain_db: f64, sample_rate: f64) -> Result<Self, FilterError> {
+        validate(freq, 1.0, sample_rate)?;
+        let a = 10f64.powf(gain_db / 40.0);
+        let w0 = 2.0 * PI * freq / sample_rate;
+        let (sin_w0, cos_w0) = (w0.sin(), w0.cos());
+        let alpha = sin_w0 / 2.0 * (a + 1.0 / a).sqrt();
+        let a1 = 2.0 * ((a - 1.0) * cos_w0);
+        let sq = 2.0 * a.sqrt() * alpha;
+        Ok(Self {
+            b0: a * ((a + 1.0) - (a - 1.0) * cos_w0 + sq),
+            b1: 2.0 * a * ((a - 1.0) - (a + 1.0) * cos_w0),
+            b2: a * ((a + 1.0) - (a - 1.0) * cos_w0 - sq),
+            a1: -a1,
+            a2: (a + 1.0) + (a - 1.0) * cos_w0 - sq,
+        }
+        .normalize((a + 1.0) + (a - 1.0) * cos_w0 + sq))
+    }
+
+    pub fn high_shelf(freq: f64, gain_db: f64, sample_rate: f64) -> Result<Self, FilterError> {
+        validate(freq, 1.0, sample_rate)?;
+        let a = 10f64.powf(gain_db / 40.0);
+        let w0 = 2.0 * PI * freq / sample_rate;
+        let (sin_w0, cos_w0) = (w0.sin(), w0.cos());
+        let alpha = sin_w0 / 2.0 * (a + 1.0 / a).sqrt();
+        let a1 = -2.0 * ((a - 1.0) * cos_w0);
+        let sq = 2.0 * a.sqrt() * alpha;
+        Ok(Self {
+            b0: a * ((a + 1.0) + (a - 1.0) * cos_w0 + sq),
+            b1: -2.0 * a * ((a - 1.0) + (a + 1.0) * cos_w0),
+            b2: a * ((a + 1.0) + (a - 1.0) * cos_w0 - sq),
+            a1,
+            a2: (a + 1.0) - (a - 1.0) * cos_w0 - sq,
+        }
+        .normalize((a + 1.0) - (a - 1.0) * cos_w0 + sq))
+    }
+
+    pub fn low_pass(freq: f64, q: f64, sample_rate: f64) -> Result<Self, FilterError> {
+        validate(freq, q, sample_rate)?;
+        let w0 = 2.0 * PI * freq / sample_rate;
+        let (sin_w0, cos_w0) = (w0.sin(), w0.cos());
+        let alpha = sin_w0 / (2.0 * q);
+        Ok(Self {
+            b0: (1.0 - cos_w0) / 2.0,
+            b1: 1.0 - cos_w0,
+            b2: (1.0 - cos_w0) / 2.0,
+            a1: -2.0 * cos_w0,
+            a2: 1.0 - alpha,
+        }
+        .normalize(1.0 + alpha))
+    }
+
+    pub fn high_pass(freq: f64, q: f64, sample_rate: f64) -> Result<Self, FilterError> {
+        validate(freq, q, sample_rate)?;
+        let w0 = 2.0 * PI * freq / sample_rate;
+        let (sin_w0, cos_w0) = (w0.sin(), w0.cos());
+        let alpha = sin_w0 / (2.0 * q);
+        Ok(Self {
+            b0: (1.0 + cos_w0) / 2.0,
+            b1: -(1.0 + cos_w0),
+            b2: (1.0 + cos_w0) / 2.0,
+            a1: -2.0 * cos_w0,
+            a2: 1.0 - alpha,
+        }
+        .normalize(1.0 + alpha))
+    }
+
+    pub fn band_pass(freq: f64, q: f64, sample_rate: f64) -> Result<Self, FilterError> {
+        validate(freq, q, sample_rate)?;
+        let w0 = 2.0 * PI * freq / sample_rate;
+        let (sin_w0, cos_w0) = (w0.sin(), w0.cos());
+        let alpha = sin_w0 / (2.0 * q);
+        Ok(Self {
+            b0: alpha,
+            b1: 0.0,
+            b2: -alpha,
+            a1: -2.0 * cos_w0,
+            a2: 1.0 - alpha,
+        }
+        .normalize(1.0 + alpha))
+    }
+
+    pub fn notch(freq: f64, q: f64, sample_rate: f64) -> Result<Self, FilterError> {
+        validate(freq, q, sample_rate)?;
+        let w0 = 2.0 * PI * freq / sample_rate;
+        let (sin_w0, cos_w0) = (w0.sin(), w0.cos());
+        let alpha = sin_w0 / (2.0 * q);
+        Ok(Self {
+            b0: 1.0,
+            b1: -2.0 * cos_w0,
+            b2: 1.0,
+            a1: -2.0 * cos_w0,
+            a2: 1.0 - alpha,
+        }
+        .normalize(1.0 + alpha))
+    }
+
+    pub fn all_pass(freq: f64, q: f64, sample_rate: f64) -> Result<Self, FilterError> {
+        validate(freq, q, sample_rate)?;
+        let w0 = 2.0 * PI * freq / sample_rate;
+        let (sin_w0, cos_w0) = (w0.sin(), w0.cos());
+        let alpha = sin_w0 / (2.0 * q);
+        Ok(Self {
+            b0: 1.0 - alpha,
+            b1: -2.0 * cos_w0,
+            b2: 1.0 + alpha,
+            a1: -2.0 * cos_w0,
+            a2: 1.0 - alpha,
+        }
+        .normalize(1.0 + alpha))
+    }
+
+    fn normalize(mut self, a0: f64) -> Self {
+        self.b0 /= a0;
+        self.b1 /= a0;
+        self.b2 /= a0;
+        self.a1 /= a0;
+        self.a2 /= a0;
+        self
+    }
+}
+
+fn validate(freq: f64, q: f64, sample_rate: f64) -> Result<(), FilterError> {
+    if sample_rate <= 0.0 {
+        return Err(FilterError::InvalidSampleRate(sample_rate));
+    }
+    if freq <= 0.0 || freq >= sample_rate / 2.0 {
+        return Err(FilterError::InvalidFrequency(freq));
+    }
+    if q <= 0.0 {
+        return Err(FilterError::InvalidQ(q));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BiquadState {
+    x1: f64,
+    x2: f64,
+    y1: f64,
+    y2: f64,
+}
+
+impl BiquadState {
+    pub fn process(&mut self, input: f64, c: &BiquadCoeffs) -> f64 {
+        let output =
+            c.b0 * input + c.b1 * self.x1 + c.b2 * self.x2 - c.a1 * self.y1 - c.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = input;
+        self.y2 = self.y1;
+        self.y1 = output;
+        output
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BiquadFilter {
+    pub coeffs: BiquadCoeffs,
+    pub enabled: bool,
+    states: Vec<BiquadState>,
+}
+
+impl BiquadFilter {
+    pub fn new(coeffs: BiquadCoeffs, channels: usize) -> Self {
+        Self {
+            coeffs,
+            enabled: true,
+            states: vec![BiquadState::default(); channels],
+        }
+    }
+
+    pub fn process_channel(&mut self, sample: f64, channel: usize) -> f64 {
+        if !self.enabled {
+            return sample;
+        }
+        self.states[channel].process(sample, &self.coeffs)
+    }
+
+    pub fn reset(&mut self) {
+        self.states.iter_mut().for_each(|s| s.reset());
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ApoFilter {
+    pub filter_type: FilterType,
+    pub freq: f64,
+    pub gain_db: f64,
+    pub q: f64,
+    pub enabled: bool,
+    biquad: BiquadFilter,
+}
+
+impl ApoFilter {
+    pub fn builder() -> ApoFilterBuilder {
+        ApoFilterBuilder::default()
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct ApoFilterBuilder {
+    filter_type: Option<FilterType>,
+    freq: Option<f64>,
+    gain_db: f64,
+    q: f64,
+    enabled: bool,
+    channels: usize,
+    sample_rate: Option<f64>,
+}
+
+impl ApoFilterBuilder {
+    pub fn filter_type(mut self, t: FilterType) -> Self {
+        self.filter_type = Some(t);
+        self
+    }
+
+    pub fn freq(mut self, hz: f64) -> Self {
+        self.freq = Some(hz);
+        self
+    }
+
+    pub fn gain_db(mut self, db: f64) -> Self {
+        self.gain_db = db;
+        self
+    }
+
+    pub fn q(mut self, q: f64) -> Self {
+        self.q = q;
+        self
+    }
+
+    pub fn enabled(mut self, on: bool) -> Self {
+        self.enabled = on;
+        self
+    }
+
+    pub fn channels(mut self, n: usize) -> Self {
+        self.channels = n;
+        self
+    }
+
+    pub fn sample_rate(mut self, sr: f64) -> Self {
+        self.sample_rate = Some(sr);
+        self
+    }
+
+    pub fn build(self) -> Result<ApoFilter, FilterError> {
+        let filter_type = self.filter_type.unwrap_or(FilterType::Peaking);
+        let freq = self.freq.unwrap_or(1000.0);
+        let sr = self.sample_rate.unwrap_or(48000.0);
+        let q = if self.q <= 0.0 { 0.707 } else { self.q };
+        let channels = if self.channels == 0 { 2 } else { self.channels };
+
+        let coeffs = match filter_type {
+            FilterType::Peaking => BiquadCoeffs::peaking(freq, self.gain_db, q, sr)?,
+            FilterType::LowShelf | FilterType::LowShelf12Db => {
+                BiquadCoeffs::low_shelf(freq, self.gain_db, sr)?
+            }
+            FilterType::LowShelfQ => BiquadCoeffs::low_shelf(freq, self.gain_db, sr)?,
+            FilterType::HighShelf | FilterType::HighShelf12Db => {
+                BiquadCoeffs::high_shelf(freq, self.gain_db, sr)?
+            }
+            FilterType::HighShelfQ => BiquadCoeffs::high_shelf(freq, self.gain_db, sr)?,
+            FilterType::LowPass | FilterType::LowPassQ => BiquadCoeffs::low_pass(freq, q, sr)?,
+            FilterType::HighPass | FilterType::HighPassQ => BiquadCoeffs::high_pass(freq, q, sr)?,
+            FilterType::BandPass => BiquadCoeffs::band_pass(freq, q, sr)?,
+            FilterType::Notch => BiquadCoeffs::notch(freq, q, sr)?,
+            FilterType::AllPass => BiquadCoeffs::all_pass(freq, q, sr)?,
+        };
+
+        Ok(ApoFilter {
+            filter_type,
+            freq,
+            gain_db: self.gain_db,
+            q,
+            enabled: self.enabled,
+            biquad: BiquadFilter::new(coeffs, channels),
+        })
+    }
+}
+
+impl ApoFilter {
+    pub fn process_channel(&mut self, sample: f64, channel: usize) -> f64 {
+        if !self.enabled {
+            return sample;
+        }
+        self.biquad.process_channel(sample, channel)
+    }
+
+    pub fn reset(&mut self) {
+        self.biquad.reset();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peaking_unity_at_zero_gain() {
+        let c = BiquadCoeffs::peaking(1000.0, 0.0, 0.707, 48000.0).unwrap();
+        let mut state = BiquadState::default();
+        let out = state.process(1.0, &c);
+        assert!((out - 1.0).abs() < 1e-9, "unity gain failed: {out}");
+    }
+
+    #[test]
+    fn low_pass_passes_dc() {
+        let c = BiquadCoeffs::low_pass(10000.0, 0.707, 48000.0).unwrap();
+        let mut state = BiquadState::default();
+        let mut last = 0.0;
+        for _ in 0..1000 {
+            last = state.process(1.0, &c);
+        }
+        assert!((last - 1.0).abs() < 1e-6, "LP DC response: {last}");
+    }
+}

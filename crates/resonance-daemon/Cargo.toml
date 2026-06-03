@@ -1,0 +1,25 @@
+[package]
+name = "resonance-daemon"
+description = "PipeWire filter node daemon with Unix socket IPC server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "resonanced"
+path = "src/main.rs"
+
+[dependencies]
+resonance-dsp = { path = "../resonance-dsp" }
+resonance-preset = { path = "../resonance-preset" }
+resonance-ipc = { path = "../resonance-ipc" }
+pipewire = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+postcard = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

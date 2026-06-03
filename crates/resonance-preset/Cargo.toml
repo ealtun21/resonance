@@ -1,0 +1,13 @@
+[package]
+name = "resonance-preset"
+description = "Preset parsers: FxSound .fac and EqualizerAPO .txt formats"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+resonance-dsp = { path = "../resonance-dsp" }
+serde = { workspace = true }
+thiserror = { workspace = true }
