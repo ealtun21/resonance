@@ -179,13 +179,16 @@ impl Effect for AmbienceEffect {
     }
 }
 
-/// Surround: Haas-effect stereo widener with cross-feed for headphones.
+/// Surround: Haas-effect stereo widener.
+/// Delays the R channel by ~0.2 ms, creating audible inter-channel difference
+/// for any input signal (including mono), perceived as stereo width.
 #[derive(Debug, Clone)]
 pub struct SurroundEffect {
     intensity: f64,
     enabled: bool,
-    delay_buf: Vec<f64>,
-    delay_idx: usize,
+    // Delay line for R channel (Haas effect)
+    r_delay_buf: Vec<f64>,
+    r_delay_idx: usize,
     delay_samples: usize,
 }
 
@@ -195,8 +198,8 @@ impl SurroundEffect {
         Self {
             intensity: 0.0,
             enabled: true,
-            delay_buf: vec![0.0; delay_samples + 1],
-            delay_idx: 0,
+            r_delay_buf: vec![0.0; delay_samples + 1],
+            r_delay_idx: 0,
             delay_samples,
         }
     }
@@ -207,28 +210,25 @@ impl Effect for SurroundEffect {
         if !self.enabled || self.intensity == 0.0 || channels < 2 {
             return;
         }
-        let width = self.intensity * 0.4;
+        let mix = self.intensity;
         let frames = samples.len() / channels;
 
         for frame in 0..frames {
-            let l = samples[frame * channels];
             let r = samples[frame * channels + 1];
-            let mid = (l + r) * 0.5;
-            let side = (l - r) * 0.5;
 
-            let delayed = self.delay_buf[self.delay_idx];
-            self.delay_buf[self.delay_idx] = side;
-            self.delay_idx = (self.delay_idx + 1) % (self.delay_samples + 1);
+            // Haas delay on R: blend between dry R and delayed R
+            let delayed_r = self.r_delay_buf[self.r_delay_idx];
+            self.r_delay_buf[self.r_delay_idx] = r;
+            self.r_delay_idx = (self.r_delay_idx + 1) % (self.delay_samples + 1);
 
-            let widened_side = side + width * delayed;
-            samples[frame * channels] = mid + widened_side;
-            samples[frame * channels + 1] = mid - widened_side;
+            // L stays dry; R cross-fades toward the delayed version
+            samples[frame * channels + 1] = (1.0 - mix) * r + mix * delayed_r;
         }
     }
 
     fn reset(&mut self) {
-        self.delay_buf.iter_mut().for_each(|s| *s = 0.0);
-        self.delay_idx = 0;
+        self.r_delay_buf.iter_mut().for_each(|s| *s = 0.0);
+        self.r_delay_idx = 0;
     }
 
     fn set_intensity(&mut self, v: f64) {
@@ -326,15 +326,25 @@ impl Effect for DynamicBoostEffect {
     }
 }
 
-/// Bass Boost: sub-harmonic synthesis + low-shelf boost.
+/// Bass Boost: sub-harmonic synthesis via zero-crossing octave divider + low-shelf boost.
+///
+/// Sub-octave generation: LP-filter the input to isolate the bass fundamental,
+/// then use a zero-crossing toggle (frequency divider ÷2) to produce a signal
+/// at exactly half the fundamental frequency, then smooth with a second LP pass.
+/// This produces true sub-octave content (e.g. 120 Hz → 60 Hz).
 #[derive(Debug, Clone)]
 pub struct BassBoostEffect {
     intensity: f64,
     enabled: bool,
-    // Single-pole LP for sub-octave synthesis
+    // First LP: isolate bass fundamental for the divider
     lp_states: Vec<f64>,
     lp_coeff: f64,
-    // Proper biquad low-shelf (uses corrected Audio EQ Cookbook formula)
+    // Zero-crossing frequency divider state
+    prev_lp: Vec<f64>,
+    sub_toggle: Vec<f64>,
+    // Second LP: smooth the sub-octave output
+    sub_lp: Vec<f64>,
+    // Low-shelf biquad
     shelf_coeffs: crate::filter::BiquadCoeffs,
     shelf_states: Vec<crate::filter::BiquadState>,
 }
@@ -347,22 +357,22 @@ impl BassBoostEffect {
         let lp_coeff = dt / (rc + dt);
 
         let shelf_coeffs = crate::filter::BiquadCoeffs::low_shelf(120.0, 6.0, sample_rate)
-            .unwrap_or(
-                // Fallback: identity (should never trigger for sane sample rates)
-                crate::filter::BiquadCoeffs {
-                    b0: 1.0,
-                    b1: 0.0,
-                    b2: 0.0,
-                    a1: 0.0,
-                    a2: 0.0,
-                },
-            );
+            .unwrap_or(crate::filter::BiquadCoeffs {
+                b0: 1.0,
+                b1: 0.0,
+                b2: 0.0,
+                a1: 0.0,
+                a2: 0.0,
+            });
 
         Self {
             intensity: 0.0,
             enabled: true,
             lp_states: vec![0.0; channels],
             lp_coeff,
+            prev_lp: vec![0.0; channels],
+            sub_toggle: vec![1.0; channels],
+            sub_lp: vec![0.0; channels],
             shelf_coeffs,
             shelf_states: vec![crate::filter::BiquadState::default(); channels],
         }
@@ -375,27 +385,42 @@ impl Effect for BassBoostEffect {
             return;
         }
         let frames = samples.len() / channels;
-        let sub_mix = self.intensity * 0.3;
 
         for frame in 0..frames {
             for ch in 0..channels {
                 let idx = frame * channels + ch;
                 let x = samples[idx];
 
-                // Low-shelf boost via proper biquad
+                // Low-shelf boost
                 let shelf_out = self.shelf_states[ch].process(x, &self.shelf_coeffs);
 
-                // Sub-octave synthesis: LP → tanh saturation
+                // LP isolates the bass fundamental
                 self.lp_states[ch] += self.lp_coeff * (x - self.lp_states[ch]);
-                let sub = (self.lp_states[ch] * 2.0).tanh() * self.lp_states[ch].signum();
+                let lp = self.lp_states[ch];
 
-                samples[idx] = (shelf_out + sub_mix * sub).clamp(-1.0, 1.0);
+                // Frequency divider ÷2: toggle on every positive zero-crossing
+                if self.prev_lp[ch] <= 0.0 && lp > 0.0 {
+                    self.sub_toggle[ch] = -self.sub_toggle[ch];
+                }
+                self.prev_lp[ch] = lp;
+
+                // Sub-octave: toggle × |lp| → signal at half the fundamental frequency
+                let sub_raw = self.sub_toggle[ch] * lp.abs();
+
+                // Smooth with a second LP pass (removes toggle-switching artefacts)
+                self.sub_lp[ch] += self.lp_coeff * (sub_raw - self.sub_lp[ch]);
+
+                samples[idx] =
+                    (shelf_out + self.intensity * 0.3 * self.sub_lp[ch]).clamp(-1.0, 1.0);
             }
         }
     }
 
     fn reset(&mut self) {
         self.lp_states.iter_mut().for_each(|s| *s = 0.0);
+        self.prev_lp.iter_mut().for_each(|s| *s = 0.0);
+        self.sub_toggle.iter_mut().for_each(|s| *s = 1.0);
+        self.sub_lp.iter_mut().for_each(|s| *s = 0.0);
         self.shelf_states.iter_mut().for_each(|s| s.reset());
     }
 

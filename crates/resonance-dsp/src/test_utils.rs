@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::filter::ApoFilter;
 use std::f64::consts::PI;
 
