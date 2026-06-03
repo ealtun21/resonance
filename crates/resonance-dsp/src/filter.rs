@@ -61,13 +61,12 @@ impl BiquadCoeffs {
         let w0 = 2.0 * PI * freq / sample_rate;
         let (sin_w0, cos_w0) = (w0.sin(), w0.cos());
         let alpha = sin_w0 / 2.0 * (a + 1.0 / a).sqrt();
-        let a1 = 2.0 * ((a - 1.0) * cos_w0);
         let sq = 2.0 * a.sqrt() * alpha;
         Ok(Self {
             b0: a * ((a + 1.0) - (a - 1.0) * cos_w0 + sq),
             b1: 2.0 * a * ((a - 1.0) - (a + 1.0) * cos_w0),
             b2: a * ((a + 1.0) - (a - 1.0) * cos_w0 - sq),
-            a1: -a1,
+            a1: -2.0 * ((a - 1.0) + (a + 1.0) * cos_w0),
             a2: (a + 1.0) + (a - 1.0) * cos_w0 - sq,
         }
         .normalize((a + 1.0) + (a - 1.0) * cos_w0 + sq))
@@ -79,13 +78,12 @@ impl BiquadCoeffs {
         let w0 = 2.0 * PI * freq / sample_rate;
         let (sin_w0, cos_w0) = (w0.sin(), w0.cos());
         let alpha = sin_w0 / 2.0 * (a + 1.0 / a).sqrt();
-        let a1 = -2.0 * ((a - 1.0) * cos_w0);
         let sq = 2.0 * a.sqrt() * alpha;
         Ok(Self {
             b0: a * ((a + 1.0) + (a - 1.0) * cos_w0 + sq),
             b1: -2.0 * a * ((a - 1.0) + (a + 1.0) * cos_w0),
             b2: a * ((a + 1.0) + (a - 1.0) * cos_w0 - sq),
-            a1,
+            a1: 2.0 * ((a - 1.0) - (a + 1.0) * cos_w0),
             a2: (a + 1.0) - (a - 1.0) * cos_w0 - sq,
         }
         .normalize((a + 1.0) - (a - 1.0) * cos_w0 + sq))
@@ -355,10 +353,28 @@ impl ApoFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::filter_gain_db;
+
+    const SR: f64 = 48000.0;
+
+    fn build(ft: FilterType, freq: f64, gain_db: f64, q: f64) -> ApoFilter {
+        ApoFilter::builder()
+            .filter_type(ft)
+            .freq(freq)
+            .gain_db(gain_db)
+            .q(q)
+            .enabled(true)
+            .channels(1)
+            .sample_rate(SR)
+            .build()
+            .unwrap()
+    }
+
+    // ── BiquadCoeffs direct ─────────────────────────────────────────────────
 
     #[test]
     fn peaking_unity_at_zero_gain() {
-        let c = BiquadCoeffs::peaking(1000.0, 0.0, 0.707, 48000.0).unwrap();
+        let c = BiquadCoeffs::peaking(1000.0, 0.0, 0.707, SR).unwrap();
         let mut state = BiquadState::default();
         let out = state.process(1.0, &c);
         assert!((out - 1.0).abs() < 1e-9, "unity gain failed: {out}");
@@ -366,12 +382,225 @@ mod tests {
 
     #[test]
     fn low_pass_passes_dc() {
-        let c = BiquadCoeffs::low_pass(10000.0, 0.707, 48000.0).unwrap();
+        let c = BiquadCoeffs::low_pass(10000.0, 0.707, SR).unwrap();
         let mut state = BiquadState::default();
         let mut last = 0.0;
-        for _ in 0..1000 {
+        for _ in 0..2000 {
             last = state.process(1.0, &c);
         }
         assert!((last - 1.0).abs() < 1e-6, "LP DC response: {last}");
+    }
+
+    // ── Peaking ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn peaking_boosts_at_fc() {
+        let mut f = build(FilterType::Peaking, 1000.0, 6.0, 1.0);
+        let g = filter_gain_db(&mut f, 1000.0, SR);
+        assert!((g - 6.0).abs() < 0.5, "peaking +6 dB at Fc: got {g:.2} dB");
+    }
+
+    #[test]
+    fn peaking_cuts_at_fc() {
+        let mut f = build(FilterType::Peaking, 1000.0, -6.0, 1.0);
+        let g = filter_gain_db(&mut f, 1000.0, SR);
+        assert!(
+            (g - (-6.0)).abs() < 0.5,
+            "peaking -6 dB at Fc: got {g:.2} dB"
+        );
+    }
+
+    #[test]
+    fn peaking_unity_far_from_fc() {
+        let mut f = build(FilterType::Peaking, 1000.0, 6.0, 1.0);
+        // 100 Hz is a full decade below Fc=1 kHz — well in the stopband
+        let g = filter_gain_db(&mut f, 100.0, SR);
+        assert!(
+            g.abs() < 1.0,
+            "peaking far-field: got {g:.2} dB (expected ~0)"
+        );
+    }
+
+    #[test]
+    fn peaking_large_boost_accurate() {
+        let mut f = build(FilterType::Peaking, 4000.0, 12.0, 0.5);
+        let g = filter_gain_db(&mut f, 4000.0, SR);
+        assert!(
+            (g - 12.0).abs() < 1.0,
+            "peaking +12 dB at Fc: got {g:.2} dB"
+        );
+    }
+
+    // ── Low Shelf ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn low_shelf_boosts_below_fc() {
+        let mut f = build(FilterType::LowShelf, 1000.0, 6.0, 0.707);
+        // 50 Hz is deep in the boosted region
+        let g = filter_gain_db(&mut f, 50.0, SR);
+        assert!(
+            g > 4.5,
+            "low shelf below Fc: got {g:.2} dB (expected > 4.5)"
+        );
+    }
+
+    #[test]
+    fn low_shelf_unity_above_fc() {
+        let mut f = build(FilterType::LowShelf, 500.0, 6.0, 0.707);
+        let g = filter_gain_db(&mut f, 10000.0, SR);
+        assert!(
+            g.abs() < 1.0,
+            "low shelf above Fc: got {g:.2} dB (expected ~0)"
+        );
+    }
+
+    #[test]
+    fn low_shelf_cuts_below_fc() {
+        let mut f = build(FilterType::LowShelf, 1000.0, -6.0, 0.707);
+        let g = filter_gain_db(&mut f, 50.0, SR);
+        assert!(
+            g < -4.5,
+            "low shelf cut below Fc: got {g:.2} dB (expected < -4.5)"
+        );
+    }
+
+    // ── High Shelf ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn high_shelf_boosts_above_fc() {
+        let mut f = build(FilterType::HighShelf, 5000.0, 6.0, 0.707);
+        let g = filter_gain_db(&mut f, 20000.0, SR);
+        assert!(
+            g > 4.5,
+            "high shelf above Fc: got {g:.2} dB (expected > 4.5)"
+        );
+    }
+
+    #[test]
+    fn high_shelf_unity_below_fc() {
+        let mut f = build(FilterType::HighShelf, 5000.0, 6.0, 0.707);
+        let g = filter_gain_db(&mut f, 100.0, SR);
+        assert!(
+            g.abs() < 1.0,
+            "high shelf below Fc: got {g:.2} dB (expected ~0)"
+        );
+    }
+
+    // ── Low Pass ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn low_pass_passes_low_freq() {
+        let mut f = build(FilterType::LowPassQ, 5000.0, 0.0, 0.707);
+        let g = filter_gain_db(&mut f, 100.0, SR);
+        assert!(g.abs() < 1.0, "LP passband: got {g:.2} dB (expected ~0)");
+    }
+
+    #[test]
+    fn low_pass_rejects_above_fc() {
+        let mut f = build(FilterType::LowPassQ, 1000.0, 0.0, 0.707);
+        let g = filter_gain_db(&mut f, 10000.0, SR);
+        assert!(g < -20.0, "LP stopband: got {g:.2} dB (expected < -20)");
+    }
+
+    #[test]
+    fn low_pass_3db_at_fc() {
+        let mut f = build(FilterType::LowPassQ, 1000.0, 0.0, 0.707);
+        let g = filter_gain_db(&mut f, 1000.0, SR);
+        assert!((g - (-3.01)).abs() < 0.5, "LP -3 dB at Fc: got {g:.2} dB");
+    }
+
+    // ── High Pass ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn high_pass_passes_high_freq() {
+        let mut f = build(FilterType::HighPassQ, 500.0, 0.0, 0.707);
+        let g = filter_gain_db(&mut f, 10000.0, SR);
+        assert!(g.abs() < 1.0, "HP passband: got {g:.2} dB (expected ~0)");
+    }
+
+    #[test]
+    fn high_pass_rejects_below_fc() {
+        let mut f = build(FilterType::HighPassQ, 1000.0, 0.0, 0.707);
+        let g = filter_gain_db(&mut f, 100.0, SR);
+        assert!(g < -20.0, "HP stopband: got {g:.2} dB (expected < -20)");
+    }
+
+    // ── Notch ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn notch_deep_null_at_fc() {
+        // Q=8 → narrow notch; at exactly Fc the response is theoretically -inf dB
+        let mut f = build(FilterType::Notch, 1000.0, 0.0, 8.0);
+        let g = filter_gain_db(&mut f, 1000.0, SR);
+        assert!(g < -40.0, "notch at Fc: got {g:.2} dB (expected < -40)");
+    }
+
+    #[test]
+    fn notch_unity_away_from_fc() {
+        let mut f = build(FilterType::Notch, 1000.0, 0.0, 8.0);
+        let g = filter_gain_db(&mut f, 100.0, SR);
+        assert!(
+            g.abs() < 1.0,
+            "notch far from Fc: got {g:.2} dB (expected ~0)"
+        );
+    }
+
+    // ── Band Pass ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn band_pass_passes_at_fc() {
+        let mut f = build(FilterType::BandPass, 1000.0, 0.0, 1.0);
+        let g = filter_gain_db(&mut f, 1000.0, SR);
+        // BP peak is near 0 dB by construction
+        assert!(g > -3.0, "BP at Fc: got {g:.2} dB (expected > -3)");
+    }
+
+    #[test]
+    fn band_pass_rejects_extremes() {
+        let mut f = build(FilterType::BandPass, 1000.0, 0.0, 1.0);
+        let g_lo = filter_gain_db(&mut f, 50.0, SR);
+        let mut f2 = build(FilterType::BandPass, 1000.0, 0.0, 1.0);
+        let g_hi = filter_gain_db(&mut f2, 20000.0, SR);
+        assert!(g_lo < -10.0, "BP lo reject: got {g_lo:.2} dB");
+        assert!(g_hi < -10.0, "BP hi reject: got {g_hi:.2} dB");
+    }
+
+    // ── All Pass ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn all_pass_unity_gain_everywhere() {
+        for freq in [100.0, 1000.0, 10000.0] {
+            let mut f = build(FilterType::AllPass, 1000.0, 0.0, 0.707);
+            let g = filter_gain_db(&mut f, freq, SR);
+            assert!(g.abs() < 0.1, "AP at {freq} Hz: got {g:.2} dB (expected 0)");
+        }
+    }
+
+    // ── Disabled ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn disabled_filter_passthrough() {
+        let mut f = build(FilterType::Peaking, 1000.0, 12.0, 1.0);
+        f.enabled = false;
+        let g = filter_gain_db(&mut f, 1000.0, SR);
+        assert!(
+            g.abs() < 0.01,
+            "disabled filter: got {g:.2} dB (expected 0)"
+        );
+    }
+
+    // ── Error cases ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn invalid_frequency_rejected() {
+        assert!(BiquadCoeffs::peaking(0.0, 0.0, 1.0, SR).is_err());
+        assert!(BiquadCoeffs::peaking(SR / 2.0, 0.0, 1.0, SR).is_err());
+        assert!(BiquadCoeffs::peaking(SR, 0.0, 1.0, SR).is_err());
+    }
+
+    #[test]
+    fn invalid_q_rejected() {
+        assert!(BiquadCoeffs::peaking(1000.0, 0.0, 0.0, SR).is_err());
+        assert!(BiquadCoeffs::peaking(1000.0, 0.0, -1.0, SR).is_err());
     }
 }

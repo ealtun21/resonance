@@ -35,6 +35,11 @@ crossterm = "0.28"
 
 # Audio / PipeWire
 pipewire = "0.9"
+spa = { version = "0.9", package = "libspa" }
+spa-sys = { version = "0.9", package = "libspa-sys" }
+
+# Real-time audio ring buffer (lock-free SPSC)
+rtrb = "0.3"
 
 # Error handling
 thiserror = "2"

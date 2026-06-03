@@ -61,25 +61,13 @@ impl From<ApoFilterType> for FilterType {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FxEffects {
     pub fidelity: EffectState,
     pub ambience: EffectState,
     pub surround: EffectState,
     pub dynamic_boost: EffectState,
     pub bass: EffectState,
-}
-
-impl Default for FxEffects {
-    fn default() -> Self {
-        Self {
-            fidelity: EffectState::default(),
-            ambience: EffectState::default(),
-            surround: EffectState::default(),
-            dynamic_boost: EffectState::default(),
-            bass: EffectState::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

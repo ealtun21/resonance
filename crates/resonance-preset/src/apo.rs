@@ -143,7 +143,7 @@ fn parse_graphic_eq(s: &str, ln: usize) -> Result<Vec<EqBand>, ApoError> {
     s.split(';')
         .filter(|p| !p.trim().is_empty())
         .map(|pair| {
-            let mut parts = pair.trim().split_whitespace();
+            let mut parts = pair.split_whitespace();
             let freq = parts
                 .next()
                 .ok_or_else(|| err(ln, "missing freq in GraphicEQ"))?

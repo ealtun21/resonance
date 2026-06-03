@@ -116,13 +116,7 @@ impl AmbienceEffect {
         }
     }
 
-    fn allpass_tick(
-        buf: &mut Vec<f64>,
-        idx: &mut usize,
-        delay: usize,
-        gain: f64,
-        input: f64,
-    ) -> f64 {
+    fn allpass_tick(buf: &mut [f64], idx: &mut usize, delay: usize, gain: f64, input: f64) -> f64 {
         let delayed = buf[*idx];
         let w = input + gain * delayed;
         buf[*idx] = w;
@@ -337,45 +331,40 @@ impl Effect for DynamicBoostEffect {
 pub struct BassBoostEffect {
     intensity: f64,
     enabled: bool,
-    // Single-pole LP to isolate fundamental for sub-octave synthesis
+    // Single-pole LP for sub-octave synthesis
     lp_states: Vec<f64>,
     lp_coeff: f64,
-    // Low-shelf via first-order shelving
-    shelf_states: Vec<f64>,
-    shelf_b0: f64,
-    shelf_b1: f64,
-    shelf_a1: f64,
+    // Proper biquad low-shelf (uses corrected Audio EQ Cookbook formula)
+    shelf_coeffs: crate::filter::BiquadCoeffs,
+    shelf_states: Vec<crate::filter::BiquadState>,
 }
 
 impl BassBoostEffect {
     pub fn new(channels: usize, sample_rate: f64) -> Self {
-        let fc = 200.0;
-        let rc = 1.0 / (2.0 * PI * fc);
+        let lp_fc = 200.0;
+        let rc = 1.0 / (2.0 * PI * lp_fc);
         let dt = 1.0 / sample_rate;
         let lp_coeff = dt / (rc + dt);
 
-        let shelf_fc = 120.0;
-        let shelf_gain_db = 6.0;
-        let a = 10f64.powf(shelf_gain_db / 40.0);
-        let w0 = 2.0 * PI * shelf_fc / sample_rate;
-        let cos_w0 = w0.cos();
-        let sin_w0 = w0.sin();
-        let alpha = sin_w0 / 2.0 * (a + 1.0 / a).sqrt();
-        let sq = 2.0 * a.sqrt() * alpha;
-        let a0 = (a + 1.0) + (a - 1.0) * cos_w0 + sq;
-        let shelf_b0 = a * ((a + 1.0) - (a - 1.0) * cos_w0 + sq) / a0;
-        let shelf_b1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cos_w0) / a0;
-        let shelf_a1 = -2.0 * ((a - 1.0) * cos_w0) / a0;
+        let shelf_coeffs = crate::filter::BiquadCoeffs::low_shelf(120.0, 6.0, sample_rate)
+            .unwrap_or(
+                // Fallback: identity (should never trigger for sane sample rates)
+                crate::filter::BiquadCoeffs {
+                    b0: 1.0,
+                    b1: 0.0,
+                    b2: 0.0,
+                    a1: 0.0,
+                    a2: 0.0,
+                },
+            );
 
         Self {
             intensity: 0.0,
             enabled: true,
             lp_states: vec![0.0; channels],
             lp_coeff,
-            shelf_states: vec![0.0; channels],
-            shelf_b0,
-            shelf_b1,
-            shelf_a1,
+            shelf_coeffs,
+            shelf_states: vec![crate::filter::BiquadState::default(); channels],
         }
     }
 }
@@ -393,12 +382,10 @@ impl Effect for BassBoostEffect {
                 let idx = frame * channels + ch;
                 let x = samples[idx];
 
-                // Low-shelf boost (always active when effect is on)
-                let shelf_out = self.shelf_b0 * x + self.shelf_b1 * self.shelf_states[ch]
-                    - self.shelf_a1 * self.shelf_states[ch];
-                self.shelf_states[ch] = x;
+                // Low-shelf boost via proper biquad
+                let shelf_out = self.shelf_states[ch].process(x, &self.shelf_coeffs);
 
-                // Sub-octave synthesis: LP + rectify + LP again
+                // Sub-octave synthesis: LP → tanh saturation
                 self.lp_states[ch] += self.lp_coeff * (x - self.lp_states[ch]);
                 let sub = (self.lp_states[ch] * 2.0).tanh() * self.lp_states[ch].signum();
 
@@ -409,7 +396,7 @@ impl Effect for BassBoostEffect {
 
     fn reset(&mut self) {
         self.lp_states.iter_mut().for_each(|s| *s = 0.0);
-        self.shelf_states.iter_mut().for_each(|s| *s = 0.0);
+        self.shelf_states.iter_mut().for_each(|s| s.reset());
     }
 
     fn set_intensity(&mut self, v: f64) {

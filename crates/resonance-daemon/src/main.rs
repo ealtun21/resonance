@@ -3,6 +3,8 @@ mod pw_node;
 mod state;
 
 use anyhow::Result;
+use resonance_dsp::chain::ProcessorChain;
+use rtrb::RingBuffer;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -14,13 +16,21 @@ async fn main() -> Result<()> {
 
     info!("resonanced starting");
 
-    let state = state::SharedState::new();
+    // Command channel: IPC thread → audio thread (capacity 256 commands)
+    let (cmd_tx, cmd_rx) = RingBuffer::<state::AudioCommand>::new(256);
 
-    // Start PipeWire filter node in a dedicated thread
-    let pw_handle = pw_node::spawn(state.clone())?;
+    let initial_chain = ProcessorChain::builder()
+        .channels(2)
+        .sample_rate(48000.0)
+        .build();
 
-    // Start IPC server
-    ipc_server::run(state).await?;
+    let shared = state::SharedState::new(cmd_tx);
+
+    // Start PipeWire filter node on a dedicated RT thread
+    let pw_handle = pw_node::spawn(cmd_rx, initial_chain)?;
+
+    // Start IPC server (blocks until shutdown)
+    ipc_server::run(shared).await?;
 
     pw_handle.join().ok();
 

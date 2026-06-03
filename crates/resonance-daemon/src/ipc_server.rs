@@ -1,4 +1,4 @@
-use crate::state::SharedState;
+use crate::state::{AudioCommand, SharedState};
 use anyhow::Result;
 use resonance_ipc::{Command, Response};
 use resonance_preset::{apo::parse_apo, fac::parse_fac};
@@ -8,7 +8,6 @@ use tracing::{error, info, warn};
 
 pub async fn run(state: SharedState) -> Result<()> {
     let sock_path = socket_path();
-    // Remove stale socket
     let _ = tokio::fs::remove_file(&sock_path).await;
 
     let listener = UnixListener::bind(&sock_path)?;
@@ -47,10 +46,6 @@ async fn handle_client(stream: UnixStream, state: SharedState) -> Result<()> {
             warn!("write error: {e}");
             break;
         }
-
-        if matches!(response, Response::Error(_)) {
-            // keep connection open for error responses
-        }
     }
     Ok(())
 }
@@ -60,50 +55,53 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
         Command::GetState => Response::State(state.snapshot()),
 
         Command::SetPower { enabled } => {
-            state.0.lock().unwrap().chain.enabled = enabled;
+            state.send(AudioCommand::SetPower(enabled), |chain| {
+                chain.enabled = enabled;
+            });
             Response::Ok
         }
 
         Command::SetPreamp { db } => {
-            state.0.lock().unwrap().chain.preamp_db = db;
+            state.send(AudioCommand::SetPreamp(db), |chain| {
+                chain.preamp_db = db;
+            });
             Response::Ok
         }
 
         Command::SetEffectIntensity { effect, value } => {
-            state
-                .0
-                .lock()
-                .unwrap()
-                .chain
-                .set_effect_intensity(effect.into(), value);
+            let fx: resonance_dsp::chain::FxEffect = effect.into();
+            state.send(
+                AudioCommand::SetEffectIntensity { effect: fx, value },
+                |chain| {
+                    chain.set_effect_intensity(fx, value);
+                },
+            );
             Response::Ok
         }
 
         Command::SetEffectEnabled { effect, enabled } => {
-            state
-                .0
-                .lock()
-                .unwrap()
-                .chain
-                .set_effect_enabled(effect.into(), enabled);
+            let fx: resonance_dsp::chain::FxEffect = effect.into();
+            state.send(
+                AudioCommand::SetEffectEnabled {
+                    effect: fx,
+                    on: enabled,
+                },
+                |chain| {
+                    chain.set_effect_enabled(fx, enabled);
+                },
+            );
             Response::Ok
         }
 
-        Command::LoadPreset { path } => {
-            let result = load_preset_from_path(&path, state);
-            match result {
-                Ok(_) => {
-                    state.0.lock().unwrap().current_preset = Some(path);
-                    Response::Ok
-                }
-                Err(e) => Response::Error(e),
+        Command::LoadPreset { path } => match load_preset(&path, state) {
+            Ok(_) => {
+                state.0.lock().unwrap().current_preset = Some(path);
+                Response::Ok
             }
-        }
+            Err(e) => Response::Error(e),
+        },
 
-        Command::ListPresets { dir } => {
-            let presets = list_presets(&dir);
-            Response::PresetList(presets)
-        }
+        Command::ListPresets { dir } => Response::PresetList(list_presets(&dir)),
 
         Command::Shutdown => {
             info!("shutdown requested");
@@ -114,7 +112,7 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
     }
 }
 
-fn load_preset_from_path(path: &str, state: &SharedState) -> Result<(), String> {
+fn load_preset(path: &str, state: &SharedState) -> Result<(), String> {
     let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let preset = if path.ends_with(".fac") {
         parse_fac(&content).map_err(|e| e.to_string())?
@@ -122,11 +120,12 @@ fn load_preset_from_path(path: &str, state: &SharedState) -> Result<(), String> 
         parse_apo(&content).map_err(|e| e.to_string())?
     };
 
-    let mut inner = state.0.lock().unwrap();
-    let sr = inner.chain.sample_rate;
-    let channels = inner.chain.channels;
+    let (sr, channels) = {
+        let inner = state.0.lock().unwrap();
+        (inner.chain.sample_rate, inner.chain.channels)
+    };
     let new_chain = preset.into_chain(channels, sr);
-    inner.chain = new_chain;
+    state.send(AudioCommand::ReplaceChain(Box::new(new_chain)), |_| {});
     Ok(())
 }
 
@@ -153,7 +152,6 @@ fn socket_path() -> PathBuf {
     PathBuf::from(runtime).join(resonance_ipc::DEFAULT_SOCKET_FILENAME)
 }
 
-// Async wrappers around the sync transport (runs in blocking task)
 async fn read_command_async(
     reader: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
 ) -> Result<Command> {

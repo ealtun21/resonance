@@ -16,6 +16,9 @@ resonance-dsp = { path = "../resonance-dsp" }
 resonance-preset = { path = "../resonance-preset" }
 resonance-ipc = { path = "../resonance-ipc" }
 pipewire = { workspace = true }
+spa = { workspace = true }
+spa-sys = { workspace = true }
+rtrb = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 postcard = { workspace = true }

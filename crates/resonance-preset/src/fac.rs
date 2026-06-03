@@ -45,10 +45,10 @@ pub fn parse_fac(content: &str) -> Result<Preset, FacError> {
     // Lines 6–11: Main 0–5 (Fidelity, Surround, unused, Ambience, DynamicBoost, BassBoost)
     let mut main = [0i32; 6];
     let mut ln = ln;
-    for i in 0..6 {
+    for slot in &mut main {
         let (next_ln, line) = next(ln)?;
         ln = next_ln;
-        main[i] = parse_prefixed_int(line, ln)?;
+        *slot = parse_prefixed_int(line, ln)?;
     }
 
     // Skip element block: "0: Element Number" + 7 params lines
@@ -76,10 +76,10 @@ pub fn parse_fac(content: &str) -> Result<Preset, FacError> {
 
     // Read app-depend integers (expect 7)
     let mut app_ints = [0i32; 7];
-    for i in 0..(num_ints as usize).min(7) {
+    for slot in app_ints.iter_mut().take((num_ints as usize).min(7)) {
         let (next_ln, line) = next(ln)?;
         ln = next_ln;
-        app_ints[i] = parse_prefixed_int(line, ln)?;
+        *slot = parse_prefixed_int(line, ln)?;
     }
 
     // EQ section
