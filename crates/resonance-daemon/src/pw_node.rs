@@ -94,8 +94,9 @@ fn run_loop(
         .connect(
             spa::utils::Direction::Input,
             None,
-            // AUTOCONNECT so WirePlumber links it; user can re-route in Helvum
-            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS | StreamFlags::RT_PROCESS,
+            // No AUTOCONNECT — prevents connecting to mic/default source.
+            // User routes apps to "Resonance EQ" manually in Helvum/pavucontrol.
+            StreamFlags::MAP_BUFFERS | StreamFlags::RT_PROCESS,
             &mut cap_param_pod,
         )
         .context("connect capture stream")?;
