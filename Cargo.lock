@@ -1034,6 +1034,7 @@ dependencies = [
  "libspa-sys",
  "notify",
  "pipewire",
+ "pipewire-sys",
  "postcard",
  "resonance-dsp",
  "resonance-ipc",
