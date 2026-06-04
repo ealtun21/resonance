@@ -3,6 +3,8 @@ use resonance_ipc::{BandState, DaemonState, EffectsState};
 use rtrb::Producer;
 use std::sync::{Arc, Mutex};
 
+const SPECTRUM_BINS: usize = 16;
+
 /// Commands sent from the IPC/tokio thread to the RT audio thread.
 #[derive(Debug)]
 pub enum AudioCommand {
@@ -22,11 +24,12 @@ pub enum AudioCommand {
 }
 
 pub struct Inner {
-    /// Shadow state for status queries (not used for audio processing).
     pub chain: ProcessorChain,
     pub current_preset: Option<String>,
-    /// Channel to send commands to the audio thread.
+    pub watched_preset: Option<String>,
     pub audio_tx: Producer<AudioCommand>,
+    /// Latest spectrum — updated by the spectrum task, read by IPC handler.
+    pub spectrum: [f32; SPECTRUM_BINS],
 }
 
 #[derive(Clone)]
@@ -41,16 +44,15 @@ impl SharedState {
         Self(Arc::new(Mutex::new(Inner {
             chain,
             current_preset: None,
+            watched_preset: None,
             audio_tx,
+            spectrum: [0.0; SPECTRUM_BINS],
         })))
     }
 
-    /// Send a command to the audio thread and update the shadow chain.
     pub fn send(&self, cmd: AudioCommand, shadow_update: impl FnOnce(&mut ProcessorChain)) {
         let mut inner = self.0.lock().unwrap();
         shadow_update(&mut inner.chain);
-        // Best-effort: if the ring buffer is full, the command is dropped.
-        // This can only happen if the audio thread is not running.
         let _ = inner.audio_tx.push(cmd);
     }
 
@@ -89,6 +91,13 @@ impl SharedState {
             current_preset: inner.current_preset.clone(),
             sample_rate: chain.sample_rate,
             channels: chain.channels,
+            spectrum: inner.spectrum.to_vec(),
+            watched_preset: inner.watched_preset.clone(),
         }
+    }
+
+    /// Update spectrum bins (called from the spectrum computation task).
+    pub fn update_spectrum(&self, bins: [f32; SPECTRUM_BINS]) {
+        self.0.lock().unwrap().spectrum = bins;
     }
 }

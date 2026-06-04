@@ -31,6 +31,10 @@ pub enum Command {
     GetState,
     /// List available presets in a directory
     ListPresets { dir: String },
+    /// Watch a preset file — daemon reloads it automatically on change
+    WatchPreset { path: String },
+    /// Stop watching a preset file
+    UnwatchPreset { path: String },
     /// Subscribe to state-change events (TUI stream)
     Subscribe,
     /// Stop the daemon
@@ -79,6 +83,10 @@ pub struct DaemonState {
     pub current_preset: Option<String>,
     pub sample_rate: f64,
     pub channels: usize,
+    /// 16 spectrum bins (20 Hz–20 kHz, log-spaced), values 0.0–1.0 peak-normalised
+    pub spectrum: Vec<f32>,
+    /// Currently watched preset path (if any)
+    pub watched_preset: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

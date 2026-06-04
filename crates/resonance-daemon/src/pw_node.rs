@@ -8,27 +8,35 @@ use spa::pod::{Object, Pod, Value};
 use std::thread::{self, JoinHandle};
 use tracing::info;
 
-const CHANNELS: usize = 2;
-const SAMPLE_RATE: u32 = 48000;
+pub const CHANNELS: usize = 2;
+pub const SAMPLE_RATE: u32 = 48000;
 const RING_FRAMES: usize = 16384; // ~340 ms headroom
+pub const SPECTRUM_BUF: usize = 8192; // ring buffer for spectrum computation
 
-/// Spawn the PipeWire filter node on a dedicated thread.
-/// Returns a handle and a command channel producer for sending parameter updates.
+/// Spawn the PipeWire node on a dedicated thread.
+/// Returns a JoinHandle and two ring-buffer producers:
+///   - `cmd_rx`: audio thread receives commands from IPC thread
+///   - `spectrum_rx`: spectrum task drains processed samples
 pub fn spawn(
     cmd_rx: rtrb::Consumer<AudioCommand>,
+    spectrum_tx: rtrb::Producer<f32>,
     initial_chain: ProcessorChain,
 ) -> Result<JoinHandle<()>> {
     let handle = thread::Builder::new()
         .name("resonance-pw".into())
         .spawn(move || {
-            if let Err(e) = run_loop(cmd_rx, initial_chain) {
+            if let Err(e) = run_loop(cmd_rx, spectrum_tx, initial_chain) {
                 tracing::error!("PipeWire thread error: {e:#}");
             }
         })?;
     Ok(handle)
 }
 
-fn run_loop(mut cmd_rx: rtrb::Consumer<AudioCommand>, mut chain: ProcessorChain) -> Result<()> {
+fn run_loop(
+    mut cmd_rx: rtrb::Consumer<AudioCommand>,
+    mut spectrum_tx: rtrb::Producer<f32>,
+    mut chain: ProcessorChain,
+) -> Result<()> {
     pw::init();
 
     let mainloop = pw::main_loop::MainLoopBox::new(None).context("create PW mainloop")?;
@@ -38,20 +46,19 @@ fn run_loop(mut cmd_rx: rtrb::Consumer<AudioCommand>, mut chain: ProcessorChain)
         .connect(None)
         .context("connect to PipeWire daemon")?;
 
-    // Ring buffer: capture stream → output stream (audio samples, interleaved f32)
     let (mut audio_tx, mut audio_rx) = RingBuffer::<f32>::new(RING_FRAMES * CHANNELS);
 
-    // ── Capture stream (virtual sink — reads audio FROM the running apps) ────
-
+    // ── Capture stream ─────────────────────────────────────────────────────
+    // Appears as "Resonance EQ" in sound settings — applications can route to it.
     let capture = pw::stream::StreamBox::new(
         &core,
-        "resonance-capture",
+        "Resonance EQ",
         pw::properties::properties! {
             *pw::keys::MEDIA_TYPE => "Audio",
-            *pw::keys::MEDIA_CATEGORY => "Capture",
-            *pw::keys::MEDIA_ROLE => "DSP",
-            *pw::keys::NODE_NAME => "resonance-capture",
-            *pw::keys::NODE_DESCRIPTION => "Resonance EQ capture",
+            *pw::keys::MEDIA_CLASS => "Audio/Sink",
+            *pw::keys::NODE_NAME => "resonance",
+            *pw::keys::NODE_DESCRIPTION => "Resonance EQ",
+            *pw::keys::NODE_GROUP => "resonance-filter",
         },
     )
     .context("create capture stream")?;
@@ -70,7 +77,6 @@ fn run_loop(mut cmd_rx: rtrb::Consumer<AudioCommand>, mut chain: ProcessorChain)
                 return;
             };
             let samples = cast_u8_to_f32(data);
-            // Push into ring buffer; if full, drop (prefer no-alloc over blocking)
             let to_write = samples.len().min(audio_tx.slots());
             for &s in samples.iter().take(to_write) {
                 let _ = audio_tx.push(s);
@@ -83,22 +89,22 @@ fn run_loop(mut cmd_rx: rtrb::Consumer<AudioCommand>, mut chain: ProcessorChain)
         .connect(
             spa::utils::Direction::Input,
             None,
-            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS | StreamFlags::RT_PROCESS,
+            StreamFlags::MAP_BUFFERS | StreamFlags::RT_PROCESS,
             &mut cap_param_pod,
         )
         .context("connect capture stream")?;
 
-    // ── Playback stream (writes processed audio TO the real output device) ───
-
+    // ── Playback stream ────────────────────────────────────────────────────
+    // Outputs processed audio; WirePlumber routes this to the default sink.
     let playback = pw::stream::StreamBox::new(
         &core,
-        "resonance-playback",
+        "Resonance EQ Output",
         pw::properties::properties! {
             *pw::keys::MEDIA_TYPE => "Audio",
-            *pw::keys::MEDIA_CATEGORY => "Playback",
-            *pw::keys::MEDIA_ROLE => "DSP",
-            *pw::keys::NODE_NAME => "resonance-playback",
-            *pw::keys::NODE_DESCRIPTION => "Resonance EQ playback",
+            *pw::keys::MEDIA_CLASS => "Audio/Source/Virtual",
+            *pw::keys::NODE_NAME => "resonance-out",
+            *pw::keys::NODE_DESCRIPTION => "Resonance EQ Output",
+            *pw::keys::NODE_GROUP => "resonance-filter",
         },
     )
     .context("create playback stream")?;
@@ -109,7 +115,6 @@ fn run_loop(mut cmd_rx: rtrb::Consumer<AudioCommand>, mut chain: ProcessorChain)
     let _play_listener = playback
         .add_local_listener_with_user_data(())
         .process(move |stream, _| {
-            // Drain any pending parameter commands
             while let Ok(cmd) = cmd_rx.pop() {
                 apply_command(&mut chain, cmd);
             }
@@ -141,13 +146,21 @@ fn run_loop(mut cmd_rx: rtrb::Consumer<AudioCommand>, mut chain: ProcessorChain)
                     chain.process(&mut f64_buf);
                 }
 
-                // Write f64 → f32 → output buffer (slice is &mut [u8])
                 let out_f32 = cast_u8_to_f32_mut(slice);
                 for (dst, &src) in out_f32.iter_mut().zip(f64_buf.iter()) {
                     *dst = src as f32;
                 }
+
+                // Feed spectrum ring buffer (post-DSP, mono mix)
+                let spec_slots = spectrum_tx.slots();
+                let spec_frames = (n_frames / 2).min(spec_slots);
+                for i in 0..spec_frames {
+                    let l = f64_buf[i * CHANNELS] as f32;
+                    let r = f64_buf[i * CHANNELS + 1] as f32;
+                    let _ = spectrum_tx.push((l + r) * 0.5);
+                }
+
                 n_frames
-                // slice borrow ends here, freeing `data` for chunk_mut below
             };
 
             let chunk = data.chunk_mut();
@@ -168,7 +181,7 @@ fn run_loop(mut cmd_rx: rtrb::Consumer<AudioCommand>, mut chain: ProcessorChain)
         .context("connect playback stream")?;
 
     info!(
-        "PipeWire streams connected ({}ch @ {} Hz)",
+        "PipeWire streams ready ({}ch @ {} Hz)  —  set app output to 'Resonance EQ'",
         CHANNELS, SAMPLE_RATE
     );
 
@@ -214,14 +227,12 @@ fn build_f32_params(rate: u32, channels: u32) -> Vec<u8> {
     .into_inner()
 }
 
-/// Reinterpret a `&[u8]` as `&[f32]` (F32LE, aligned).
 fn cast_u8_to_f32(data: &[u8]) -> &[f32] {
     let len = data.len() / 4;
     let ptr = data.as_ptr() as *const f32;
     unsafe { std::slice::from_raw_parts(ptr, len) }
 }
 
-/// Reinterpret a `&mut [u8]` as `&mut [f32]` (F32LE, aligned).
 fn cast_u8_to_f32_mut(data: &mut [u8]) -> &mut [f32] {
     let len = data.len() / 4;
     let ptr = data.as_mut_ptr() as *mut f32;

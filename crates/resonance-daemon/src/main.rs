@@ -1,6 +1,8 @@
 mod ipc_server;
 mod pw_node;
+mod spectrum;
 mod state;
+mod watcher;
 
 use anyhow::Result;
 use resonance_dsp::chain::ProcessorChain;
@@ -16,8 +18,8 @@ async fn main() -> Result<()> {
 
     info!("resonanced starting");
 
-    // Command channel: IPC thread → audio thread (capacity 256 commands)
     let (cmd_tx, cmd_rx) = RingBuffer::<state::AudioCommand>::new(256);
+    let (spectrum_tx, spectrum_rx) = RingBuffer::<f32>::new(pw_node::SPECTRUM_BUF);
 
     let initial_chain = ProcessorChain::builder()
         .channels(2)
@@ -26,10 +28,22 @@ async fn main() -> Result<()> {
 
     let shared = state::SharedState::new(cmd_tx);
 
-    // Start PipeWire filter node on a dedicated RT thread
-    let pw_handle = pw_node::spawn(cmd_rx, initial_chain)?;
+    // Spectrum computation task
+    let spectrum_state = shared.clone();
+    tokio::spawn(async move {
+        spectrum::run(spectrum_rx, spectrum_state).await;
+    });
 
-    // Start IPC server (blocks until shutdown)
+    // File watcher task (watches presets for auto-reload)
+    let watcher_state = shared.clone();
+    tokio::spawn(async move {
+        watcher::run(watcher_state).await;
+    });
+
+    // PipeWire filter node on dedicated RT thread
+    let pw_handle = pw_node::spawn(cmd_rx, spectrum_tx, initial_chain)?;
+
+    // IPC server (blocks until shutdown)
     ipc_server::run(shared).await?;
 
     pw_handle.join().ok();

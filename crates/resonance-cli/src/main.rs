@@ -1,83 +1,168 @@
 use anyhow::{Result, bail};
-use resonance_ipc::{Command, FxEffectId, Response};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{Shell, generate};
+use resonance_ipc::{
+    Command, FxEffectId, Response,
+    transport::{read_response, write_command},
+};
 use std::{
     env,
-    io::{BufReader, BufWriter},
+    io::{self, BufReader, BufWriter, Write},
     os::unix::net::UnixStream,
     path::PathBuf,
 };
 
-fn main() -> Result<()> {
-    let args: Vec<String> = env::args().skip(1).collect();
-    let cmd = parse_args(&args)?;
+#[derive(Parser)]
+#[command(name = "resonance", about = "Control the Resonance EQ daemon", version)]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Option<Sub>,
+}
 
-    let sock = socket_path();
-    let stream = UnixStream::connect(&sock)
-        .map_err(|e| anyhow::anyhow!("cannot connect to daemon at {}: {e}", sock.display()))?;
+#[derive(Subcommand)]
+enum Sub {
+    /// Show daemon status (default when no subcommand given)
+    Status,
+    /// Load a preset file (.fac or APO .txt)
+    Load {
+        /// Path to preset file
+        path: String,
+    },
+    /// List preset files in a directory
+    List {
+        /// Directory to scan
+        dir: String,
+    },
+    /// Set an FxSound effect intensity (0–100)
+    Set {
+        /// Effect name: fidelity / ambience / surround / dynamic_boost / bass
+        effect: String,
+        /// Intensity 0–100
+        value: u8,
+    },
+    /// Toggle or set daemon power
+    Power {
+        /// on | off
+        state: String,
+    },
+    /// Set preamp gain in dB
+    Preamp {
+        /// Gain in dB (e.g. -3.5)
+        db: f64,
+    },
+    /// Watch a preset file and auto-reload on change
+    Watch {
+        /// Path to preset file
+        path: String,
+    },
+    /// Stop watching the current preset file
+    Unwatch {
+        /// Path to stop watching
+        path: String,
+    },
+    /// Send a raw shutdown signal to the daemon
+    Shutdown,
+    /// Print shell completions
+    Completions {
+        /// Shell: bash | zsh | fish | elvish | powershell
+        shell: Shell,
+    },
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    let sub = cli.cmd.unwrap_or(Sub::Status);
+
+    // Handle completions without connecting to daemon
+    if let Sub::Completions { shell } = sub {
+        let mut cmd = Cli::command();
+        let bin = cmd.get_name().to_string();
+        generate(shell, &mut cmd, bin, &mut io::stdout());
+        return Ok(());
+    }
+
+    let cmd = to_ipc_command(sub)?;
+    let response = send(cmd)?;
+    print_response(response)
+}
+
+fn to_ipc_command(sub: Sub) -> Result<Command> {
+    match sub {
+        Sub::Status => Ok(Command::GetState),
+        Sub::Load { path } => Ok(Command::LoadPreset { path }),
+        Sub::List { dir } => Ok(Command::ListPresets { dir }),
+        Sub::Power { state } => Ok(Command::SetPower {
+            enabled: parse_bool(&state)?,
+        }),
+        Sub::Preamp { db } => Ok(Command::SetPreamp { db }),
+        Sub::Set { effect, value } => Ok(Command::SetEffectIntensity {
+            effect: parse_effect(&effect)?,
+            value: value.min(100) as f64 / 100.0,
+        }),
+        Sub::Watch { path } => Ok(Command::WatchPreset { path }),
+        Sub::Unwatch { path } => Ok(Command::UnwatchPreset { path }),
+        Sub::Shutdown => Ok(Command::Shutdown),
+        Sub::Completions { .. } => unreachable!(),
+    }
+}
+
+fn send(cmd: Command) -> Result<Response> {
+    let path = socket_path();
+    let stream = UnixStream::connect(&path)
+        .map_err(|e| anyhow::anyhow!("cannot connect to daemon at {}: {e}", path.display()))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = BufWriter::new(stream);
 
-    resonance_ipc::transport::write_command(&mut writer, &cmd)?;
-    let resp = resonance_ipc::transport::read_response(&mut reader)?;
+    write_command(&mut writer, &cmd)?;
+    writer.flush()?;
+    Ok(read_response(&mut reader)?)
+}
 
+fn print_response(resp: Response) -> Result<()> {
     match resp {
         Response::Ok => {}
         Response::State(s) => {
-            println!("power: {}", if s.enabled { "on" } else { "off" });
-            println!("preamp: {:.1} dB", s.preamp_db);
-            println!("preset: {}", s.current_preset.as_deref().unwrap_or("none"));
-            println!("sample_rate: {}", s.sample_rate);
+            let power = if s.enabled { "on" } else { "off" };
+            let preset = s.current_preset.as_deref().unwrap_or("none");
+            let watched = s.watched_preset.as_deref().unwrap_or("-");
+            println!("power:       {power}");
+            println!("preset:      {preset}");
+            println!("watching:    {watched}");
+            println!("preamp:      {:+.1} dB", s.preamp_db);
+            println!("sample_rate: {:.0} Hz  {}ch", s.sample_rate, s.channels);
+            println!();
             println!("effects:");
-            println!(
-                "  fidelity:      {:.0}%  ({})",
-                s.effects.fidelity_intensity * 100.0,
-                if s.effects.fidelity_enabled {
-                    "on"
-                } else {
-                    "off"
-                }
-            );
-            println!(
-                "  ambience:      {:.0}%  ({})",
-                s.effects.ambience_intensity * 100.0,
-                if s.effects.ambience_enabled {
-                    "on"
-                } else {
-                    "off"
-                }
-            );
-            println!(
-                "  surround:      {:.0}%  ({})",
-                s.effects.surround_intensity * 100.0,
-                if s.effects.surround_enabled {
-                    "on"
-                } else {
-                    "off"
-                }
-            );
-            println!(
-                "  dynamic_boost: {:.0}%  ({})",
-                s.effects.dynamic_boost_intensity * 100.0,
-                if s.effects.dynamic_boost_enabled {
-                    "on"
-                } else {
-                    "off"
-                }
-            );
-            println!(
-                "  bass:          {:.0}%  ({})",
-                s.effects.bass_intensity * 100.0,
-                if s.effects.bass_enabled { "on" } else { "off" }
-            );
-            println!("bands ({}):", s.bands.len());
-            for (i, b) in s.bands.iter().enumerate() {
+            let e = &s.effects;
+            let row = |name: &str, int: f64, on: bool| {
                 println!(
-                    "  [{i}] {:.1} Hz  {:+.1} dB  Q={:.3}  {}",
-                    b.freq,
-                    b.gain_db,
-                    b.q,
-                    if b.enabled { "on" } else { "off" }
+                    "  {name:<14} {:3.0}%  {}",
+                    int * 100.0,
+                    if on { "on" } else { "off" }
                 );
+            };
+            row("fidelity", e.fidelity_intensity, e.fidelity_enabled);
+            row("ambience", e.ambience_intensity, e.ambience_enabled);
+            row("surround", e.surround_intensity, e.surround_enabled);
+            row(
+                "dynamic_boost",
+                e.dynamic_boost_intensity,
+                e.dynamic_boost_enabled,
+            );
+            row("bass", e.bass_intensity, e.bass_enabled);
+            if !s.bands.is_empty() {
+                println!();
+                println!("bands ({}):", s.bands.len());
+                for (i, b) in s.bands.iter().enumerate() {
+                    println!(
+                        "  [{:2}] {:8.1} Hz  {:+.1} dB  Q={:.3}  {}",
+                        i + 1,
+                        b.freq,
+                        b.gain_db,
+                        b.q,
+                        if b.enabled { "on" } else { "off" }
+                    );
+                }
             }
         }
         Response::PresetList(list) => {
@@ -91,32 +176,10 @@ fn main() -> Result<()> {
         }
         Response::StateChanged(_) => {}
     }
-
     Ok(())
 }
 
-fn parse_args(args: &[String]) -> Result<Command> {
-    match args {
-        [] => Ok(Command::GetState),
-        [sub] if sub == "status" => Ok(Command::GetState),
-        [sub] if sub == "shutdown" => Ok(Command::Shutdown),
-        [sub, path] if sub == "load" => Ok(Command::LoadPreset { path: path.clone() }),
-        [sub, dir] if sub == "list" => Ok(Command::ListPresets { dir: dir.clone() }),
-        [sub, val] if sub == "power" => Ok(Command::SetPower {
-            enabled: parse_bool(val)?,
-        }),
-        [sub, val] if sub == "preamp" => Ok(Command::SetPreamp {
-            db: val.parse::<f64>()?,
-        }),
-        [sub, effect, val] if sub == "set" => Ok(Command::SetEffectIntensity {
-            effect: parse_effect(effect)?,
-            value: val.parse::<f64>()? / 100.0,
-        }),
-        _ => bail!(
-            "usage: resonance [status|load <path>|list <dir>|power on|off|preamp <db>|set <effect> <0-100>|shutdown]"
-        ),
-    }
-}
+// ── Helpers ────────────────────────────────────────────────────────────────
 
 fn parse_bool(s: &str) -> Result<bool> {
     match s {

@@ -49,6 +49,13 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# CLI
+clap = { version = "4", features = ["derive", "string"] }
+clap_complete = "4"
+
+# File watching
+notify = "6"
+
 # Test utilities (dev only)
 approx = "0.5"
 

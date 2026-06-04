@@ -103,6 +103,16 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
 
         Command::ListPresets { dir } => Response::PresetList(list_presets(&dir)),
 
+        Command::WatchPreset { path } => {
+            state.0.lock().unwrap().watched_preset = Some(path);
+            Response::Ok
+        }
+
+        Command::UnwatchPreset { .. } => {
+            state.0.lock().unwrap().watched_preset = None;
+            Response::Ok
+        }
+
         Command::Shutdown => {
             info!("shutdown requested");
             std::process::exit(0);

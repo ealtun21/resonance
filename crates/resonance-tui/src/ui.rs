@@ -9,8 +9,8 @@ use ratatui::{
     symbols,
     text::{Line, Span},
     widgets::{
-        Axis, Block, Borders, Chart, Clear, Dataset, Gauge, GraphType, Paragraph, Row, Table,
-        TableState,
+        Axis, Bar, BarChart, BarGroup, Block, Borders, Chart, Clear, Dataset, Gauge, GraphType,
+        Paragraph, Row, Table, TableState,
     },
 };
 
@@ -20,6 +20,7 @@ pub fn render(app: &App, frame: &mut Frame) {
     let outer = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(10),
+        Constraint::Length(5), // spectrum
         Constraint::Length(7),
         Constraint::Length(12),
     ])
@@ -27,8 +28,9 @@ pub fn render(app: &App, frame: &mut Frame) {
 
     render_status(app, frame, outer[0]);
     render_eq_curve(app, frame, outer[1]);
-    render_effects(app, frame, outer[2]);
-    render_bands(app, frame, outer[3]);
+    render_spectrum(app, frame, outer[2]);
+    render_effects(app, frame, outer[3]);
+    render_bands(app, frame, outer[4]);
 
     if let InputMode::LoadPreset { input } = &app.mode {
         render_load_dialog(input, frame, frame.area());
@@ -68,6 +70,19 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         })
         .unwrap_or_default();
 
+    let watch_str = app
+        .state
+        .as_ref()
+        .and_then(|s| s.watched_preset.as_deref())
+        .map(|p| {
+            let name = std::path::Path::new(p)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(p);
+            format!("  👁 {name}")
+        })
+        .unwrap_or_default();
+
     let status_color = if app.status.is_empty() {
         Color::DarkGray
     } else {
@@ -90,6 +105,7 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         Span::styled(sr, Style::default().fg(Color::DarkGray)),
         Span::raw("  "),
         Span::styled(preamp, Style::default().fg(Color::DarkGray)),
+        Span::styled(watch_str, Style::default().fg(Color::Cyan)),
         Span::styled(status_str, Style::default().fg(status_color)),
         Span::raw("  "),
         Span::styled(
@@ -175,6 +191,61 @@ fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
 
     frame.render_widget(chart, inner);
     let _ = sr;
+}
+
+// ── Spectrum analyzer ────────────────────────────────────────────────────
+
+const BAND_LABELS: [&str; 16] = [
+    "25", "40", "63", "100", "160", "250", "400", "630", "1k", "1.6k", "2.5k", "4k", "6.3k", "10k",
+    "16k", "20k",
+];
+
+fn render_spectrum(app: &App, frame: &mut Frame, area: Rect) {
+    let block = Block::default()
+        .title(" Spectrum ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let bins = app
+        .state
+        .as_ref()
+        .map(|s| s.spectrum.clone())
+        .unwrap_or_default();
+
+    if bins.is_empty() {
+        return;
+    }
+
+    let max_bar = inner.height.saturating_sub(1) as u64;
+    let bar_width = (inner.width / bins.len() as u16).max(1);
+
+    let bar_objs: Vec<Bar> = bins
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let label = BAND_LABELS.get(i).copied().unwrap_or("");
+            let height = (v * max_bar as f32).round() as u64;
+            Bar::default()
+                .label(label.into())
+                .value(height)
+                .style(Style::default().fg(Color::Green))
+                .text_value(String::new())
+        })
+        .collect();
+
+    let group = BarGroup::default().bars(&bar_objs);
+
+    let chart = BarChart::default()
+        .bar_width(bar_width)
+        .bar_gap(0)
+        .label_style(Style::default().fg(Color::DarkGray))
+        .data(group)
+        .max(max_bar);
+
+    frame.render_widget(chart, inner);
 }
 
 // ── FxSound effects panel ─────────────────────────────────────────────────
