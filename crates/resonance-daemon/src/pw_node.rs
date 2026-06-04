@@ -10,13 +10,16 @@ use tracing::info;
 
 pub const CHANNELS: usize = 2;
 pub const SAMPLE_RATE: u32 = 48000;
-const RING_FRAMES: usize = 16384; // ~340 ms headroom
-pub const SPECTRUM_BUF: usize = 8192; // ring buffer for spectrum computation
+const RING_FRAMES: usize = 16384; // ~340 ms audio ring buffer
+pub const SPECTRUM_BUF: usize = 8192;
 
-/// Spawn the PipeWire node on a dedicated thread.
-/// Returns a JoinHandle and two ring-buffer producers:
-///   - `cmd_rx`: audio thread receives commands from IPC thread
-///   - `spectrum_rx`: spectrum task drains processed samples
+/// Spawn the PipeWire node thread.
+///
+/// Audio routing:
+///   Capture stream  ← apps route audio TO "Resonance EQ" in Helvum / pavucontrol
+///   Playback stream → auto-connects to default output device
+///
+/// No monitor passthrough — all audio goes through the DSP chain.
 pub fn spawn(
     cmd_rx: rtrb::Consumer<AudioCommand>,
     spectrum_tx: rtrb::Producer<f32>,
@@ -48,17 +51,19 @@ fn run_loop(
 
     let (mut audio_tx, mut audio_rx) = RingBuffer::<f32>::new(RING_FRAMES * CHANNELS);
 
-    // ── Capture stream ─────────────────────────────────────────────────────
-    // Appears as "Resonance EQ" in sound settings — applications can route to it.
+    // ── Capture stream (INPUT — reads audio FROM apps) ──────────────────────
+    // Appears in Helvum as "Resonance EQ" with input ports (left side).
+    // Route any app's output to it. No monitor passthrough.
     let capture = pw::stream::StreamBox::new(
         &core,
         "Resonance EQ",
         pw::properties::properties! {
             *pw::keys::MEDIA_TYPE => "Audio",
-            *pw::keys::MEDIA_CLASS => "Audio/Sink",
+            *pw::keys::MEDIA_CATEGORY => "Capture",
+            *pw::keys::MEDIA_ROLE => "DSP",
             *pw::keys::NODE_NAME => "resonance",
             *pw::keys::NODE_DESCRIPTION => "Resonance EQ",
-            *pw::keys::NODE_GROUP => "resonance-filter",
+            *pw::keys::NODE_VIRTUAL => "true",
         },
     )
     .context("create capture stream")?;
@@ -89,22 +94,25 @@ fn run_loop(
         .connect(
             spa::utils::Direction::Input,
             None,
-            StreamFlags::MAP_BUFFERS | StreamFlags::RT_PROCESS,
+            // AUTOCONNECT so WirePlumber links it; user can re-route in Helvum
+            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS | StreamFlags::RT_PROCESS,
             &mut cap_param_pod,
         )
         .context("connect capture stream")?;
 
-    // ── Playback stream ────────────────────────────────────────────────────
-    // Outputs processed audio; WirePlumber routes this to the default sink.
+    // ── Playback stream (OUTPUT — writes processed audio TO the device) ─────
+    // AUTOCONNECT → WirePlumber routes this to the default output device.
+    // In Helvum this appears with output ports (right side) → D1 DAC.
     let playback = pw::stream::StreamBox::new(
         &core,
         "Resonance EQ Output",
         pw::properties::properties! {
             *pw::keys::MEDIA_TYPE => "Audio",
-            *pw::keys::MEDIA_CLASS => "Audio/Source/Virtual",
+            *pw::keys::MEDIA_CATEGORY => "Playback",
+            *pw::keys::MEDIA_ROLE => "DSP",
             *pw::keys::NODE_NAME => "resonance-out",
             *pw::keys::NODE_DESCRIPTION => "Resonance EQ Output",
-            *pw::keys::NODE_GROUP => "resonance-filter",
+            *pw::keys::NODE_VIRTUAL => "true",
         },
     )
     .context("create playback stream")?;
@@ -115,6 +123,7 @@ fn run_loop(
     let _play_listener = playback
         .add_local_listener_with_user_data(())
         .process(move |stream, _| {
+            // Drain pending DSP parameter commands from the IPC thread
             while let Ok(cmd) = cmd_rx.pop() {
                 apply_command(&mut chain, cmd);
             }
@@ -132,29 +141,31 @@ fn run_loop(
                 let n_f32 = slice.len() / 4;
                 let n_frames = n_f32 / CHANNELS;
 
+                // Drain audio ring buffer into f64 workspace
                 let available = audio_rx.slots();
                 let readable = available.min(n_f32);
                 let mut f64_buf = vec![0.0f64; n_f32];
-
                 for dst in f64_buf[..readable].iter_mut() {
                     if let Ok(s) = audio_rx.pop() {
                         *dst = s as f64;
                     }
                 }
 
+                // Run DSP chain
                 if chain.enabled {
                     chain.process(&mut f64_buf);
                 }
 
+                // Write processed audio back to PipeWire buffer
                 let out_f32 = cast_u8_to_f32_mut(slice);
                 for (dst, &src) in out_f32.iter_mut().zip(f64_buf.iter()) {
                     *dst = src as f32;
                 }
 
-                // Feed spectrum ring buffer (post-DSP, mono mix)
+                // Feed spectrum ring buffer: post-DSP mono mix, one sample per frame
                 let spec_slots = spectrum_tx.slots();
-                let spec_frames = (n_frames / 2).min(spec_slots);
-                for i in 0..spec_frames {
+                let spec_n = n_frames.min(spec_slots);
+                for i in 0..spec_n {
                     let l = f64_buf[i * CHANNELS] as f32;
                     let r = f64_buf[i * CHANNELS + 1] as f32;
                     let _ = spectrum_tx.push((l + r) * 0.5);
@@ -181,7 +192,7 @@ fn run_loop(
         .context("connect playback stream")?;
 
     info!(
-        "PipeWire streams ready ({}ch @ {} Hz)  —  set app output to 'Resonance EQ'",
+        "PipeWire ready: {}ch @ {} Hz  —  route app audio to 'Resonance EQ' in Helvum/pavucontrol",
         CHANNELS, SAMPLE_RATE
     );
 
