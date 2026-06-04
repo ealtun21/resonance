@@ -22,12 +22,14 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libpipewire-0.3-dev \
             libspa-0.2-dev \
-            pkg-config
+            pkg-config \
+            musl-tools
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: x86_64-unknown-linux-musl
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -43,3 +45,12 @@ jobs:
 
       - name: Test
         run: cargo test --all
+
+      - name: Build musl (pure-Rust crates)
+        run: |
+          cargo build --release --target x86_64-unknown-linux-musl \
+            -p resonance-dsp \
+            -p resonance-preset \
+            -p resonance-ipc \
+            -p resonance-cli \
+            -p resonance-tui
