@@ -19,7 +19,7 @@ use std::{
     os::raw::c_void,
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tracing::info;
 
@@ -94,6 +94,7 @@ unsafe impl Send for FilterData {}
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn(
     cmd_rx: rtrb::Consumer<AudioCommand>,
     spectrum_tx: rtrb::Producer<f32>,
@@ -103,51 +104,107 @@ pub fn spawn(
     sinks_tx: tokio::sync::mpsc::UnboundedSender<Vec<String>>,
     meters: Arc<AtomicMeters>,
 ) -> Result<JoinHandle<()>> {
+    // FilterData and GraphState persist across reconnects — the audio chain (EQ
+    // state) and the daemon-facing channels must survive a PipeWire restart,
+    // since they're paired with producers/receivers the daemon already holds.
+    let mut fd = Box::new(FilterData {
+        in_ports: [std::ptr::null_mut(); 2],
+        out_ports: [std::ptr::null_mut(); 2],
+        chain: initial_chain,
+        cmd_rx,
+        spectrum_tx,
+        scratch: vec![0.0; MAX_QUANTUM * CHANNELS],
+        meters,
+    });
+    let gs = Arc::new(Mutex::new(GraphState {
+        raw_core: 0,
+        sink_node_id: u32::MAX,
+        filter_node_id: u32::MAX,
+        nodes: HashMap::new(),
+        ports: HashMap::new(),
+        out_links: Vec::new(),
+        monitor_links: Vec::new(),
+        metadata_obj: None,
+        metadata_listener: None,
+        original_default: Arc::new(Mutex::new(None)),
+        default_set: false,
+        output_tx,
+        last_output: None,
+        preferred_output: None,
+        route_rx,
+        sinks_tx,
+    }));
+
     Ok(thread::Builder::new()
         .name("resonance-pw".into())
         .spawn(move || {
-            if let Err(e) = run(
-                cmd_rx,
-                spectrum_tx,
-                initial_chain,
-                output_tx,
-                route_rx,
-                sinks_tx,
-                meters,
-            ) {
-                tracing::error!("PipeWire thread: {e:#}");
+            pw::init();
+            let mut backoff = Duration::from_millis(200);
+            loop {
+                // Reset the per-attempt graph view (the persistent channels +
+                // user preferences + the captured original default are kept).
+                {
+                    let mut g = gs.lock().unwrap();
+                    g.sink_node_id = u32::MAX;
+                    g.filter_node_id = u32::MAX;
+                    g.nodes.clear();
+                    g.ports.clear();
+                    g.out_links.clear();
+                    g.monitor_links.clear();
+                    g.metadata_obj = None;
+                    g.metadata_listener = None;
+                    g.default_set = false;
+                    g.last_output = None;
+                }
+                fd.in_ports = [std::ptr::null_mut(); 2];
+                fd.out_ports = [std::ptr::null_mut(); 2];
+                let fd_ptr: *mut FilterData = &mut *fd;
+
+                let started = Instant::now();
+                match build_and_run(fd_ptr, &gs) {
+                    Ok(()) => tracing::warn!("PipeWire connection lost; reconnecting…"),
+                    Err(e) => tracing::warn!("PipeWire setup failed: {e:#}; retrying…"),
+                }
+
+                // A session that lived a while is a real reconnect, not a flap:
+                // reset the backoff so the next outage retries promptly.
+                if started.elapsed() > Duration::from_secs(10) {
+                    backoff = Duration::from_millis(200);
+                }
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_secs(5));
             }
         })?)
 }
 
-fn run(
-    cmd_rx: rtrb::Consumer<AudioCommand>,
-    spectrum_tx: rtrb::Producer<f32>,
-    chain: ProcessorChain,
-    output_tx: tokio::sync::mpsc::UnboundedSender<String>,
-    route_rx: std::sync::mpsc::Receiver<String>,
-    sinks_tx: tokio::sync::mpsc::UnboundedSender<Vec<String>>,
-    meters: Arc<AtomicMeters>,
-) -> Result<()> {
-    pw::init();
-
+/// Build the PipeWire graph for one connection attempt and run its main loop
+/// until the connection drops (core error → quit). Returns `Ok` on a clean
+/// disconnect so the caller can reconnect; `Err` if setup failed.
+fn build_and_run(fd_ptr: *mut FilterData, gs: &Arc<Mutex<GraphState>>) -> Result<()> {
     let mainloop = pw::main_loop::MainLoopBox::new(None)?;
     let context = pw::context::ContextBox::new(mainloop.loop_(), None)?;
     let core = context.connect(None)?;
 
     // ── pw_filter (raw FFI) ───────────────────────────────────────────────
     let raw_core = core.as_raw_ptr();
+    gs.lock().unwrap().raw_core = raw_core as usize;
 
-    let fd = Box::new(FilterData {
-        in_ports: [std::ptr::null_mut(); 2],
-        out_ports: [std::ptr::null_mut(); 2],
-        chain,
-        cmd_rx,
-        spectrum_tx,
-        scratch: vec![0.0; MAX_QUANTUM * CHANNELS],
-        meters,
-    });
-    let fd_ptr = Box::into_raw(fd);
+    // Quit the main loop on a fatal core error (server gone / disconnect) so
+    // the reconnect loop can take over.
+    let quit_ptr = mainloop.as_raw_ptr() as usize;
+    let _core_listener = core
+        .add_listener_local()
+        .error(move |id, _seq, res, message| {
+            // id 0 == the core proxy itself; an error there means the connection
+            // is broken.
+            if id == 0 {
+                tracing::warn!("PipeWire core error (res={res}): {message}");
+                unsafe {
+                    pw_sys::pw_main_loop_quit(quit_ptr as *mut pw_sys::pw_main_loop);
+                }
+            }
+        })
+        .register();
 
     let fev: &'static _ = Box::leak(Box::new(unsafe {
         let mut e: pw_sys::pw_filter_events = std::mem::zeroed();
@@ -239,25 +296,6 @@ fn run(
     // ── Registry listener (high-level, 'static closure via Arc) ──────────
     let registry = core.get_registry()?;
 
-    let gs = Arc::new(Mutex::new(GraphState {
-        raw_core: raw_core as usize,
-        sink_node_id: u32::MAX,
-        filter_node_id: u32::MAX,
-        nodes: HashMap::new(),
-        ports: HashMap::new(),
-        out_links: Vec::new(),
-        monitor_links: Vec::new(),
-        metadata_obj: None,
-        metadata_listener: None,
-        original_default: Arc::new(Mutex::new(None)),
-        default_set: false,
-        output_tx,
-        last_output: None,
-        preferred_output: None,
-        route_rx,
-        sinks_tx,
-    }));
-
     // SAFETY: `core` and `registry` outlive the listener (same scope, dropped after mainloop).
     // The transmute extends the RegistryBox lifetime to 'static for the closure — safe because
     // the listener is dropped before registry (Rust drops in reverse declaration order).
@@ -265,8 +303,8 @@ fn run(
         std::mem::transmute::<&pw::registry::Registry, &'static pw::registry::Registry>(&*registry)
     };
 
-    let gs_global = Arc::clone(&gs);
-    let gs_remove = Arc::clone(&gs);
+    let gs_global = Arc::clone(gs);
+    let gs_remove = Arc::clone(gs);
 
     let _listener = registry_static
         .add_listener_local()
@@ -282,42 +320,45 @@ fn run(
 
     // ── Poll filter node-id, then run main loop ───────────────────────────
     // Use a timer on the loop to poll pw_filter_get_node_id.
-    {
-        let gs_timer = Arc::clone(&gs);
-        let timer = mainloop.loop_().add_timer(move |_| {
-            let node_id = unsafe { pw_sys::pw_filter_get_node_id(filter) };
-            let mut g = gs_timer.lock().unwrap();
-            if node_id != u32::MAX && g.filter_node_id == u32::MAX {
-                g.filter_node_id = node_id;
-                reroute(&mut g);
-            }
-            // Apply any pending preferred-output changes from the IPC thread.
-            let mut reroute_needed = false;
-            while let Ok(name) = g.route_rx.try_recv() {
-                g.preferred_output = Some(name);
-                reroute_needed = true;
-            }
-            if reroute_needed {
-                reroute(&mut g);
-            }
-        });
-        timer
-            .update_timer(
-                Some(std::time::Duration::from_millis(50)),
-                Some(std::time::Duration::from_millis(50)),
-            )
-            .into_result()?;
-        // Keep timer alive for the duration of the loop.
-        std::mem::forget(timer);
-    }
+    let gs_timer = Arc::clone(gs);
+    let timer = mainloop.loop_().add_timer(move |_| {
+        let node_id = unsafe { pw_sys::pw_filter_get_node_id(filter) };
+        let mut g = gs_timer.lock().unwrap();
+        if node_id != u32::MAX && g.filter_node_id == u32::MAX {
+            g.filter_node_id = node_id;
+            reroute(&mut g);
+        }
+        // Apply any pending preferred-output changes from the IPC thread.
+        let mut reroute_needed = false;
+        while let Ok(name) = g.route_rx.try_recv() {
+            g.preferred_output = Some(name);
+            reroute_needed = true;
+        }
+        if reroute_needed {
+            reroute(&mut g);
+        }
+    });
+    timer
+        .update_timer(
+            Some(std::time::Duration::from_millis(50)),
+            Some(std::time::Duration::from_millis(50)),
+        )
+        .into_result()?;
 
     info!(
         "PipeWire ready — 'Resonance EQ' is now the default output ({}ch @ {} Hz)",
         CHANNELS, SAMPLE_RATE
     );
 
+    // Blocks until the connection drops (core error → pw_main_loop_quit).
     mainloop.run();
 
+    // Detach the RT callback from `fd` before this attempt's objects are dropped
+    // and `fd` is reused by the next attempt.
+    unsafe {
+        pw_sys::pw_filter_destroy(filter);
+    }
+    drop(timer);
     Ok(())
 }
 
