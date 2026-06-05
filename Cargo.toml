@@ -60,6 +60,7 @@ clap_complete = "4"
 
 # Test utilities (dev only)
 approx = "0.5"
+criterion = "0.7"
 
 [profile.release]
 opt-level = "z"
