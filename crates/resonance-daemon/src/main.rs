@@ -1,6 +1,7 @@
 mod config;
 mod ipc_server;
 mod pw_node;
+mod shutdown;
 mod spectrum;
 mod state;
 
@@ -18,6 +19,12 @@ async fn main() -> Result<()> {
         .init();
 
     info!("resonanced starting");
+
+    // Single-instance lock; bail if another live daemon holds the pidfile.
+    if let Err(e) = shutdown::acquire_pidfile() {
+        anyhow::bail!(e);
+    }
+    shutdown::install_signal_handlers();
 
     let (cmd_tx, cmd_rx) = RingBuffer::<state::AudioCommand>::new(256);
     let (spectrum_tx, spectrum_rx) = RingBuffer::<f32>::new(pw_node::SPECTRUM_BUF);
@@ -82,6 +89,7 @@ async fn main() -> Result<()> {
 
     pw_handle.join().ok();
 
+    shutdown::cleanup();
     info!("resonanced stopped");
     Ok(())
 }
