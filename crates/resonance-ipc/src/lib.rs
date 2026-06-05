@@ -263,8 +263,12 @@ mod tests {
             band_type: BandType::LowPass,
         });
         command_round_trip(&Command::RemoveBand { index: 1 });
-        command_round_trip(&Command::SaveProfile { name: "night".into() });
-        command_round_trip(&Command::LoadProfile { name: "night".into() });
+        command_round_trip(&Command::SaveProfile {
+            name: "night".into(),
+        });
+        command_round_trip(&Command::LoadProfile {
+            name: "night".into(),
+        });
         command_round_trip(&Command::MapOutput {
             profile: "night".into(),
         });

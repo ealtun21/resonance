@@ -209,12 +209,7 @@ fn print_state(p: &Paint, s: &resonance_ipc::DaemonState) {
     let row = |name: &str, int: f64, on: bool| {
         let pct = (int * 100.0).round() as i32;
         let state = if on { p.green("on ") } else { p.dim("off") };
-        println!(
-            "  {:<14} {} {:>4}%  {state}",
-            name,
-            p.cyan(&bar(int)),
-            pct
-        );
+        println!("  {:<14} {} {:>4}%  {state}", name, p.cyan(&bar(int)), pct);
     };
     row("fidelity", e.fidelity_intensity, e.fidelity_enabled);
     row("ambience", e.ambience_intensity, e.ambience_enabled);
@@ -229,7 +224,11 @@ fn print_state(p: &Paint, s: &resonance_ipc::DaemonState) {
     // EQ bands
     if !s.bands.is_empty() {
         println!();
-        println!("{} {}", p.bold("bands"), p.dim(&format!("({})", s.bands.len())));
+        println!(
+            "{} {}",
+            p.bold("bands"),
+            p.dim(&format!("({})", s.bands.len()))
+        );
         for (i, b) in s.bands.iter().enumerate() {
             let state = if b.enabled {
                 p.green("on ")
