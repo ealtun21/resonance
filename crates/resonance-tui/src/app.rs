@@ -14,7 +14,7 @@ use std::{
 
 /// Spectrum envelope time constants: bars snap up, glide down.
 const SPECTRUM_ATTACK_TAU: f32 = 0.020;
-const SPECTRUM_DECAY_TAU: f32 = 0.20;
+const SPECTRUM_DECAY_TAU: f32 = 0.200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panel {

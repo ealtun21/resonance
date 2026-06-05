@@ -64,6 +64,8 @@ pub struct GuiApp {
     dialog: Dialog,
     selected_band: usize,
     drag_band: Option<usize>,
+    /// True while the active curve drag edits Q (right button) vs freq+gain.
+    drag_q: bool,
     profile_name: String,
     /// Smoothed spectrum bar heights + last animation tick.
     spectrum_display: Vec<f32>,
@@ -87,6 +89,7 @@ impl GuiApp {
             dialog: Dialog::None,
             selected_band: 0,
             drag_band: None,
+            drag_q: false,
             profile_name: String::new(),
             spectrum_display: Vec::new(),
             last_anim: Instant::now(),
@@ -357,8 +360,12 @@ impl GuiApp {
             egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 200, 255)),
         ));
 
-        // Drag handling: pick / move the nearest node.
-        if response.drag_started() {
+        // Drag handling: left button moves a node (freq+gain), right button
+        // tunes its Q (drag up = narrower). Pick the nearest node on press.
+        use egui::PointerButton::{Primary, Secondary};
+        let started_primary = response.drag_started_by(Primary);
+        let started_secondary = response.drag_started_by(Secondary);
+        if started_primary || started_secondary {
             if let Some(p) = response.interact_pointer_pos() {
                 let mut best: Option<(usize, f32)> = None;
                 for (i, b) in state.bands.iter().enumerate() {
@@ -371,25 +378,43 @@ impl GuiApp {
                 if let Some((i, _)) = best {
                     self.drag_band = Some(i);
                     self.selected_band = i;
+                    self.drag_q = started_secondary;
                 }
             }
         }
-        if response.dragged() {
-            if let (Some(i), Some(p)) = (self.drag_band, response.interact_pointer_pos()) {
-                if let Some(b) = state.bands.get(i) {
-                    let freq = 10f64.powf(logf_of(p.x)).clamp(20.0, 20000.0);
-                    let gain = db_of(p.y).clamp(-20.0, 20.0);
-                    self.queue(Command::SetBand {
-                        index: i,
-                        freq,
-                        gain_db: gain,
-                        q: b.q,
-                    });
+        if let Some(i) = self.drag_band {
+            if self.drag_q && response.dragged_by(Secondary) {
+                let dy = response.drag_delta().y as f64;
+                if dy != 0.0 {
+                    if let Some(b) = state.bands.get(i) {
+                        // Exponential so Q scales smoothly across its range.
+                        let q = (b.q * (-dy * 0.015).exp()).clamp(0.1, 20.0);
+                        self.queue(Command::SetBand {
+                            index: i,
+                            freq: b.freq,
+                            gain_db: b.gain_db,
+                            q,
+                        });
+                    }
+                }
+            } else if !self.drag_q && response.dragged_by(Primary) {
+                if let Some(p) = response.interact_pointer_pos() {
+                    if let Some(b) = state.bands.get(i) {
+                        let freq = 10f64.powf(logf_of(p.x)).clamp(20.0, 20000.0);
+                        let gain = db_of(p.y).clamp(-20.0, 20.0);
+                        self.queue(Command::SetBand {
+                            index: i,
+                            freq,
+                            gain_db: gain,
+                            q: b.q,
+                        });
+                    }
                 }
             }
         }
-        if response.drag_stopped() {
+        if response.drag_stopped_by(Primary) || response.drag_stopped_by(Secondary) {
             self.drag_band = None;
+            self.drag_q = false;
         }
         // Double-click empty area → add a peaking band there.
         if response.double_clicked() {
