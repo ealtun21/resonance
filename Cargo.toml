@@ -19,25 +19,25 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 # DSP
-biquad = "0.5"
+biquad = "0.6"
 rustfft = "6"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"] }
-toml = "0.8"
+toml = "1.1"
 
 # Async / runtime
 tokio = { version = "1", features = ["full"] }
 
 # TUI
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = "0.30"
+crossterm = "0.29"
 
 # Audio / PipeWire
-pipewire = "0.9"
-spa = { version = "0.9", package = "libspa" }
-spa-sys = { version = "0.9", package = "libspa-sys" }
+pipewire = "0.10"
+spa = { version = "0.10", package = "libspa" }
+spa-sys = { version = "0.10", package = "libspa-sys" }
 
 # Real-time audio ring buffer (lock-free SPSC)
 rtrb = "0.3"
