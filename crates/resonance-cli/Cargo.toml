@@ -18,3 +18,4 @@ clap_complete = { workspace = true }
 serde = { workspace = true }
 postcard = { workspace = true }
 anyhow = { workspace = true }
+ureq = { workspace = true }

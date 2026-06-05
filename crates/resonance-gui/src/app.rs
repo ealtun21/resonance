@@ -269,8 +269,13 @@ impl GuiApp {
 
             ui.separator();
             if ui.button("Load preset…").clicked() {
-                let start =
-                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let lib = resonance_ipc::paths::user_preset_dir();
+                let _ = std::fs::create_dir_all(&lib);
+                let start = if lib.is_dir() {
+                    lib
+                } else {
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                };
                 self.dialog = Dialog::LoadPreset(Browser::new(start));
             }
             if let Some(p) = state.as_ref().and_then(|s| s.current_preset.as_ref()) {

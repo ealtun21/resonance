@@ -1,3 +1,5 @@
+mod autoeq;
+
 use anyhow::{Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
@@ -28,10 +30,10 @@ enum Sub {
         /// Path to preset file
         path: String,
     },
-    /// List preset files in a directory
+    /// List preset files (defaults to the XDG preset library if no dir given)
     List {
-        /// Directory to scan
-        dir: String,
+        /// Directory to scan (optional)
+        dir: Option<String>,
     },
     /// Set an FxSound effect intensity (0–100)
     Set {
@@ -109,6 +111,11 @@ enum Sub {
         /// New profile name
         to: String,
     },
+    /// Download an AutoEq headphone correction and import it as a profile
+    Autoeq {
+        /// Headphone name (e.g. "HD 600"); multiple words allowed
+        query: Vec<String>,
+    },
     /// Send a raw shutdown signal to the daemon
     Shutdown,
     /// Print shell completions
@@ -131,6 +138,27 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // `autoeq` downloads + imports client-side, then asks the daemon to import.
+    if let Sub::Autoeq { query } = &sub {
+        let q = query.join(" ");
+        if q.trim().is_empty() {
+            bail!("usage: resonance autoeq <headphone name>");
+        }
+        let path = autoeq::run(&q)?;
+        let p = Paint::auto();
+        println!(
+            "{} {}",
+            p.dim("downloaded"),
+            p.bold(&path.display().to_string())
+        );
+        let name = path.file_stem().map(|s| s.to_string_lossy().into_owned());
+        let resp = send(Command::ImportPreset {
+            path: path.to_string_lossy().into_owned(),
+            name,
+        })?;
+        return print_response(resp);
+    }
+
     // `devices` reuses GetState but renders a sink list instead of full status.
     if let Sub::Devices = sub {
         let resp = send(Command::GetState)?;
@@ -151,6 +179,7 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
         Sub::Status => Ok(Command::GetState),
         Sub::Load { path } => Ok(Command::LoadPreset { path }),
         Sub::List { dir } => Ok(Command::ListPresets { dir }),
+        Sub::Autoeq { .. } => unreachable!(),
         Sub::Power { state } => Ok(Command::SetPower {
             enabled: parse_bool(&state)?,
         }),

@@ -177,7 +177,15 @@ impl App {
     }
 
     pub fn begin_load_preset(&mut self) {
-        let start = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        // Default to the XDG preset library (create it on first use) so imported
+        // and AutoEq-downloaded presets are right there.
+        let lib = resonance_ipc::paths::user_preset_dir();
+        let _ = std::fs::create_dir_all(&lib);
+        let start = if lib.is_dir() {
+            lib
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        };
         self.mode = InputMode::Browse(crate::browser::Browser::new(start));
     }
 

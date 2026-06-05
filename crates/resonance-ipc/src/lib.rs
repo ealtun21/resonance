@@ -2,6 +2,7 @@ use resonance_dsp::chain::FxEffect;
 use resonance_dsp::filter::FilterType;
 use serde::{Deserialize, Serialize};
 
+pub mod paths;
 pub mod transport;
 
 pub const SOCKET_PATH_ENV: &str = "RESONANCE_SOCKET";
@@ -54,8 +55,9 @@ pub enum Command {
     SetPower { enabled: bool },
     /// Request current state snapshot
     GetState,
-    /// List available presets in a directory
-    ListPresets { dir: String },
+    /// List available preset files. `dir` = a specific directory, or None to
+    /// scan the XDG preset library + system dirs.
+    ListPresets { dir: Option<String> },
     /// Save the current chain state as a named profile in the config dir
     SaveProfile { name: String },
     /// Load a named profile from the config dir

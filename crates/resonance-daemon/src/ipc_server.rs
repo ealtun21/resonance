@@ -128,7 +128,7 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
             Err(e) => Response::Error(e),
         },
 
-        Command::ListPresets { dir } => Response::PresetList(list_presets(&dir)),
+        Command::ListPresets { dir } => Response::PresetList(list_presets(dir.as_deref())),
 
         Command::SaveProfile { name } => {
             let profile = Profile::from_state(&state.snapshot());
@@ -449,7 +449,31 @@ fn load_profile(name: &str, state: &SharedState) -> Result<(), String> {
     Ok(())
 }
 
-fn list_presets(dir: &str) -> Vec<String> {
+/// List preset files. `Some(dir)` scans that directory; `None` scans the XDG
+/// preset library + system dirs, with user entries shadowing system ones.
+fn list_presets(dir: Option<&str>) -> Vec<String> {
+    match dir {
+        Some(d) => list_dir_presets(std::path::Path::new(d)),
+        None => {
+            let _ = std::fs::create_dir_all(resonance_ipc::paths::user_preset_dir());
+            // filename → full path; first writer wins (search dirs are user-first).
+            let mut by_name = std::collections::BTreeMap::new();
+            for d in resonance_ipc::paths::preset_search_dirs() {
+                for path in list_dir_presets(&d) {
+                    if let Some(fname) = std::path::Path::new(&path)
+                        .file_name()
+                        .and_then(|f| f.to_str())
+                    {
+                        by_name.entry(fname.to_string()).or_insert(path);
+                    }
+                }
+            }
+            by_name.into_values().collect()
+        }
+    }
+}
+
+fn list_dir_presets(dir: &std::path::Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
