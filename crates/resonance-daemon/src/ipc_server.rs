@@ -3,14 +3,17 @@ use crate::state::{AudioCommand, SharedState};
 use anyhow::Result;
 use resonance_dsp::chain::ProcessorChain;
 use resonance_dsp::filter::{ApoFilter, FilterError, FilterType};
-use resonance_ipc::{Command, Response};
-use resonance_preset::{apo::parse_apo, fac::parse_fac};
-use std::{env, path::PathBuf};
+use resonance_ipc::{AbSlot, BandType, Command, Response};
+use resonance_preset::model::{ApoFilterType, EqBand};
+use resonance_preset::{
+    apo::{parse_apo, write_apo},
+    fac::parse_fac,
+};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{error, info, warn};
 
 pub async fn run(state: SharedState) -> Result<()> {
-    let sock_path = socket_path();
+    let sock_path = crate::shutdown::socket_path();
     let _ = tokio::fs::remove_file(&sock_path).await;
 
     let listener = UnixListener::bind(&sock_path)?;
@@ -101,6 +104,27 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
                 state.0.lock().unwrap().current_preset = Some(path);
                 Response::Ok
             }
+            Err(e) => Response::Error(e),
+        },
+
+        Command::ImportPreset { path, name } => match parse_preset_file(&path) {
+            Ok(preset) => {
+                let raw = name.unwrap_or_else(|| file_stem_name(&path));
+                let profile_name = config::sanitize_name(&raw);
+                if profile_name.is_empty() {
+                    return Response::Error("profile name is empty".to_string());
+                }
+                let profile = Profile::from_preset(&preset);
+                match config::save_profile(&profile_name, &profile) {
+                    Ok(()) => Response::Imported(profile_name),
+                    Err(e) => Response::Error(e),
+                }
+            }
+            Err(e) => Response::Error(e),
+        },
+
+        Command::RenameProfile { from, to } => match config::rename_profile(&from, &to) {
+            Ok(()) => Response::Ok,
             Err(e) => Response::Error(e),
         },
 
@@ -251,8 +275,51 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
             Response::Ok
         }
 
+        Command::Reset => {
+            let (sr, channels) = {
+                let inner = state.0.lock().unwrap();
+                (inner.chain.sample_rate, inner.chain.channels)
+            };
+            state.replace_chain(flat_chain(channels, sr), flat_chain(channels, sr));
+            state.0.lock().unwrap().current_preset = None;
+            Response::Ok
+        }
+
+        Command::ExportApo { path } => {
+            let snap = state.snapshot();
+            let text = export_apo_text(&snap);
+            match std::fs::write(&path, text) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error(format!("write '{path}': {e}")),
+            }
+        }
+
+        Command::StoreSlot { slot } => {
+            let profile = Profile::from_state(&state.snapshot());
+            state.0.lock().unwrap().ab_slots[slot_index(slot)] = Some(profile);
+            Response::Ok
+        }
+
+        Command::RecallSlot { slot } => {
+            let stored = state.0.lock().unwrap().ab_slots[slot_index(slot)].clone();
+            match stored {
+                Some(profile) => {
+                    let (sr, channels) = {
+                        let inner = state.0.lock().unwrap();
+                        (inner.chain.sample_rate, inner.chain.channels)
+                    };
+                    let chain_rt = profile.clone().into_chain(channels, sr);
+                    let chain_shadow = profile.into_chain(channels, sr);
+                    state.replace_chain(chain_rt, chain_shadow);
+                    Response::Ok
+                }
+                None => Response::Error("slot is empty — store it first".to_string()),
+            }
+        }
+
         Command::Shutdown => {
             info!("shutdown requested");
+            crate::shutdown::cleanup();
             std::process::exit(0);
         }
 
@@ -280,13 +347,83 @@ fn build_band(
         .build()
 }
 
-fn load_preset(path: &str, state: &SharedState) -> Result<(), String> {
+/// A default chain with no EQ bands, 0 dB preamp, and every effect disabled —
+/// the `Reset` target ("flat EQ, all effects off").
+fn flat_chain(channels: usize, sample_rate: f64) -> ProcessorChain {
+    use resonance_dsp::chain::FxEffect;
+    let mut chain = ProcessorChain::builder()
+        .channels(channels)
+        .sample_rate(sample_rate)
+        .build();
+    for fx in [
+        FxEffect::Fidelity,
+        FxEffect::Ambience,
+        FxEffect::Surround,
+        FxEffect::DynamicBoost,
+        FxEffect::Bass,
+    ] {
+        chain.set_effect_intensity(fx, 0.0);
+        chain.set_effect_enabled(fx, false);
+    }
+    chain
+}
+
+fn slot_index(slot: AbSlot) -> usize {
+    match slot {
+        AbSlot::A => 0,
+        AbSlot::B => 1,
+    }
+}
+
+/// Render the daemon's current preamp + bands as EqualizerAPO `.txt` text.
+fn export_apo_text(snap: &resonance_ipc::DaemonState) -> String {
+    let bands: Vec<EqBand> = snap
+        .bands
+        .iter()
+        .map(|b| EqBand {
+            filter_type: band_type_to_apo(b.band_type),
+            freq: b.freq,
+            gain_db: b.gain_db,
+            q: b.q,
+            enabled: b.enabled,
+        })
+        .collect();
+    write_apo(snap.preamp_db, &bands)
+}
+
+fn band_type_to_apo(t: BandType) -> ApoFilterType {
+    match t {
+        BandType::Peaking => ApoFilterType::Peaking,
+        BandType::LowShelf => ApoFilterType::LowShelf,
+        BandType::HighShelf => ApoFilterType::HighShelf,
+        BandType::LowPass => ApoFilterType::LowPassQ,
+        BandType::HighPass => ApoFilterType::HighPassQ,
+        BandType::BandPass => ApoFilterType::BandPass,
+        BandType::Notch => ApoFilterType::Notch,
+        BandType::AllPass => ApoFilterType::AllPass,
+    }
+}
+
+/// Read + parse a preset file, dispatching on extension (`.fac` vs APO `.txt`).
+fn parse_preset_file(path: &str) -> Result<resonance_preset::model::Preset, String> {
     let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let preset = if path.ends_with(".fac") {
-        parse_fac(&content).map_err(|e| e.to_string())?
+    if path.ends_with(".fac") {
+        parse_fac(&content).map_err(|e| e.to_string())
     } else {
-        parse_apo(&content).map_err(|e| e.to_string())?
-    };
+        parse_apo(&content).map_err(|e| e.to_string())
+    }
+}
+
+/// Default profile name for an imported file: its stem (e.g. `Rock.fac` → `Rock`).
+fn file_stem_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "imported".to_string())
+}
+
+fn load_preset(path: &str, state: &SharedState) -> Result<(), String> {
+    let preset = parse_preset_file(path)?;
 
     let (sr, channels) = {
         let inner = state.0.lock().unwrap();
@@ -325,14 +462,6 @@ fn list_presets(dir: &str) -> Vec<String> {
         })
         .map(|e| e.path().to_string_lossy().into_owned())
         .collect()
-}
-
-fn socket_path() -> PathBuf {
-    if let Ok(p) = env::var(resonance_ipc::SOCKET_PATH_ENV) {
-        return PathBuf::from(p);
-    }
-    let runtime = env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(runtime).join(resonance_ipc::DEFAULT_SOCKET_FILENAME)
 }
 
 async fn read_command_async(

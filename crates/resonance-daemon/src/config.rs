@@ -5,8 +5,9 @@
 //!   config.toml            — `[mappings]` table: output node.name → profile name
 
 use resonance_dsp::chain::{FxEffect, ProcessorChain};
-use resonance_dsp::filter::ApoFilter;
-use resonance_ipc::{BandState, DaemonState, EffectsState};
+use resonance_dsp::filter::{ApoFilter, FilterType};
+use resonance_ipc::{BandState, BandType, DaemonState, EffectsState};
+use resonance_preset::model::Preset;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -33,6 +34,44 @@ impl Profile {
     /// Read a named profile from the config dir.
     pub fn load(name: &str) -> Result<Self, String> {
         load_profile(name)
+    }
+
+    /// Convert a parsed preset (`.fac` / APO `.txt`) into a saveable profile.
+    /// The chain starts enabled; effect intensities/bands carry over verbatim.
+    pub fn from_preset(p: &Preset) -> Self {
+        let bands = p
+            .bands
+            .iter()
+            .map(|b| {
+                let ft: FilterType = b.filter_type.into();
+                BandState {
+                    band_type: BandType::from(ft),
+                    freq: b.freq,
+                    gain_db: b.gain_db,
+                    q: b.q,
+                    enabled: b.enabled,
+                }
+            })
+            .collect();
+
+        let e = &p.effects;
+        Self {
+            preamp_db: p.preamp_db,
+            enabled: true,
+            effects: EffectsState {
+                fidelity_intensity: e.fidelity.intensity,
+                fidelity_enabled: e.fidelity.enabled,
+                ambience_intensity: e.ambience.intensity,
+                ambience_enabled: e.ambience.enabled,
+                surround_intensity: e.surround.intensity,
+                surround_enabled: e.surround.enabled,
+                dynamic_boost_intensity: e.dynamic_boost.intensity,
+                dynamic_boost_enabled: e.dynamic_boost.enabled,
+                bass_intensity: e.bass.intensity,
+                bass_enabled: e.bass.enabled,
+            },
+            bands,
+        }
     }
 
     /// Build a processing chain from this profile at the given format.
@@ -120,6 +159,31 @@ pub fn delete_profile(name: &str) -> Result<(), String> {
     std::fs::remove_file(profile_path(name)).map_err(|e| format!("profile '{name}': {e}"))
 }
 
+pub fn rename_profile(from: &str, to: &str) -> Result<(), String> {
+    let to = sanitize_name(to);
+    if to.is_empty() {
+        return Err("new name is empty".to_string());
+    }
+    let src = profile_path(from);
+    if !src.exists() {
+        return Err(format!("profile '{from}' not found"));
+    }
+    let dst = profile_path(&to);
+    if dst.exists() {
+        return Err(format!("profile '{to}' already exists"));
+    }
+    std::fs::rename(src, dst).map_err(|e| format!("rename profile '{from}': {e}"))
+}
+
+/// Reduce an arbitrary string to a safe single-segment profile name (no path
+/// separators, no surrounding whitespace).
+pub fn sanitize_name(name: &str) -> String {
+    name.trim()
+        .replace(['/', '\\'], "_")
+        .trim_matches('.')
+        .to_string()
+}
+
 pub fn list_profiles() -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(profiles_dir()) else {
         return Vec::new();
@@ -176,5 +240,57 @@ impl Mappings {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use resonance_preset::model::{ApoFilterType, EffectState, EqBand, FxEffects, Preset};
+
+    #[test]
+    fn from_preset_maps_bands_preamp_and_effects() {
+        let preset = Preset {
+            name: "T".into(),
+            preamp_db: -4.5,
+            eq_enabled: true,
+            bands: vec![EqBand {
+                filter_type: ApoFilterType::HighShelf,
+                freq: 10_000.0,
+                gain_db: 3.0,
+                q: 0.7,
+                enabled: true,
+            }],
+            effects: FxEffects {
+                fidelity: EffectState {
+                    enabled: true,
+                    intensity: 0.5,
+                },
+                bass: EffectState {
+                    enabled: true,
+                    intensity: 0.25,
+                },
+                ..Default::default()
+            },
+        };
+
+        let p = Profile::from_preset(&preset);
+        assert_eq!(p.bands.len(), 1);
+        assert_eq!(p.bands[0].band_type, BandType::HighShelf);
+        assert!((p.bands[0].freq - 10_000.0).abs() < 1e-9);
+        assert!((p.preamp_db + 4.5).abs() < 1e-9);
+        assert!(p.enabled, "imported chain should start enabled");
+        assert!(p.effects.fidelity_enabled);
+        assert!((p.effects.fidelity_intensity - 0.5).abs() < 1e-9);
+        assert!((p.effects.bass_intensity - 0.25).abs() < 1e-9);
+        assert!(!p.effects.surround_enabled);
+    }
+
+    #[test]
+    fn sanitize_name_strips_separators_and_dots() {
+        assert_eq!(sanitize_name("  rock night  "), "rock night");
+        assert_eq!(sanitize_name("rock/night"), "rock_night");
+        assert_eq!(sanitize_name("a\\b"), "a_b");
+        assert_eq!(sanitize_name("..foo.."), "foo");
     }
 }

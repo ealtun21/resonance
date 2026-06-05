@@ -23,6 +23,8 @@ pub struct TextInput {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TextPurpose {
     SaveProfile,
+    /// Rename the profile whose current name is held inside.
+    RenameProfile(String),
     PrefFps,
     PrefRefreshMs,
     PrefBandQ,

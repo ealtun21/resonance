@@ -62,6 +62,8 @@ pub struct Inner {
     pub preferred_output: Option<String>,
     /// Send a preferred-output name to the pw_node main-loop thread.
     pub route_tx: std::sync::mpsc::Sender<String>,
+    /// In-memory A/B comparison slots ([A, B]); filled by `StoreSlot`.
+    pub ab_slots: [Option<crate::config::Profile>; 2],
 }
 
 #[derive(Clone)]
@@ -86,6 +88,7 @@ impl SharedState {
             available_sinks: Vec::new(),
             preferred_output: None,
             route_tx,
+            ab_slots: [None, None],
         })))
     }
 

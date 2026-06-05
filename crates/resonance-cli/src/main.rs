@@ -76,6 +76,39 @@ enum Sub {
     Unmap,
     /// List output→profile mappings
     Maps,
+    /// Reset to defaults: flat EQ, all effects off, 0 dB preamp
+    Reset,
+    /// Export the current EQ to an EqualizerAPO .txt file
+    Export {
+        /// Output file path (e.g. ./my-eq.txt)
+        path: String,
+    },
+    /// List available PipeWire output sinks and the active one
+    Devices,
+    /// Store the current state into an A/B comparison slot
+    Store {
+        /// Slot: a | b
+        slot: String,
+    },
+    /// Recall a previously stored A/B slot
+    Recall {
+        /// Slot: a | b
+        slot: String,
+    },
+    /// Import a preset file (.fac / APO .txt) as a saved profile (does not load it)
+    Import {
+        /// Path to preset file
+        path: String,
+        /// Profile name (defaults to the file name)
+        name: Option<String>,
+    },
+    /// Rename a saved profile
+    Rename {
+        /// Current profile name
+        from: String,
+        /// New profile name
+        to: String,
+    },
     /// Send a raw shutdown signal to the daemon
     Shutdown,
     /// Print shell completions
@@ -96,6 +129,16 @@ fn main() -> Result<()> {
         let bin = cmd.get_name().to_string();
         generate(shell, &mut cmd, bin, &mut io::stdout());
         return Ok(());
+    }
+
+    // `devices` reuses GetState but renders a sink list instead of full status.
+    if let Sub::Devices = sub {
+        let resp = send(Command::GetState)?;
+        if let Response::State(s) = resp {
+            print_devices(&Paint::auto(), &s);
+            return Ok(());
+        }
+        return print_response(resp);
     }
 
     let cmd = to_ipc_command(sub)?;
@@ -123,8 +166,18 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
         Sub::Map { profile } => Ok(Command::MapOutput { profile }),
         Sub::Unmap => Ok(Command::UnmapOutput),
         Sub::Maps => Ok(Command::ListMappings),
+        Sub::Reset => Ok(Command::Reset),
+        Sub::Export { path } => Ok(Command::ExportApo { path }),
+        Sub::Store { slot } => Ok(Command::StoreSlot {
+            slot: parse_slot(&slot)?,
+        }),
+        Sub::Recall { slot } => Ok(Command::RecallSlot {
+            slot: parse_slot(&slot)?,
+        }),
+        Sub::Import { path, name } => Ok(Command::ImportPreset { path, name }),
+        Sub::Rename { from, to } => Ok(Command::RenameProfile { from, to }),
         Sub::Shutdown => Ok(Command::Shutdown),
-        Sub::Completions { .. } => unreachable!(),
+        Sub::Devices | Sub::Completions { .. } => unreachable!(),
     }
 }
 
@@ -160,6 +213,9 @@ fn print_response(resp: Response) -> Result<()> {
             for (output, profile) in maps {
                 println!("{}  {}  {}", p.cyan(&output), p.dim("→"), p.bold(&profile));
             }
+        }
+        Response::Imported(name) => {
+            println!("{} {}", p.dim("imported as profile"), p.bold(&name));
         }
         Response::Error(e) => {
             eprintln!("{} {e}", p.red("error:"));
@@ -247,6 +303,24 @@ fn print_state(p: &Paint, s: &resonance_ipc::DaemonState) {
     }
 }
 
+fn print_devices(p: &Paint, s: &resonance_ipc::DaemonState) {
+    println!("{}", p.bold("output sinks"));
+    if s.available_sinks.is_empty() {
+        println!("  {}", p.dim("(none reported by PipeWire yet)"));
+    }
+    for sink in &s.available_sinks {
+        let active = s.active_output.as_deref() == Some(sink.as_str());
+        let preferred = s.preferred_output.as_deref() == Some(sink.as_str());
+        let marker = if active { p.green("●") } else { p.dim("○") };
+        let tail = if preferred {
+            format!("  {}", p.dim("(preferred)"))
+        } else {
+            String::new()
+        };
+        println!("  {marker} {}{tail}", p.cyan(sink));
+    }
+}
+
 /// 12-cell intensity bar; fills on absolute value so bipolar effects still read.
 fn bar(frac: f64) -> String {
     const WIDTH: usize = 12;
@@ -300,6 +374,14 @@ fn parse_bool(s: &str) -> Result<bool> {
         "on" | "1" | "true" => Ok(true),
         "off" | "0" | "false" => Ok(false),
         _ => bail!("expected on/off, got '{s}'"),
+    }
+}
+
+fn parse_slot(s: &str) -> Result<resonance_ipc::AbSlot> {
+    match s.to_ascii_lowercase().as_str() {
+        "a" => Ok(resonance_ipc::AbSlot::A),
+        "b" => Ok(resonance_ipc::AbSlot::B),
+        _ => bail!("expected slot a or b, got '{s}'"),
     }
 }
 

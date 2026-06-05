@@ -104,6 +104,8 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         InputMode::Browse(_) => handle_browse(app, key),
         InputMode::SelectOutput { .. } => handle_select_output(app, key),
         InputMode::Settings(_) => handle_settings(app, key),
+        // Any key dismisses the help overlay.
+        InputMode::Help => app.cancel_input(),
     }
 }
 
@@ -138,6 +140,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) {
         KeyCode::Char('d') | KeyCode::Delete if app.focus == app::Panel::Bands => app.remove_band(),
         KeyCode::Char('t') if app.focus == app::Panel::Bands => app.cycle_band_type(),
         KeyCode::Char('o') => app.begin_select_output(),
+        KeyCode::Char('?') => app.show_help(),
         _ => {}
     }
 }
@@ -192,8 +195,9 @@ fn handle_settings(app: &mut App, key: KeyEvent) {
     // Normal settings navigation.
     match key.code {
         KeyCode::Esc => app.settings_close(),
-        KeyCode::Tab => app.settings_tab_shift(1),
-        KeyCode::BackTab => app.settings_tab_shift(-1),
+        // Tab/BackTab and ←/→ both switch tabs (arrow-only navigation).
+        KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => app.settings_tab_shift(1),
+        KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => app.settings_tab_shift(-1),
         KeyCode::Char('1') => app.settings_set_tab(0),
         KeyCode::Char('2') => app.settings_set_tab(1),
         KeyCode::Char('3') => app.settings_set_tab(2),
@@ -202,6 +206,7 @@ fn handle_settings(app: &mut App, key: KeyEvent) {
         KeyCode::Down | KeyCode::Char('j') => app.settings_move(1),
         KeyCode::Enter | KeyCode::Char(' ') => app.settings_enter(),
         KeyCode::Char('n') => app.settings_key_n(),
+        KeyCode::Char('r') => app.settings_key_r(),
         KeyCode::Char('d') | KeyCode::Delete => app.settings_key_d(),
         KeyCode::Char('m') => app.settings_key_m(),
         _ => {}

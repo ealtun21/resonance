@@ -43,6 +43,7 @@ pub enum InputMode {
     Browse(crate::browser::Browser),
     SelectOutput { sinks: Vec<String>, cursor: usize },
     Settings(crate::settings::SettingsState),
+    Help,
 }
 
 impl InputMode {
@@ -184,6 +185,10 @@ impl App {
         self.mode = InputMode::Normal;
     }
 
+    pub fn show_help(&mut self) {
+        self.mode = InputMode::Help;
+    }
+
     pub fn begin_select_output(&mut self) {
         let sinks = self
             .state
@@ -236,7 +241,11 @@ impl App {
         }
     }
 
-    /// Activate the selected entry: enter a directory, or load a preset file.
+    /// Activate the selected entry: enter a directory, or import+load a preset.
+    ///
+    /// Picking a file imports it as a profile (our own format) and then loads
+    /// that profile — so every preset that enters the app is captured and can be
+    /// renamed/managed from Settings, rather than loaded transiently.
     pub fn browse_enter(&mut self) {
         let action = match &mut self.mode {
             InputMode::Browse(b) => b.enter(),
@@ -244,8 +253,19 @@ impl App {
         };
         if let Some(path) = action {
             self.mode = InputMode::Normal;
-            self.send(Command::LoadPreset { path });
+            self.import_and_load(path);
             self.refresh_state();
+        }
+    }
+
+    fn import_and_load(&mut self, path: String) {
+        match self.query(Command::ImportPreset { path, name: None }) {
+            Some(Response::Imported(name)) => {
+                self.send(Command::LoadProfile { name: name.clone() });
+                self.status = format!("imported + loaded '{name}'");
+            }
+            Some(Response::Error(e)) => self.status = format!("import failed: {e}"),
+            _ => self.status = "import failed".into(),
         }
     }
 
@@ -644,6 +664,28 @@ impl App {
                     }
                 }
             }
+            TextPurpose::RenameProfile(from) => {
+                let to = buf.trim().to_string();
+                if !to.is_empty() && to != from {
+                    match self.query(Command::RenameProfile {
+                        from: from.clone(),
+                        to: to.clone(),
+                    }) {
+                        Some(Response::Ok) => self.status = format!("renamed to '{to}'"),
+                        Some(Response::Error(e)) => self.status = format!("rename failed: {e}"),
+                        _ => {}
+                    }
+                }
+                let profiles = match self.query(Command::ListProfiles) {
+                    Some(Response::PresetList(v)) => v,
+                    _ => vec![],
+                };
+                if let InputMode::Settings(s) = &mut self.mode {
+                    s.profiles = profiles;
+                    s.cursor = s.cursor.min(s.profiles.len().saturating_sub(1));
+                    s.text_input = None;
+                }
+            }
             TextPurpose::PrefFps => {
                 if let Ok(n) = buf.trim().parse::<u64>() {
                     self.prefs.fps = n.clamp(5, 240);
@@ -813,6 +855,23 @@ impl App {
         if let InputMode::Settings(s) = &mut self.mode {
             if s.tab == 0 {
                 s.text_input = Some(TextInput::new("", TextPurpose::SaveProfile, "Profile name"));
+            }
+        }
+    }
+
+    pub fn settings_key_r(&mut self) {
+        use crate::settings::{TextInput, TextPurpose};
+        let name = match &self.mode {
+            InputMode::Settings(s) if s.tab == 0 => s.profiles.get(s.cursor).cloned(),
+            _ => None,
+        };
+        if let Some(name) = name {
+            if let InputMode::Settings(s) = &mut self.mode {
+                s.text_input = Some(TextInput::new(
+                    name.clone(),
+                    TextPurpose::RenameProfile(name),
+                    "Rename profile",
+                ));
             }
         }
     }
@@ -1002,9 +1061,11 @@ impl IpcClient {
         write_command(&mut self.writer, &cmd)?;
         self.writer.flush()?;
         match read_response(&mut self.reader)? {
-            Response::Ok | Response::State(_) | Response::PresetList(_) | Response::Mappings(_) => {
-                Ok(())
-            }
+            Response::Ok
+            | Response::State(_)
+            | Response::PresetList(_)
+            | Response::Imported(_)
+            | Response::Mappings(_) => Ok(()),
             Response::Error(e) => Err(anyhow!("{e}")),
             Response::StateChanged(_) => Ok(()),
         }

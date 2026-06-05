@@ -11,6 +11,11 @@ pub const DEFAULT_SOCKET_FILENAME: &str = "resonance.sock";
 pub enum Command {
     /// Load preset from file path (.fac or APO .txt, detected by extension)
     LoadPreset { path: String },
+    /// Parse a preset file and save it as a named profile (does NOT apply it).
+    /// `name` defaults to the file stem when None.
+    ImportPreset { path: String, name: Option<String> },
+    /// Rename a saved profile.
+    RenameProfile { from: String, to: String },
     /// Set an FxEffect intensity (0.0–1.0)
     SetEffectIntensity { effect: FxEffectId, value: f64 },
     /// Enable or disable a specific FxEffect
@@ -35,6 +40,14 @@ pub enum Command {
     RemoveBand { index: usize },
     /// Change the filter type of an existing band
     SetBandType { index: usize, band_type: BandType },
+    /// Reset to defaults: flat EQ (no bands), all effects off, 0 dB preamp
+    Reset,
+    /// Export the current EQ (preamp + bands) to an EqualizerAPO `.txt` file
+    ExportApo { path: String },
+    /// Store the current chain state into an in-memory A/B slot ("a" or "b")
+    StoreSlot { slot: AbSlot },
+    /// Recall a previously stored A/B slot onto the chain
+    RecallSlot { slot: AbSlot },
     /// Set overall preamp gain in dB
     SetPreamp { db: f64 },
     /// Enable or disable the entire processing chain
@@ -63,6 +76,13 @@ pub enum Command {
     Subscribe,
     /// Stop the daemon
     Shutdown,
+}
+
+/// One of the two in-memory comparison slots for quick A/B auditioning.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AbSlot {
+    A,
+    B,
 }
 
 /// Serializable mirror of FxEffect (avoids depending on resonance-dsp in serde derives)
@@ -184,6 +204,8 @@ pub enum Response {
     Ok,
     State(DaemonState),
     PresetList(Vec<String>),
+    /// Name of the profile a preset was imported as (reply to `ImportPreset`)
+    Imported(String),
     /// List of output→profile mappings (output node.name, profile name)
     Mappings(Vec<(String, String)>),
     Error(String),
@@ -269,6 +291,18 @@ mod tests {
             band_type: BandType::LowPass,
         });
         command_round_trip(&Command::RemoveBand { index: 1 });
+        command_round_trip(&Command::ImportPreset {
+            path: "/tmp/rock.fac".into(),
+            name: None,
+        });
+        command_round_trip(&Command::ImportPreset {
+            path: "/tmp/rock.fac".into(),
+            name: Some("Rock".into()),
+        });
+        command_round_trip(&Command::RenameProfile {
+            from: "Rock".into(),
+            to: "Rock Night".into(),
+        });
         command_round_trip(&Command::SaveProfile {
             name: "night".into(),
         });

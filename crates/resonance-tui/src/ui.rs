@@ -37,12 +37,79 @@ pub fn render(app: &App, frame: &mut Frame) {
     if let InputMode::Settings(s) = &app.mode {
         render_settings(s, app, frame, frame.area());
     }
+    if let InputMode::Help = &app.mode {
+        render_help(frame, frame.area());
+    }
+}
+
+// ── Help overlay ────────────────────────────────────────────────────────────
+
+fn render_help(frame: &mut Frame, area: Rect) {
+    let dialog = centered_rect(area, 60, 80);
+    frame.render_widget(Clear, dialog);
+
+    let key = |k: &str, d: &str| {
+        Line::from(vec![
+            Span::styled(
+                format!("  {k:<14}"),
+                Style::default().fg(Color::Cyan).bold(),
+            ),
+            Span::styled(d.to_string(), Style::default().fg(Color::Gray)),
+        ])
+    };
+    let head = |s: &str| {
+        Line::from(Span::styled(
+            format!(" {s}"),
+            Style::default().fg(Color::Yellow).bold(),
+        ))
+    };
+
+    let lines = vec![
+        head("Navigation"),
+        key("Tab", "switch panel (effects / bands)"),
+        key("↑ ↓", "move selection"),
+        key("? ", "toggle this help"),
+        key("q / Ctrl-C", "quit"),
+        Line::raw(""),
+        head("Effects panel"),
+        key("← →", "adjust intensity (Shift = ×2 step)"),
+        key("Space", "toggle effect on/off"),
+        Line::raw(""),
+        head("Bands panel"),
+        key("← →", "adjust selected field"),
+        key("Space", "toggle band on/off"),
+        key("a", "add band"),
+        key("d / Del", "remove band"),
+        key("t", "cycle band type"),
+        Line::raw(""),
+        head("Global"),
+        key("+ / -", "preamp ±0.5 dB"),
+        key("p", "power on/off"),
+        key("l", "load preset (file browser)"),
+        key("o", "select output device"),
+        key("s", "settings (profiles / mappings)"),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  press any key to close",
+            Style::default().fg(Color::DarkGray).italic(),
+        )),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Magenta))
+        .title(Span::styled(
+            " Keybindings ",
+            Style::default().fg(Color::Magenta).bold(),
+        ));
+    frame.render_widget(Paragraph::new(lines).block(block), dialog);
 }
 
 // ── Footer / contextual help ───────────────────────────────────────────────
 
 fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
-    let common = "[Tab] focus  [↑↓] select  [←→] adjust  [+/-] preamp  [Space] toggle  [l] load  [s] settings  [o] output  [p] power  [q] quit";
+    let common = "[Tab] focus  [↑↓] select  [←→] adjust  [+/-] preamp  [Space] toggle  [l] load  [s] settings  [o] output  [p] power  [?] help  [q] quit";
     let ctx = match app.focus {
         Panel::Effects => "  •  [←→] intensity",
         Panel::Bands => "  •  [a] add  [d] del  [t] type",
@@ -793,9 +860,9 @@ fn render_settings(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect) 
 }
 
 fn settings_footer_hint(s: &SettingsState) -> String {
-    let base = " [Tab/1-4] switch  [↑↓] select  [Esc] close";
+    let base = " [Tab/←→/1-4] switch  [↑↓] select  [Esc] close";
     let ctx = match s.tab {
-        0 => "  •  [Enter] load  [n] save  [d] delete",
+        0 => "  •  [Enter] load  [n] save  [r] rename  [d] delete",
         1 => "  •  [m] map  [d] unmap",
         2 => "  •  [Enter] route  [m] map to profile",
         3 => "  •  [Enter/Space] edit/toggle",
@@ -877,7 +944,7 @@ fn render_tab_profiles(s: &SettingsState, app: &App, frame: &mut Frame, area: Re
     }
 
     frame.render_widget(
-        Paragraph::new(" [Enter] load  [n] save current  [d] delete")
+        Paragraph::new(" [Enter] load  [n] save current  [r] rename  [d] delete")
             .style(Style::default().fg(Color::DarkGray)),
         hints,
     );

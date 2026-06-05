@@ -173,6 +173,28 @@ impl GuiApp {
     fn queue(&mut self, cmd: Command) {
         self.pending.push(cmd);
     }
+
+    /// Import a preset file as a profile (our own format), then load that
+    /// profile — mirrors the TUI flow so presets are always captured, not just
+    /// applied transiently.
+    fn import_and_load(&mut self, path: String) {
+        let Some(ipc) = self.ipc.as_mut() else {
+            return;
+        };
+        match ipc.send_recv(Command::ImportPreset { path, name: None }) {
+            Ok(Response::Imported(name)) => {
+                self.queue(Command::LoadProfile { name: name.clone() });
+                self.status = format!("imported + loaded '{name}'");
+                self.needs_meta = true;
+            }
+            Ok(Response::Error(e)) => self.status = format!("import failed: {e}"),
+            Ok(_) => self.status = "import failed".into(),
+            Err(e) => {
+                self.status = format!("error: {e}");
+                self.ipc = None;
+            }
+        }
+    }
 }
 
 impl eframe::App for GuiApp {
@@ -736,6 +758,18 @@ impl GuiApp {
                             self.needs_meta = true;
                         }
                         if ui
+                            .button("Rename")
+                            .on_hover_text("rename to the name in the text box above")
+                            .clicked()
+                            && !self.profile_name.trim().is_empty()
+                        {
+                            self.queue(Command::RenameProfile {
+                                from: name.clone(),
+                                to: self.profile_name.trim().to_string(),
+                            });
+                            self.needs_meta = true;
+                        }
+                        if ui
                             .button("Map")
                             .on_hover_text("map active output")
                             .clicked()
@@ -818,7 +852,7 @@ impl GuiApp {
                 });
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.button("Load selected").clicked() {
+                    if ui.button("Import & load").clicked() {
                         activate = Some(browser.cursor);
                     }
                     if ui.button("Cancel").clicked() {
@@ -839,7 +873,7 @@ impl GuiApp {
             });
 
         if let Some(path) = to_load {
-            self.queue(Command::LoadPreset { path });
+            self.import_and_load(path);
             close = true;
         }
         if !open || close {
