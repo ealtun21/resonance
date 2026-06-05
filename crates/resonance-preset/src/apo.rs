@@ -73,8 +73,16 @@ fn parse_filter_line(line: &str, ln: usize) -> Result<Option<EqBand>, ApoError> 
         _ => return Ok(None),
     };
 
-    let filter_type_str = tokens.next().unwrap_or("");
-    let filter_type = parse_filter_type(filter_type_str, ln)?;
+    let mut filter_type_str = tokens.next().unwrap_or("").to_string();
+    // Shelf slopes are written as two tokens, e.g. "LS 12dB" — fold the slope in.
+    if let Some(t) = tokens.peek() {
+        if *t == "6dB" || *t == "12dB" {
+            filter_type_str.push(' ');
+            filter_type_str.push_str(t);
+            tokens.next();
+        }
+    }
+    let filter_type = parse_filter_type(&filter_type_str, ln)?;
 
     let mut freq = 1000.0f64;
     let mut gain_db = 0.0f64;
@@ -116,6 +124,65 @@ fn parse_filter_line(line: &str, ln: usize) -> Result<Option<EqBand>, ApoError> 
         q,
         enabled,
     }))
+}
+
+/// Serialize a preamp + EQ bands back to EqualizerAPO `.txt` syntax.
+///
+/// Inverse of [`parse_apo`] for the subset we model (per-band `Filter` lines;
+/// the GraphicEQ shorthand is not re-emitted — every band becomes an explicit
+/// `Filter` line so the type/Q survive the round-trip).
+pub fn write_apo(preamp_db: f64, bands: &[EqBand]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Preamp: {preamp_db:.1} dB\n"));
+    for (i, b) in bands.iter().enumerate() {
+        let state = if b.enabled { "ON" } else { "OFF" };
+        let kw = apo_keyword(b.filter_type);
+        // Shelves/peaking carry gain; pass/notch/allpass omit it (APO ignores it there).
+        out.push_str(&format!(
+            "Filter {n}: {state} {kw} Fc {fc:.0} Hz",
+            n = i + 1,
+            fc = b.freq,
+        ));
+        if filter_uses_gain(b.filter_type) {
+            out.push_str(&format!(" Gain {g:.1} dB", g = b.gain_db));
+        }
+        out.push_str(&format!(" Q {q:.3}\n", q = b.q));
+    }
+    out
+}
+
+/// EqualizerAPO keyword for a filter type (inverse of [`parse_filter_type`]).
+fn apo_keyword(t: ApoFilterType) -> &'static str {
+    match t {
+        ApoFilterType::Peaking => "PK",
+        ApoFilterType::LowShelf => "LS",
+        ApoFilterType::LowShelf12Db => "LS 12dB",
+        ApoFilterType::LowShelfQ => "LSC",
+        ApoFilterType::HighShelf => "HS",
+        ApoFilterType::HighShelf12Db => "HS 12dB",
+        ApoFilterType::HighShelfQ => "HSC",
+        ApoFilterType::LowPass => "LP",
+        ApoFilterType::LowPassQ => "LPQ",
+        ApoFilterType::HighPass => "HP",
+        ApoFilterType::HighPassQ => "HPQ",
+        ApoFilterType::BandPass => "BP",
+        ApoFilterType::Notch => "NO",
+        ApoFilterType::AllPass => "AP",
+    }
+}
+
+/// Whether a filter type carries a meaningful `Gain` term.
+fn filter_uses_gain(t: ApoFilterType) -> bool {
+    matches!(
+        t,
+        ApoFilterType::Peaking
+            | ApoFilterType::LowShelf
+            | ApoFilterType::LowShelf12Db
+            | ApoFilterType::LowShelfQ
+            | ApoFilterType::HighShelf
+            | ApoFilterType::HighShelf12Db
+            | ApoFilterType::HighShelfQ
+    )
 }
 
 fn parse_filter_type(s: &str, ln: usize) -> Result<ApoFilterType, ApoError> {
@@ -199,5 +266,77 @@ mod tests {
         assert_eq!(preset.bands.len(), 3);
         assert!((preset.bands[1].freq - 100.0).abs() < 0.01);
         assert!((preset.bands[1].gain_db - (-2.5)).abs() < 0.001);
+    }
+
+    #[test]
+    fn write_apo_round_trips_through_parser() {
+        let bands = vec![
+            EqBand {
+                filter_type: ApoFilterType::Peaking,
+                freq: 1000.0,
+                gain_db: -3.0,
+                q: 1.41,
+                enabled: true,
+            },
+            EqBand {
+                filter_type: ApoFilterType::HighShelf,
+                freq: 10000.0,
+                gain_db: 2.5,
+                q: 0.707,
+                enabled: false,
+            },
+            EqBand {
+                filter_type: ApoFilterType::HighPass,
+                freq: 30.0,
+                gain_db: 0.0,
+                q: 0.707,
+                enabled: true,
+            },
+        ];
+        let text = write_apo(-6.0, &bands);
+        let re = parse_apo(&text).unwrap();
+        assert!((re.preamp_db - (-6.0)).abs() < 1e-9);
+        assert_eq!(re.bands.len(), 3);
+        for (a, b) in bands.iter().zip(&re.bands) {
+            assert_eq!(a.filter_type, b.filter_type, "type mismatch");
+            assert!((a.freq - b.freq).abs() < 0.5, "freq mismatch");
+            assert!((a.q - b.q).abs() < 0.01, "q mismatch");
+            assert_eq!(a.enabled, b.enabled, "enabled mismatch");
+            if filter_uses_gain(a.filter_type) {
+                assert!((a.gain_db - b.gain_db).abs() < 0.05, "gain mismatch");
+            }
+        }
+    }
+
+    #[test]
+    fn write_apo_emits_all_keywords() {
+        use ApoFilterType::*;
+        for t in [
+            Peaking,
+            LowShelf,
+            LowShelf12Db,
+            LowShelfQ,
+            HighShelf,
+            HighShelf12Db,
+            HighShelfQ,
+            LowPass,
+            LowPassQ,
+            HighPass,
+            HighPassQ,
+            BandPass,
+            Notch,
+            AllPass,
+        ] {
+            let band = EqBand {
+                filter_type: t,
+                freq: 500.0,
+                gain_db: 1.0,
+                q: 1.0,
+                enabled: true,
+            };
+            let text = write_apo(0.0, &[band]);
+            let re = parse_apo(&text).unwrap();
+            assert_eq!(re.bands[0].filter_type, t, "keyword round-trip for {t:?}");
+        }
     }
 }
