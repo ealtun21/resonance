@@ -287,6 +287,34 @@ fn print_state(p: &Paint, s: &resonance_ipc::DaemonState) {
         s.channels
     );
 
+    // Live meters.
+    let m = &s.meters;
+    let dbfs = |lin: f32| {
+        if lin <= 1e-6 {
+            "-inf".to_string()
+        } else {
+            format!("{:+.1}", 20.0 * lin.log10())
+        }
+    };
+    let clip = if m.clip {
+        p.red(" CLIP")
+    } else {
+        String::new()
+    };
+    println!(
+        "{}in {} dB  out {} dB{}",
+        label("levels"),
+        dbfs(m.in_peak),
+        dbfs(m.out_peak),
+        clip
+    );
+    println!(
+        "{}{:.0}% ({} µs/block)",
+        label("dsp"),
+        m.dsp_load * 100.0,
+        m.dsp_frame_us
+    );
+
     // Effects with intensity bars
     println!();
     println!("{}", p.bold("effects"));

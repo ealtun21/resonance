@@ -68,6 +68,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         head("Navigation"),
         key("Tab", "switch panel (effects / bands)"),
         key("↑ ↓", "move selection"),
+        key("Ctrl-z / Ctrl-y", "undo / redo"),
         key("? ", "toggle this help"),
         key("q / Ctrl-C", "quit"),
         Line::raw(""),
@@ -172,9 +173,37 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         format!("  {}", app.status)
     };
 
+    // Live meters.
+    let meters = app.state.as_ref().map(|s| s.meters).unwrap_or_default();
+    let db = |lin: f32| {
+        if lin <= 1e-6 {
+            "-inf".to_string()
+        } else {
+            format!("{:+.0}", 20.0 * lin.log10())
+        }
+    };
+    let clip_active = app
+        .clip_until
+        .map(|t| std::time::Instant::now() < t)
+        .unwrap_or(false);
+    let level_color = if clip_active {
+        Color::Red
+    } else {
+        Color::Green
+    };
+    let meter_str = format!("I {} O {} dB", db(meters.in_peak), db(meters.out_peak));
+    let dsp_str = format!("DSP {:.0}%", meters.dsp_load * 100.0);
+    let dsp_color = if meters.dsp_load > 0.8 {
+        Color::Red
+    } else if meters.dsp_load > 0.5 {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    };
+
     let sep = || Span::styled(" │ ", Style::default().fg(Color::DarkGray));
 
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(" ♪ Resonance ", Style::default().fg(Color::Magenta).bold()),
         power_span,
         sep(),
@@ -183,11 +212,21 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         Span::styled(sr, Style::default().fg(Color::DarkGray)),
         sep(),
         Span::styled(preamp, Style::default().fg(preamp_color)),
-        Span::styled(output_str, Style::default().fg(Color::Cyan)),
-        Span::styled(status_str, Style::default().fg(status_color)),
-    ]);
+        sep(),
+        Span::styled(meter_str, Style::default().fg(level_color)),
+        Span::raw(" "),
+        Span::styled(dsp_str, Style::default().fg(dsp_color)),
+    ];
+    if clip_active {
+        spans.push(Span::styled(
+            " CLIP",
+            Style::default().fg(Color::Red).bold(),
+        ));
+    }
+    spans.push(Span::styled(output_str, Style::default().fg(Color::Cyan)));
+    spans.push(Span::styled(status_str, Style::default().fg(status_color)));
 
-    frame.render_widget(Paragraph::new(line), area);
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 // ── EQ curve ──────────────────────────────────────────────────────────────

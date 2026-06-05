@@ -1,5 +1,6 @@
 mod config;
 mod ipc_server;
+mod meters;
 mod pw_node;
 mod shutdown;
 mod spectrum;
@@ -36,7 +37,8 @@ async fn main() -> Result<()> {
         .sample_rate(48000.0)
         .build();
 
-    let shared = state::SharedState::new(cmd_tx, route_tx);
+    let meters = std::sync::Arc::new(meters::AtomicMeters::default());
+    let shared = state::SharedState::new(cmd_tx, route_tx, meters.clone());
 
     // Spectrum computation task
     let spectrum_state = shared.clone();
@@ -85,6 +87,7 @@ async fn main() -> Result<()> {
         output_tx,
         route_rx,
         sinks_tx,
+        meters,
     )?;
 
     // IPC server (blocks until shutdown)

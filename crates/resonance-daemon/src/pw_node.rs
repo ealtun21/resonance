@@ -5,6 +5,7 @@
 ///   3. Registry listener creates links: sink-monitor → filter-in,
 ///      filter-out → real device.
 ///   4. WirePlumber metadata sets "Resonance EQ" as system default sink.
+use crate::meters::{AtomicMeters, Sample, peak_rms, peak_rms_f32};
 use crate::state::AudioCommand;
 use anyhow::Result;
 use pipewire as pw;
@@ -18,6 +19,7 @@ use std::{
     os::raw::c_void,
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
+    time::Instant,
 };
 use tracing::info;
 
@@ -50,6 +52,11 @@ struct GraphState {
     out_links: Vec<pw::link::Link>,
     monitor_links: Vec<pw::link::Link>,
     metadata_obj: Option<pw::metadata::Metadata>,
+    /// Listener that captures the pre-existing default sink from metadata.
+    metadata_listener: Option<pw::metadata::MetadataListener>,
+    /// PipeWire's default sink name *before* Resonance took over — our first-choice
+    /// downstream target. Written by the metadata listener, read in `reroute`.
+    original_default: Arc<Mutex<Option<String>>>,
     default_set: bool,
     /// Reports the node.name of the real sink Resonance currently feeds, on change.
     output_tx: tokio::sync::mpsc::UnboundedSender<String>,
@@ -74,6 +81,8 @@ struct FilterData {
     spectrum_tx: rtrb::Producer<f32>,
     /// Reusable interleaved f64 scratch buffer — avoids allocating every RT callback.
     scratch: Vec<f64>,
+    /// Live meters published to the IPC thread.
+    meters: Arc<AtomicMeters>,
 }
 
 /// Pre-allocated scratch capacity: a generous upper bound on the PipeWire quantum
@@ -92,6 +101,7 @@ pub fn spawn(
     output_tx: tokio::sync::mpsc::UnboundedSender<String>,
     route_rx: std::sync::mpsc::Receiver<String>,
     sinks_tx: tokio::sync::mpsc::UnboundedSender<Vec<String>>,
+    meters: Arc<AtomicMeters>,
 ) -> Result<JoinHandle<()>> {
     Ok(thread::Builder::new()
         .name("resonance-pw".into())
@@ -103,6 +113,7 @@ pub fn spawn(
                 output_tx,
                 route_rx,
                 sinks_tx,
+                meters,
             ) {
                 tracing::error!("PipeWire thread: {e:#}");
             }
@@ -116,6 +127,7 @@ fn run(
     output_tx: tokio::sync::mpsc::UnboundedSender<String>,
     route_rx: std::sync::mpsc::Receiver<String>,
     sinks_tx: tokio::sync::mpsc::UnboundedSender<Vec<String>>,
+    meters: Arc<AtomicMeters>,
 ) -> Result<()> {
     pw::init();
 
@@ -133,6 +145,7 @@ fn run(
         cmd_rx,
         spectrum_tx,
         scratch: vec![0.0; MAX_QUANTUM * CHANNELS],
+        meters,
     });
     let fd_ptr = Box::into_raw(fd);
 
@@ -235,6 +248,8 @@ fn run(
         out_links: Vec::new(),
         monitor_links: Vec::new(),
         metadata_obj: None,
+        metadata_listener: None,
+        original_default: Arc::new(Mutex::new(None)),
         default_set: false,
         output_tx,
         last_output: None,
@@ -371,6 +386,24 @@ fn on_global(
             };
             if props.get("metadata.name") == Some("default") && g.metadata_obj.is_none() {
                 if let Ok(meta) = registry.bind::<pw::metadata::Metadata, _>(obj) {
+                    // Capture the existing default sink before we override it, so
+                    // our first downstream target is whatever PipeWire used before.
+                    let orig = Arc::clone(&g.original_default);
+                    let listener = meta
+                        .add_listener_local()
+                        .property(move |_subject, key, _type, value| {
+                            if key == Some("default.audio.sink") {
+                                if let Some(name) = value.and_then(parse_metadata_name) {
+                                    let mut o = orig.lock().unwrap();
+                                    if o.is_none() {
+                                        *o = Some(name);
+                                    }
+                                }
+                            }
+                            0
+                        })
+                        .register();
+                    g.metadata_listener = Some(listener);
                     g.metadata_obj = Some(meta);
                     try_set_default(g);
                 }
@@ -433,28 +466,40 @@ fn reroute(g: &mut GraphState) {
 
     // filter-out → real device
     if g.filter_node_id != u32::MAX {
-        // Prefer the user-selected sink; fall back to any available sink.
-        let real_sink_id = g
-            .preferred_output
-            .as_deref()
-            .and_then(|pref| {
+        // Target priority (scoped so the shared borrows end before we relink):
+        //   1. user-selected sink (SetOutputTarget)
+        //   2. PipeWire's default sink from before Resonance took over
+        //   3. any available real sink
+        let real_sink_id = {
+            let find_sink = |name: &str| -> Option<u32> {
                 g.nodes
                     .iter()
                     .find(|(id, n)| {
-                        n.media_class == "Audio/Sink" && n.name == pref && **id != g.sink_node_id
+                        n.media_class == "Audio/Sink" && n.name == name && **id != g.sink_node_id
                     })
                     .map(|(id, _)| *id)
-            })
-            .or_else(|| {
-                g.nodes
-                    .iter()
-                    .find(|(id, n)| {
-                        n.media_class == "Audio/Sink"
-                            && n.name != "resonance"
-                            && **id != g.sink_node_id
-                    })
-                    .map(|(id, _)| *id)
-            });
+            };
+            g.preferred_output
+                .as_deref()
+                .and_then(&find_sink)
+                .or_else(|| {
+                    g.original_default
+                        .lock()
+                        .unwrap()
+                        .as_deref()
+                        .and_then(&find_sink)
+                })
+                .or_else(|| {
+                    g.nodes
+                        .iter()
+                        .find(|(id, n)| {
+                            n.media_class == "Audio/Sink"
+                                && n.name != "resonance"
+                                && **id != g.sink_node_id
+                        })
+                        .map(|(id, _)| *id)
+                })
+        };
         if let Some(tid) = real_sink_id {
             // Report the device name to the daemon when it changes (for output→profile mapping).
             if let Some(name) = g.nodes.get(&tid).map(|n| n.name.clone()) {
@@ -481,6 +526,18 @@ fn reroute(g: &mut GraphState) {
             }
         }
     }
+}
+
+/// Extract the sink name from a PipeWire metadata default value, e.g.
+/// `{ "name": "alsa_output.pci-0000_00_1b.0.analog-stereo" }` → the name.
+fn parse_metadata_name(value: &str) -> Option<String> {
+    let key = value.find("\"name\"")?;
+    let after = &value[key + 6..];
+    let colon = after.find(':')?;
+    let rest = &after[colon + 1..];
+    let start = rest.find('"')? + 1;
+    let end = rest[start..].find('"')? + start;
+    Some(rest[start..end].to_string())
 }
 
 fn create_links(
@@ -531,6 +588,16 @@ fn try_set_default(g: &mut GraphState) {
 // RT process callback
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Peak/RMS across two mono `f32` channel buffers (RT-thread passthrough metering).
+///
+/// # Safety
+/// `a` and `b` must point to at least `n` valid `f32` samples.
+unsafe fn stereo_peak_rms(a: *const f32, b: *const f32, n: usize) -> (f32, f32) {
+    let (pa, ra) = peak_rms_f32(unsafe { std::slice::from_raw_parts(a, n) });
+    let (pb, rb) = peak_rms_f32(unsafe { std::slice::from_raw_parts(b, n) });
+    (pa.max(pb), ((ra * ra + rb * rb) / 2.0).sqrt())
+}
+
 unsafe extern "C" fn filter_process_cb(data: *mut c_void, position: *mut spa_io_position) {
     unsafe {
         let fd = &mut *(data as *mut FilterData);
@@ -559,9 +626,21 @@ unsafe extern "C" fn filter_process_cb(data: *mut c_void, position: *mut spa_io_
             if have_in {
                 std::ptr::copy_nonoverlapping(in0, out0, n);
                 std::ptr::copy_nonoverlapping(in1, out1, n);
+                // Passthrough: in == out, no DSP cost.
+                let (p, r) = stereo_peak_rms(in0, in1, n);
+                fd.meters.store(Sample {
+                    in_peak: p,
+                    out_peak: p,
+                    in_rms: r,
+                    out_rms: r,
+                    clip: p >= 0.999,
+                    dsp_load: 0.0,
+                    dsp_frame_us: 0,
+                });
             } else {
                 std::ptr::write_bytes(out0, 0, n * std::mem::size_of::<f32>());
                 std::ptr::write_bytes(out1, 0, n * std::mem::size_of::<f32>());
+                fd.meters.store(Sample::default());
             }
             return;
         }
@@ -577,11 +656,32 @@ unsafe extern "C" fn filter_process_cb(data: *mut c_void, position: *mut spa_io_
             buf[i * 2] = *in0.add(i) as f64;
             buf[i * 2 + 1] = *in1.add(i) as f64;
         }
+        let (in_peak, in_rms) = peak_rms(buf);
+        let t0 = Instant::now();
         fd.chain.process(buf);
+        let dt = t0.elapsed();
+        let (out_peak, out_rms) = peak_rms(buf);
         for i in 0..n {
             *out0.add(i) = buf[i * 2] as f32;
             *out1.add(i) = buf[i * 2 + 1] as f32;
         }
+
+        // DSP load = process time / the block's real-time budget (n / sample_rate).
+        let budget = n as f64 / fd.chain.sample_rate;
+        let load = if budget > 0.0 {
+            (dt.as_secs_f64() / budget) as f32
+        } else {
+            0.0
+        };
+        fd.meters.store(Sample {
+            in_peak,
+            out_peak,
+            in_rms,
+            out_rms,
+            clip: out_peak >= 0.999,
+            dsp_load: load,
+            dsp_frame_us: dt.as_micros() as u32,
+        });
 
         let sn = n.min(fd.spectrum_tx.slots());
         for i in 0..sn {
@@ -696,6 +796,21 @@ mod tests {
             .channels(2)
             .sample_rate(48000.0)
             .build()
+    }
+
+    #[test]
+    fn parse_metadata_name_extracts_sink() {
+        assert_eq!(
+            parse_metadata_name("{ \"name\": \"alsa_output.pci-0000_00_1b.0.analog-stereo\" }")
+                .as_deref(),
+            Some("alsa_output.pci-0000_00_1b.0.analog-stereo")
+        );
+        assert_eq!(
+            parse_metadata_name("{\"name\":\"bluez_output.AA_BB\"}").as_deref(),
+            Some("bluez_output.AA_BB")
+        );
+        assert_eq!(parse_metadata_name("null"), None);
+        assert_eq!(parse_metadata_name("{}"), None);
     }
 
     #[test]

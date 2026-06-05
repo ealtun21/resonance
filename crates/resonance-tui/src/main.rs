@@ -110,6 +110,19 @@ fn handle_key(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_normal(app: &mut App, key: KeyEvent) {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('z') => {
+                app.undo();
+                return;
+            }
+            KeyCode::Char('y') => {
+                app.redo();
+                return;
+            }
+            _ => {}
+        }
+    }
     match key.code {
         KeyCode::Tab => app.next_panel(),
         KeyCode::Char('p') => app.toggle_power(),

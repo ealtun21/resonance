@@ -1,3 +1,4 @@
+use crate::meters::AtomicMeters;
 use resonance_dsp::{chain::FxEffect, chain::ProcessorChain, effects::Effect};
 use resonance_ipc::{BandState, BandType, DaemonState, EffectsState};
 use rtrb::Producer;
@@ -64,6 +65,8 @@ pub struct Inner {
     pub route_tx: std::sync::mpsc::Sender<String>,
     /// In-memory A/B comparison slots ([A, B]); filled by `StoreSlot`.
     pub ab_slots: [Option<crate::config::Profile>; 2],
+    /// Live meters written by the RT thread, read on snapshot.
+    pub meters: Arc<AtomicMeters>,
 }
 
 #[derive(Clone)]
@@ -73,6 +76,7 @@ impl SharedState {
     pub fn new(
         audio_tx: Producer<AudioCommand>,
         route_tx: std::sync::mpsc::Sender<String>,
+        meters: Arc<AtomicMeters>,
     ) -> Self {
         let chain = ProcessorChain::builder()
             .channels(2)
@@ -89,6 +93,7 @@ impl SharedState {
             preferred_output: None,
             route_tx,
             ab_slots: [None, None],
+            meters,
         })))
     }
 
@@ -139,6 +144,7 @@ impl SharedState {
             mapped_profile: inner.mapped_profile.clone(),
             available_sinks: inner.available_sinks.clone(),
             preferred_output: inner.preferred_output.clone(),
+            meters: inner.meters.snapshot(),
         }
     }
 
@@ -166,7 +172,7 @@ mod tests {
     fn shared() -> SharedState {
         let (tx, _rx) = rtrb::RingBuffer::<AudioCommand>::new(16);
         let (route_tx, _route_rx) = std::sync::mpsc::channel();
-        SharedState::new(tx, route_tx)
+        SharedState::new(tx, route_tx, Arc::new(AtomicMeters::default()))
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use ratatui::layout::Rect;
 use resonance_ipc::{
-    Command, DaemonState, FxEffectId, Response,
+    BandState, Command, DaemonState, EffectsState, FxEffectId, Response,
     transport::{read_response, write_command},
 };
 use std::{
@@ -67,6 +67,19 @@ pub struct App {
     pub spectrum_display: Vec<f32>,
     last_anim: Instant,
     ipc: Option<IpcClient>,
+    undo_stack: Vec<Snapshot>,
+    redo_stack: Vec<Snapshot>,
+    /// While `Some` and in the future, the output clip indicator flashes.
+    pub clip_until: Option<Instant>,
+}
+
+/// A restorable snapshot of the editable chain state (for undo/redo).
+#[derive(Clone)]
+struct Snapshot {
+    preamp_db: f64,
+    enabled: bool,
+    bands: Vec<BandState>,
+    effects: EffectsState,
 }
 
 impl App {
@@ -86,7 +99,69 @@ impl App {
             spectrum_display: Vec::new(),
             last_anim: Instant::now(),
             ipc: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            clip_until: None,
         }
+    }
+
+    // ── Undo / redo ─────────────────────────────────────────────────────────
+
+    fn snapshot(&self) -> Option<Snapshot> {
+        let s = self.state.as_ref()?;
+        Some(Snapshot {
+            preamp_db: s.preamp_db,
+            enabled: s.enabled,
+            bands: s.bands.clone(),
+            effects: s.effects.clone(),
+        })
+    }
+
+    /// Record the pre-edit state. Call before any mutating action.
+    fn push_undo(&mut self) {
+        if let Some(s) = self.snapshot() {
+            self.undo_stack.push(s);
+            if self.undo_stack.len() > 100 {
+                self.undo_stack.remove(0);
+            }
+            self.redo_stack.clear();
+        }
+    }
+
+    pub fn undo(&mut self) {
+        match self.undo_stack.pop() {
+            Some(prev) => {
+                if let Some(cur) = self.snapshot() {
+                    self.redo_stack.push(cur);
+                }
+                self.apply_snapshot(&prev);
+                self.status = "undo".into();
+            }
+            None => self.status = "nothing to undo".into(),
+        }
+    }
+
+    pub fn redo(&mut self) {
+        match self.redo_stack.pop() {
+            Some(next) => {
+                if let Some(cur) = self.snapshot() {
+                    self.undo_stack.push(cur);
+                }
+                self.apply_snapshot(&next);
+                self.status = "redo".into();
+            }
+            None => self.status = "nothing to redo".into(),
+        }
+    }
+
+    fn apply_snapshot(&mut self, s: &Snapshot) {
+        self.send(Command::ApplyState {
+            preamp_db: s.preamp_db,
+            enabled: s.enabled,
+            bands: s.bands.clone(),
+            effects: s.effects.clone(),
+        });
+        self.refresh_state();
     }
 
     /// Advance the spectrum envelope toward the latest daemon bins. Fast attack,
@@ -131,6 +206,10 @@ impl App {
         };
         match ipc.get_state() {
             Ok(s) => {
+                // Latch the clip flash: the daemon reports "clipped since last poll".
+                if s.meters.clip {
+                    self.clip_until = Some(Instant::now() + Duration::from_millis(250));
+                }
                 self.state = Some(s);
                 self.status.clear();
             }
@@ -340,6 +419,7 @@ impl App {
                 let new_pct = (new_val * 100.0).round();
                 let new_val = new_pct / 100.0;
                 if (new_val - current).abs() > 0.001 {
+                    self.push_undo();
                     self.send(Command::SetEffectIntensity {
                         effect,
                         value: new_val,
@@ -371,6 +451,7 @@ impl App {
                         (band.freq, band.gain_db, q)
                     }
                 };
+                self.push_undo();
                 self.send(Command::SetBand {
                     index: idx,
                     freq: new_freq,
@@ -464,6 +545,7 @@ impl App {
     }
 
     pub fn add_band(&mut self) {
+        self.push_undo();
         self.send(Command::AddBand {
             band_type: self.prefs.default_band_type,
             freq: 1000.0,
@@ -487,6 +569,7 @@ impl App {
             return;
         };
         let next = band.band_type.next();
+        self.push_undo();
         self.send(Command::SetBandType {
             index: idx,
             band_type: next,
@@ -500,6 +583,7 @@ impl App {
             return;
         }
         let idx = self.band_cursor.min(state.bands.len() - 1);
+        self.push_undo();
         self.send(Command::RemoveBand { index: idx });
         self.refresh_state();
         if let Some(s) = &self.state {
@@ -513,6 +597,7 @@ impl App {
                 let Some(state) = &self.state else { return };
                 let effect = fx_effect_at(self.effect_cursor);
                 let enabled = !fx_enabled(state, self.effect_cursor);
+                self.push_undo();
                 self.send(Command::SetEffectEnabled { effect, enabled });
                 self.refresh_state();
             }
@@ -522,9 +607,11 @@ impl App {
                 let Some(band) = state.bands.get(idx) else {
                     return;
                 };
+                let enabled = !band.enabled;
+                self.push_undo();
                 self.send(Command::SetBandEnabled {
                     index: idx,
-                    enabled: !band.enabled,
+                    enabled,
                 });
                 self.refresh_state();
             }
@@ -535,8 +622,11 @@ impl App {
         let current = self.state.as_ref().map(|s| s.preamp_db).unwrap_or(0.0);
         let new_db = ((current + delta) * 10.0).round() / 10.0;
         let new_db = new_db.clamp(-20.0, 20.0);
-        self.send(Command::SetPreamp { db: new_db });
-        self.refresh_state();
+        if (new_db - current).abs() > 1e-6 {
+            self.push_undo();
+            self.send(Command::SetPreamp { db: new_db });
+            self.refresh_state();
+        }
     }
 
     // ── Settings popup ─────────────────────────────────────────────────────

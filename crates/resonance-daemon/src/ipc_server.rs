@@ -275,6 +275,28 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
             Response::Ok
         }
 
+        Command::ApplyState {
+            preamp_db,
+            enabled,
+            bands,
+            effects,
+        } => {
+            let (sr, channels) = {
+                let inner = state.0.lock().unwrap();
+                (inner.chain.sample_rate, inner.chain.channels)
+            };
+            let profile = Profile {
+                preamp_db,
+                enabled,
+                effects,
+                bands,
+            };
+            let chain_rt = profile.clone().into_chain(channels, sr);
+            let chain_shadow = profile.into_chain(channels, sr);
+            state.replace_chain(chain_rt, chain_shadow);
+            Response::Ok
+        }
+
         Command::Reset => {
             let (sr, channels) = {
                 let inner = state.0.lock().unwrap();

@@ -41,6 +41,13 @@ pub enum Command {
     RemoveBand { index: usize },
     /// Change the filter type of an existing band
     SetBandType { index: usize, band_type: BandType },
+    /// Replace the whole editable chain state at once (used by TUI undo/redo).
+    ApplyState {
+        preamp_db: f64,
+        enabled: bool,
+        bands: Vec<BandState>,
+        effects: EffectsState,
+    },
     /// Reset to defaults: flat EQ (no bands), all effects off, 0 dB preamp
     Reset,
     /// Export the current EQ (preamp + bands) to an EqualizerAPO `.txt` file
@@ -235,6 +242,27 @@ pub struct DaemonState {
     pub available_sinks: Vec<String>,
     /// The preferred output node name set by SetOutputTarget (if any)
     pub preferred_output: Option<String>,
+    /// Live level + DSP-load meters.
+    pub meters: Meters,
+}
+
+/// Live level + performance meters sampled on the audio RT thread.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub struct Meters {
+    /// Pre-DSP peak (linear, 0–1+), max over both channels of the last block.
+    pub in_peak: f32,
+    /// Post-DSP peak (linear, 0–1+).
+    pub out_peak: f32,
+    /// Pre-DSP RMS (linear).
+    pub in_rms: f32,
+    /// Post-DSP RMS (linear).
+    pub out_rms: f32,
+    /// Output reached/exceeded 0 dBFS since the last snapshot (latched, then cleared).
+    pub clip: bool,
+    /// DSP time as a fraction of the block's real-time budget (0–1+; >1 = xrun risk).
+    pub dsp_load: f32,
+    /// Last `ProcessorChain::process` duration in microseconds.
+    pub dsp_frame_us: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -304,6 +332,29 @@ mod tests {
         command_round_trip(&Command::RenameProfile {
             from: "Rock".into(),
             to: "Rock Night".into(),
+        });
+        command_round_trip(&Command::ApplyState {
+            preamp_db: -2.0,
+            enabled: true,
+            bands: vec![BandState {
+                band_type: BandType::Peaking,
+                freq: 1000.0,
+                gain_db: 3.0,
+                q: 1.41,
+                enabled: true,
+            }],
+            effects: EffectsState {
+                fidelity_intensity: 0.5,
+                fidelity_enabled: true,
+                ambience_intensity: 0.0,
+                ambience_enabled: false,
+                surround_intensity: 0.0,
+                surround_enabled: false,
+                dynamic_boost_intensity: 0.0,
+                dynamic_boost_enabled: false,
+                bass_intensity: 0.0,
+                bass_enabled: false,
+            },
         });
         command_round_trip(&Command::SaveProfile {
             name: "night".into(),
@@ -381,6 +432,7 @@ mod tests {
             mapped_profile: None,
             available_sinks: vec!["alsa_output.pci".into()],
             preferred_output: None,
+            meters: Meters::default(),
         };
         let bytes = to_stdvec(&Response::State(st)).expect("encode");
         let _: Response = from_bytes(&bytes).expect("decode");

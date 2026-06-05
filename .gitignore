@@ -3,7 +3,7 @@ target/
 *.swp
 *.swo
 
-# makepkg build output (PKGBUILD)
-pkg/
-src/
+# makepkg build output (PKGBUILD) — root-anchored so crate src/ dirs aren't ignored
+/pkg/
+/src/
 *.pkg.tar.zst
