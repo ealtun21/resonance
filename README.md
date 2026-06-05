@@ -19,23 +19,36 @@ EqualizerAPO `.txt` configs.
 
 ## Install
 
-### Arch Linux (AUR-style, from source)
+### One-liner (prebuilt, any distro)
 
-The repo ships a `PKGBUILD`. One command builds and installs a real pacman package:
+Downloads the latest release tarball, verifies its checksum, and installs the
+binaries into `/usr/local/bin` (or `~/.local/bin` if unprivileged):
 
 ```sh
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/ealtun21/resonance/master/install.sh | bash
 ```
 
-This runs `makepkg -si` under the hood, so the package is tracked by pacman and
-removable with `sudo pacman -R resonance`. On non-Arch distros `install.sh` falls
-back to `cargo build --release` + install into `/usr/local/bin`.
+Pin a version with `RESONANCE_VERSION=v0.1.0` or change the target with
+`PREFIX=~/.local`. The binaries are dynamic — see
+[runtime requirements](#prebuilt-release-binaries).
 
-Manual Arch build:
+### Arch Linux (AUR-style, from source)
+
+The repo ships a `PKGBUILD`. Run the same script **inside a checkout** and it
+builds a real pacman package instead of fetching prebuilts:
+
+```sh
+./install.sh        # makepkg -si — tracked by pacman, removable with: sudo pacman -R resonance
+```
+
+Or invoke makepkg directly:
 
 ```sh
 makepkg -si
 ```
+
+On non-Arch checkouts `./install.sh` falls back to `cargo build --release` +
+install into the prefix. Force a source build with `FROM_SOURCE=1`.
 
 ### Prebuilt release binaries
 
