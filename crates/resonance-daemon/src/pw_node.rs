@@ -55,6 +55,12 @@ struct GraphState {
     output_tx: tokio::sync::mpsc::UnboundedSender<String>,
     /// Last output name reported (dedupe).
     last_output: Option<String>,
+    /// Preferred output node name; set via IPC command SetOutputTarget.
+    preferred_output: Option<String>,
+    /// Receives preferred-output updates from the IPC thread.
+    route_rx: std::sync::mpsc::Receiver<String>,
+    /// Sends the current set of available sink names to the daemon state.
+    sinks_tx: tokio::sync::mpsc::UnboundedSender<Vec<String>>,
 }
 
 // SAFETY: only touched from the pw main-loop thread.
@@ -84,11 +90,20 @@ pub fn spawn(
     spectrum_tx: rtrb::Producer<f32>,
     initial_chain: ProcessorChain,
     output_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    route_rx: std::sync::mpsc::Receiver<String>,
+    sinks_tx: tokio::sync::mpsc::UnboundedSender<Vec<String>>,
 ) -> Result<JoinHandle<()>> {
     Ok(thread::Builder::new()
         .name("resonance-pw".into())
         .spawn(move || {
-            if let Err(e) = run(cmd_rx, spectrum_tx, initial_chain, output_tx) {
+            if let Err(e) = run(
+                cmd_rx,
+                spectrum_tx,
+                initial_chain,
+                output_tx,
+                route_rx,
+                sinks_tx,
+            ) {
                 tracing::error!("PipeWire thread: {e:#}");
             }
         })?)
@@ -99,6 +114,8 @@ fn run(
     spectrum_tx: rtrb::Producer<f32>,
     chain: ProcessorChain,
     output_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    route_rx: std::sync::mpsc::Receiver<String>,
+    sinks_tx: tokio::sync::mpsc::UnboundedSender<Vec<String>>,
 ) -> Result<()> {
     pw::init();
 
@@ -221,6 +238,9 @@ fn run(
         default_set: false,
         output_tx,
         last_output: None,
+        preferred_output: None,
+        route_rx,
+        sinks_tx,
     }));
 
     // SAFETY: `core` and `registry` outlive the listener (same scope, dropped after mainloop).
@@ -251,12 +271,19 @@ fn run(
         let gs_timer = Arc::clone(&gs);
         let timer = mainloop.loop_().add_timer(move |_| {
             let node_id = unsafe { pw_sys::pw_filter_get_node_id(filter) };
-            if node_id != u32::MAX {
-                let mut g = gs_timer.lock().unwrap();
-                if g.filter_node_id == u32::MAX {
-                    g.filter_node_id = node_id;
-                    reroute(&mut g);
-                }
+            let mut g = gs_timer.lock().unwrap();
+            if node_id != u32::MAX && g.filter_node_id == u32::MAX {
+                g.filter_node_id = node_id;
+                reroute(&mut g);
+            }
+            // Apply any pending preferred-output changes from the IPC thread.
+            let mut reroute_needed = false;
+            while let Ok(name) = g.route_rx.try_recv() {
+                g.preferred_output = Some(name);
+                reroute_needed = true;
+            }
+            if reroute_needed {
+                reroute(&mut g);
             }
         });
         timer
@@ -394,15 +421,40 @@ fn reroute(g: &mut GraphState) {
         }
     }
 
+    // Report available sinks so the TUI can show a selection list.
+    let mut available: Vec<String> = g
+        .nodes
+        .values()
+        .filter(|n| n.media_class == "Audio/Sink" && n.name != "resonance")
+        .map(|n| n.name.clone())
+        .collect();
+    available.sort();
+    let _ = g.sinks_tx.send(available);
+
     // filter-out → real device
     if g.filter_node_id != u32::MAX {
+        // Prefer the user-selected sink; fall back to any available sink.
         let real_sink_id = g
-            .nodes
-            .iter()
-            .find(|(id, n)| {
-                n.media_class == "Audio/Sink" && n.name != "resonance" && **id != g.sink_node_id
+            .preferred_output
+            .as_deref()
+            .and_then(|pref| {
+                g.nodes
+                    .iter()
+                    .find(|(id, n)| {
+                        n.media_class == "Audio/Sink" && n.name == pref && **id != g.sink_node_id
+                    })
+                    .map(|(id, _)| *id)
             })
-            .map(|(id, _)| *id);
+            .or_else(|| {
+                g.nodes
+                    .iter()
+                    .find(|(id, n)| {
+                        n.media_class == "Audio/Sink"
+                            && n.name != "resonance"
+                            && **id != g.sink_node_id
+                    })
+                    .map(|(id, _)| *id)
+            });
         if let Some(tid) = real_sink_id {
             // Report the device name to the daemon when it changes (for output→profile mapping).
             if let Some(name) = g.nodes.get(&tid).map(|n| n.name.clone()) {

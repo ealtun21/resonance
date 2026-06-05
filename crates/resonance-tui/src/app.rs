@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use ratatui::layout::Rect;
 use resonance_ipc::{
-    BandType, Command, DaemonState, FxEffectId, Response,
+    Command, DaemonState, FxEffectId, Response,
     transport::{read_response, write_command},
 };
 use std::{
@@ -9,8 +9,12 @@ use std::{
     io::{BufReader, BufWriter, Write},
     os::unix::net::UnixStream,
     path::PathBuf,
-    time::Duration,
+    time::{Duration, Instant},
 };
+
+/// Spectrum envelope time constants: bars snap up, glide down.
+const SPECTRUM_ATTACK_TAU: f32 = 0.020;
+const SPECTRUM_DECAY_TAU: f32 = 0.20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panel {
@@ -37,6 +41,8 @@ enum BandHit {
 pub enum InputMode {
     Normal,
     Browse(crate::browser::Browser),
+    SelectOutput { sinks: Vec<String>, cursor: usize },
+    Settings(crate::settings::SettingsState),
 }
 
 impl InputMode {
@@ -55,11 +61,16 @@ pub struct App {
     pub mode: InputMode,
     pub status: String,
     pub last_frame: Rect,
+    pub prefs: crate::prefs::Prefs,
+    /// Smoothed spectrum bar heights (drawn instead of raw bins to stop flicker).
+    pub spectrum_display: Vec<f32>,
+    last_anim: Instant,
     ipc: Option<IpcClient>,
 }
 
 impl App {
     pub fn new() -> Self {
+        let prefs = crate::prefs::Prefs::load();
         Self {
             state: None,
             running: true,
@@ -70,7 +81,33 @@ impl App {
             mode: InputMode::Normal,
             status: String::new(),
             last_frame: Rect::default(),
+            prefs,
+            spectrum_display: Vec::new(),
+            last_anim: Instant::now(),
             ipc: None,
+        }
+    }
+
+    /// Advance the spectrum envelope toward the latest daemon bins. Fast attack,
+    /// slow decay — driven each frame so it's smooth regardless of the data rate.
+    pub fn animate_spectrum(&mut self) {
+        let dt = self.last_anim.elapsed().as_secs_f32().min(0.1);
+        self.last_anim = Instant::now();
+        let Some(bins) = self.state.as_ref().map(|s| s.spectrum.as_slice()) else {
+            return;
+        };
+        if self.spectrum_display.len() != bins.len() {
+            self.spectrum_display = vec![0.0; bins.len()];
+        }
+        for (disp, &raw) in self.spectrum_display.iter_mut().zip(bins.iter()) {
+            let target = raw.clamp(0.0, 1.0);
+            let tau = if target > *disp {
+                SPECTRUM_ATTACK_TAU
+            } else {
+                SPECTRUM_DECAY_TAU
+            };
+            let coeff = 1.0 - (-dt / tau).exp();
+            *disp += (target - *disp) * coeff;
         }
     }
 
@@ -115,6 +152,21 @@ impl App {
         }
     }
 
+    fn query(&mut self, cmd: Command) -> Option<Response> {
+        let Some(ipc) = self.ipc.as_mut() else {
+            self.connect();
+            return None;
+        };
+        match ipc.send_recv(cmd) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                self.status = format!("error: {e}");
+                self.ipc = None;
+                None
+            }
+        }
+    }
+
     // ── Normal-mode actions ────────────────────────────────────────────────
 
     pub fn toggle_power(&mut self) {
@@ -130,6 +182,44 @@ impl App {
 
     pub fn cancel_input(&mut self) {
         self.mode = InputMode::Normal;
+    }
+
+    pub fn begin_select_output(&mut self) {
+        let sinks = self
+            .state
+            .as_ref()
+            .map(|s| s.available_sinks.clone())
+            .unwrap_or_default();
+        let active = self
+            .state
+            .as_ref()
+            .and_then(|s| s.preferred_output.as_deref().or(s.active_output.as_deref()));
+        let cursor = active
+            .and_then(|a| sinks.iter().position(|s| s == a))
+            .unwrap_or(0);
+        self.mode = InputMode::SelectOutput { sinks, cursor };
+    }
+
+    pub fn output_move(&mut self, delta: i32) {
+        if let InputMode::SelectOutput { sinks, cursor } = &mut self.mode {
+            if sinks.is_empty() {
+                return;
+            }
+            let max = sinks.len() as i32 - 1;
+            *cursor = ((*cursor as i32 + delta).clamp(0, max)) as usize;
+        }
+    }
+
+    pub fn output_enter(&mut self) {
+        let node_name = match &self.mode {
+            InputMode::SelectOutput { sinks, cursor } => sinks.get(*cursor).cloned(),
+            _ => return,
+        };
+        self.mode = InputMode::Normal;
+        if let Some(name) = node_name {
+            self.send(Command::SetOutputTarget { node_name: name });
+            self.refresh_state();
+        }
     }
 
     /// Move the file-picker cursor.
@@ -237,16 +327,12 @@ impl App {
                 };
                 let (new_freq, new_gain, new_q) = match self.band_field {
                     BandField::Freq => {
-                        // log-scale: ±0.05 → ±1 semitone, ±0.10 → ±2 semitones
                         let semitones = delta * 20.0;
                         let f = (band.freq * 2.0_f64.powf(semitones / 12.0)).clamp(20.0, 20000.0);
                         let f = (f * 10.0).round() / 10.0;
                         (f, band.gain_db, band.q)
                     }
                     BandField::Gain => {
-                        // 0.5 dB per tick (10× delta) so it always clears the
-                        // 0.1 dB rounding grid — a smaller step rounds back to
-                        // the same value and appears "stuck".
                         let g = (band.gain_db + delta * 10.0).clamp(-20.0, 20.0);
                         let g = (g * 10.0).round() / 10.0;
                         (band.freq, g, band.q)
@@ -282,8 +368,6 @@ impl App {
     }
 
     /// Resolve a click on the bands panel to (band index, optional field).
-    /// The field is `Some` when a Freq/Gain/Q cell was hit; the Type cell
-    /// returns `Some(None)` semantics via a separate flag handled by callers.
     fn hit_band(&self, col: u16, row: u16) -> Option<(usize, BandHit)> {
         let p = crate::layout::panes(self.last_frame);
         if !crate::layout::hit(p.bands, col, row) {
@@ -344,8 +428,6 @@ impl App {
         if let Some((idx, hit)) = self.hit_band(col, row) {
             self.focus = Panel::Bands;
             self.band_cursor = idx;
-            // Scroll over a specific cell adjusts that field; elsewhere uses the
-            // currently-selected field.
             if let BandHit::Field(f) = hit {
                 self.band_field = f;
             }
@@ -355,13 +437,12 @@ impl App {
 
     pub fn add_band(&mut self) {
         self.send(Command::AddBand {
-            band_type: BandType::Peaking,
+            band_type: self.prefs.default_band_type,
             freq: 1000.0,
             gain_db: 0.0,
-            q: 1.4,
+            q: self.prefs.default_band_q,
         });
         self.refresh_state();
-        // Move cursor to new band
         if let Some(s) = &self.state {
             self.band_cursor = s.bands.len().saturating_sub(1);
         }
@@ -428,6 +509,418 @@ impl App {
         let new_db = new_db.clamp(-20.0, 20.0);
         self.send(Command::SetPreamp { db: new_db });
         self.refresh_state();
+    }
+
+    // ── Settings popup ─────────────────────────────────────────────────────
+
+    pub fn begin_settings(&mut self) {
+        let profiles = match self.query(Command::ListProfiles) {
+            Some(Response::PresetList(v)) => v,
+            _ => vec![],
+        };
+        let mappings = match self.query(Command::ListMappings) {
+            Some(Response::Mappings(v)) => v,
+            _ => vec![],
+        };
+        let sinks = self
+            .state
+            .as_ref()
+            .map(|s| s.available_sinks.clone())
+            .unwrap_or_default();
+        self.mode = InputMode::Settings(crate::settings::SettingsState::new(
+            profiles, mappings, sinks,
+        ));
+    }
+
+    pub fn settings_close(&mut self) {
+        self.mode = InputMode::Normal;
+    }
+
+    pub fn settings_set_tab(&mut self, tab: usize) {
+        if let InputMode::Settings(s) = &mut self.mode {
+            s.tab = tab;
+            s.cursor = 0;
+            s.text_input = None;
+            s.confirm = None;
+            s.sub_picker = None;
+        }
+    }
+
+    pub fn settings_tab_shift(&mut self, delta: i32) {
+        if let InputMode::Settings(s) = &mut self.mode {
+            let n = crate::settings::TABS.len() as i32;
+            s.tab = ((s.tab as i32 + delta).rem_euclid(n)) as usize;
+            s.cursor = 0;
+            s.text_input = None;
+            s.confirm = None;
+            s.sub_picker = None;
+        }
+    }
+
+    pub fn settings_move(&mut self, delta: i32) {
+        if let InputMode::Settings(s) = &mut self.mode {
+            if let Some(sp) = &mut s.sub_picker {
+                let max = sp.profiles.len().saturating_sub(1) as i32;
+                sp.cursor = (sp.cursor as i32 + delta).clamp(0, max) as usize;
+                return;
+            }
+            let max = s.max_cursor() as i32;
+            s.cursor = (s.cursor as i32 + delta).clamp(0, max) as usize;
+        }
+    }
+
+    pub fn settings_has_text_input(&self) -> bool {
+        matches!(&self.mode, InputMode::Settings(s) if s.text_input.is_some())
+    }
+
+    pub fn settings_has_confirm(&self) -> bool {
+        matches!(&self.mode, InputMode::Settings(s) if s.confirm.is_some())
+    }
+
+    pub fn settings_has_sub_picker(&self) -> bool {
+        matches!(&self.mode, InputMode::Settings(s) if s.sub_picker.is_some())
+    }
+
+    pub fn settings_text_char(&mut self, c: char) {
+        if let InputMode::Settings(s) = &mut self.mode {
+            if let Some(ti) = &mut s.text_input {
+                ti.insert(c);
+            }
+        }
+    }
+
+    pub fn settings_backspace(&mut self) {
+        if let InputMode::Settings(s) = &mut self.mode {
+            if let Some(ti) = &mut s.text_input {
+                ti.backspace();
+            }
+        }
+    }
+
+    pub fn settings_cursor_left(&mut self) {
+        if let InputMode::Settings(s) = &mut self.mode {
+            if let Some(ti) = &mut s.text_input {
+                ti.cursor_left();
+            }
+        }
+    }
+
+    pub fn settings_cursor_right(&mut self) {
+        if let InputMode::Settings(s) = &mut self.mode {
+            if let Some(ti) = &mut s.text_input {
+                ti.cursor_right();
+            }
+        }
+    }
+
+    pub fn settings_cancel_text(&mut self) {
+        if let InputMode::Settings(s) = &mut self.mode {
+            s.text_input = None;
+        }
+    }
+
+    pub fn settings_confirm_text(&mut self) {
+        use crate::settings::TextPurpose;
+        let (purpose, buf) = match &self.mode {
+            InputMode::Settings(s) => match &s.text_input {
+                Some(ti) => (ti.purpose.clone(), ti.buf.clone()),
+                None => return,
+            },
+            _ => return,
+        };
+
+        match purpose {
+            TextPurpose::SaveProfile => {
+                let name = buf.trim().to_string();
+                if !name.is_empty() {
+                    self.send(Command::SaveProfile { name });
+                    let profiles = match self.query(Command::ListProfiles) {
+                        Some(Response::PresetList(v)) => v,
+                        _ => vec![],
+                    };
+                    if let InputMode::Settings(s) = &mut self.mode {
+                        s.profiles = profiles;
+                        s.text_input = None;
+                    }
+                }
+            }
+            TextPurpose::PrefFps => {
+                if let Ok(n) = buf.trim().parse::<u64>() {
+                    self.prefs.fps = n.clamp(5, 240);
+                    self.prefs.save();
+                }
+                if let InputMode::Settings(s) = &mut self.mode {
+                    s.text_input = None;
+                }
+            }
+            TextPurpose::PrefRefreshMs => {
+                if let Ok(n) = buf.trim().parse::<u64>() {
+                    self.prefs.refresh_ms = n.clamp(100, 5000);
+                    self.prefs.save();
+                }
+                if let InputMode::Settings(s) = &mut self.mode {
+                    s.text_input = None;
+                }
+            }
+            TextPurpose::PrefBandQ => {
+                if let Ok(q) = buf.trim().parse::<f64>() {
+                    self.prefs.default_band_q = q.clamp(0.1, 20.0);
+                    self.prefs.save();
+                }
+                if let InputMode::Settings(s) = &mut self.mode {
+                    s.text_input = None;
+                }
+            }
+        }
+    }
+
+    pub fn settings_confirm_yes(&mut self) {
+        let action = match &self.mode {
+            InputMode::Settings(s) => s.confirm.clone(),
+            _ => return,
+        };
+        match action {
+            Some(crate::settings::ConfirmAction::DeleteProfile(name)) => {
+                self.do_delete_profile(name);
+            }
+            Some(crate::settings::ConfirmAction::UnmapOutput) => {
+                self.do_unmap_output();
+            }
+            None => {}
+        }
+    }
+
+    pub fn settings_confirm_no(&mut self) {
+        if let InputMode::Settings(s) = &mut self.mode {
+            s.confirm = None;
+        }
+    }
+
+    pub fn settings_close_sub_picker(&mut self) {
+        if let InputMode::Settings(s) = &mut self.mode {
+            s.sub_picker = None;
+        }
+    }
+
+    pub fn settings_sub_picker_confirm(&mut self) {
+        let (profile, for_sink) = match &self.mode {
+            InputMode::Settings(s) => match &s.sub_picker {
+                Some(sp) => (sp.profiles.get(sp.cursor).cloned(), sp.for_sink.clone()),
+                None => return,
+            },
+            _ => return,
+        };
+        let Some(profile) = profile else { return };
+        if let Some(sink) = for_sink {
+            self.send(Command::SetOutputTarget { node_name: sink });
+            self.refresh_state();
+        }
+        self.send(Command::MapOutput { profile });
+        let mappings = match self.query(Command::ListMappings) {
+            Some(Response::Mappings(v)) => v,
+            _ => vec![],
+        };
+        self.refresh_state();
+        if let InputMode::Settings(s) = &mut self.mode {
+            s.sub_picker = None;
+            s.mappings = mappings;
+        }
+    }
+
+    pub fn settings_enter(&mut self) {
+        let tab = match &self.mode {
+            InputMode::Settings(s) => s.tab,
+            _ => return,
+        };
+        match tab {
+            0 => self.settings_load_profile(),
+            1 => {}
+            2 => self.settings_route_output(),
+            3 => self.settings_pref_activate(),
+            _ => {}
+        }
+    }
+
+    fn settings_load_profile(&mut self) {
+        let name = match &self.mode {
+            InputMode::Settings(s) => s.profiles.get(s.cursor).cloned(),
+            _ => return,
+        };
+        if let Some(name) = name {
+            self.send(Command::LoadProfile { name });
+            self.refresh_state();
+        }
+    }
+
+    fn settings_route_output(&mut self) {
+        let sink = match &self.mode {
+            InputMode::Settings(s) => s.sinks.get(s.cursor).cloned(),
+            _ => return,
+        };
+        if let Some(node_name) = sink {
+            self.send(Command::SetOutputTarget { node_name });
+            self.refresh_state();
+        }
+    }
+
+    fn settings_pref_activate(&mut self) {
+        use crate::settings::{TextInput, TextPurpose};
+        let cursor = match &self.mode {
+            InputMode::Settings(s) => s.cursor,
+            _ => return,
+        };
+        match cursor {
+            0 => {
+                let v = self.prefs.fps.to_string();
+                if let InputMode::Settings(s) = &mut self.mode {
+                    s.text_input = Some(TextInput::new(v, TextPurpose::PrefFps, "FPS (5–144)"));
+                }
+            }
+            1 => {
+                let v = self.prefs.refresh_ms.to_string();
+                if let InputMode::Settings(s) = &mut self.mode {
+                    s.text_input = Some(TextInput::new(
+                        v,
+                        TextPurpose::PrefRefreshMs,
+                        "Refresh ms (100–5000)",
+                    ));
+                }
+            }
+            2 => {
+                self.prefs.confirm_on_delete = !self.prefs.confirm_on_delete;
+                self.prefs.save();
+            }
+            3 => {
+                let v = format!("{:.1}", self.prefs.default_band_q);
+                if let InputMode::Settings(s) = &mut self.mode {
+                    s.text_input = Some(TextInput::new(
+                        v,
+                        TextPurpose::PrefBandQ,
+                        "Default Q (0.1–20.0)",
+                    ));
+                }
+            }
+            4 => {
+                self.prefs.default_band_type = self.prefs.default_band_type.next();
+                self.prefs.save();
+            }
+            _ => {}
+        }
+    }
+
+    pub fn settings_key_n(&mut self) {
+        use crate::settings::{TextInput, TextPurpose};
+        if let InputMode::Settings(s) = &mut self.mode {
+            if s.tab == 0 {
+                s.text_input = Some(TextInput::new("", TextPurpose::SaveProfile, "Profile name"));
+            }
+        }
+    }
+
+    pub fn settings_key_d(&mut self) {
+        let tab = match &self.mode {
+            InputMode::Settings(s) => s.tab,
+            _ => return,
+        };
+        match tab {
+            0 => {
+                let name = match &self.mode {
+                    InputMode::Settings(s) => s.profiles.get(s.cursor).cloned(),
+                    _ => return,
+                };
+                if let Some(name) = name {
+                    if self.prefs.confirm_on_delete {
+                        if let InputMode::Settings(s) = &mut self.mode {
+                            s.confirm = Some(crate::settings::ConfirmAction::DeleteProfile(name));
+                        }
+                    } else {
+                        self.do_delete_profile(name);
+                    }
+                }
+            }
+            1 => {
+                let can_unmap = match (&self.mode, &self.state) {
+                    (InputMode::Settings(s), Some(state)) => s
+                        .mappings
+                        .get(s.cursor)
+                        .map(|(out, _)| state.active_output.as_deref() == Some(out.as_str()))
+                        .unwrap_or(false),
+                    _ => false,
+                };
+                if can_unmap {
+                    if self.prefs.confirm_on_delete {
+                        if let InputMode::Settings(s) = &mut self.mode {
+                            s.confirm = Some(crate::settings::ConfirmAction::UnmapOutput);
+                        }
+                    } else {
+                        self.do_unmap_output();
+                    }
+                } else {
+                    self.status = "can only unmap the active output".into();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn settings_key_m(&mut self) {
+        let tab = match &self.mode {
+            InputMode::Settings(s) => s.tab,
+            _ => return,
+        };
+        if tab != 1 && tab != 2 {
+            return;
+        }
+        let profiles = match self.query(Command::ListProfiles) {
+            Some(Response::PresetList(v)) => v,
+            _ => return,
+        };
+        if profiles.is_empty() {
+            self.status = "no profiles saved".into();
+            return;
+        }
+        let for_sink = if tab == 2 {
+            match &self.mode {
+                InputMode::Settings(s) => s.sinks.get(s.cursor).cloned(),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let InputMode::Settings(s) = &mut self.mode {
+            s.sub_picker = Some(crate::settings::SubPicker {
+                profiles,
+                cursor: 0,
+                for_sink,
+            });
+        }
+    }
+
+    fn do_delete_profile(&mut self, name: String) {
+        self.send(Command::DeleteProfile { name });
+        let profiles = match self.query(Command::ListProfiles) {
+            Some(Response::PresetList(v)) => v,
+            _ => vec![],
+        };
+        if let InputMode::Settings(s) = &mut self.mode {
+            s.profiles = profiles;
+            s.cursor = s.cursor.min(s.profiles.len().saturating_sub(1));
+            s.confirm = None;
+        }
+    }
+
+    fn do_unmap_output(&mut self) {
+        self.send(Command::UnmapOutput);
+        let mappings = match self.query(Command::ListMappings) {
+            Some(Response::Mappings(v)) => v,
+            _ => vec![],
+        };
+        self.refresh_state();
+        if let InputMode::Settings(s) = &mut self.mode {
+            s.mappings = mappings;
+            s.cursor = s.cursor.min(s.mappings.len().saturating_sub(1));
+            s.confirm = None;
+        }
     }
 }
 
@@ -515,6 +1008,12 @@ impl IpcClient {
             Response::Error(e) => Err(anyhow!("{e}")),
             Response::StateChanged(_) => Ok(()),
         }
+    }
+
+    fn send_recv(&mut self, cmd: Command) -> Result<Response> {
+        write_command(&mut self.writer, &cmd)?;
+        self.writer.flush()?;
+        Ok(read_response(&mut self.reader)?)
     }
 }
 

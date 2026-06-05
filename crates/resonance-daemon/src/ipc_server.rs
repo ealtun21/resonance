@@ -244,6 +244,13 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
             Response::Ok
         }
 
+        Command::SetOutputTarget { node_name } => {
+            let route_tx = state.0.lock().unwrap().route_tx.clone();
+            let _ = route_tx.send(node_name.clone());
+            state.0.lock().unwrap().preferred_output = Some(node_name);
+            Response::Ok
+        }
+
         Command::Shutdown => {
             info!("shutdown requested");
             std::process::exit(0);

@@ -2,6 +2,7 @@ use crate::{
     app::{App, BandField, EFFECT_NAMES, InputMode, Panel, fx_enabled, fx_intensity, fx_min},
     browser::Browser,
     curve,
+    settings::{ConfirmAction, SettingsState, TABS},
 };
 use ratatui::{
     Frame,
@@ -10,8 +11,8 @@ use ratatui::{
     symbols,
     text::{Line, Span},
     widgets::{
-        Axis, Block, Borders, Chart, Clear, Dataset, Gauge, GraphType, List, ListItem, ListState,
-        Paragraph,
+        Axis, Block, BorderType, Borders, Chart, Clear, Dataset, Gauge, GraphType, List, ListItem,
+        ListState, Paragraph,
     },
 };
 
@@ -30,12 +31,18 @@ pub fn render(app: &App, frame: &mut Frame) {
     if let InputMode::Browse(b) = &app.mode {
         render_browser(b, frame, frame.area());
     }
+    if let InputMode::SelectOutput { sinks, cursor } = &app.mode {
+        render_output_selector(sinks, *cursor, app, frame, frame.area());
+    }
+    if let InputMode::Settings(s) = &app.mode {
+        render_settings(s, app, frame, frame.area());
+    }
 }
 
 // ── Footer / contextual help ───────────────────────────────────────────────
 
 fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
-    let common = "[Tab] focus  [↑↓] select  [←→] adjust  [+/-] preamp  [Space] toggle  [l] load  [p] power  [q] quit";
+    let common = "[Tab] focus  [↑↓] select  [←→] adjust  [+/-] preamp  [Space] toggle  [l] load  [s] settings  [o] output  [p] power  [q] quit";
     let ctx = match app.focus {
         Panel::Effects => "  •  [←→] intensity",
         Panel::Bands => "  •  [a] add  [d] del  [t] type",
@@ -259,7 +266,7 @@ fn render_spectrum(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let bins = app.state.as_ref().map(|s| s.spectrum.as_slice());
+    let bins = Some(app.spectrum_display.as_slice());
     let Some(bins) = bins.filter(|b| !b.is_empty()) else {
         return;
     };
@@ -666,6 +673,509 @@ fn render_browser(b: &Browser, frame: &mut Frame, area: Rect) {
         .map(|l| Line::from(l.as_str()).fg(Color::Gray))
         .collect();
     frame.render_widget(Paragraph::new(lines), preview_inner);
+}
+
+// ── Output selector popup ─────────────────────────────────────────────────
+
+fn render_output_selector(
+    sinks: &[String],
+    cursor: usize,
+    app: &App,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let dialog = centered_rect(area, 60, 50);
+    let min_h = (sinks.len() as u16 + 4).max(6);
+    let dialog = Rect::new(dialog.x, dialog.y, dialog.width, dialog.height.max(min_h));
+    frame.render_widget(Clear, dialog);
+
+    let active = app
+        .state
+        .as_ref()
+        .and_then(|s| s.preferred_output.as_deref().or(s.active_output.as_deref()));
+
+    let block = Block::default()
+        .title(Line::from(" Select Output Sink ").fg(Color::Yellow))
+        .title_bottom(Line::from(" ↑↓ move   Enter select   Esc cancel ").fg(Color::DarkGray))
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let inner = block.inner(dialog);
+    frame.render_widget(block, dialog);
+
+    if sinks.is_empty() {
+        frame.render_widget(
+            Paragraph::new(" (no sinks detected)").style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+        return;
+    }
+
+    let items: Vec<ListItem> = sinks
+        .iter()
+        .map(|s| {
+            let is_active = active.map(|a| a == s).unwrap_or(false);
+            let label = if is_active {
+                format!("● {s}")
+            } else {
+                format!("  {s}")
+            };
+            let style = if is_active {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            ListItem::new(label).style(style)
+        })
+        .collect();
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(cursor));
+    let list = List::new(items)
+        .highlight_symbol("▶ ")
+        .highlight_style(Style::default().fg(Color::Yellow).bold());
+    frame.render_stateful_widget(list, inner, &mut list_state);
+}
+
+// ── Settings popup ─────────────────────────────────────────────────────────
+
+fn render_settings(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect) {
+    let dialog = centered_rect(area, 70, 80);
+    frame.render_widget(Clear, dialog);
+
+    let hint = settings_footer_hint(s);
+    let block = Block::default()
+        .title(Line::from(" Settings ").fg(Color::Yellow))
+        .title_bottom(Line::from(hint).fg(Color::DarkGray))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let inner = block.inner(dialog);
+    frame.render_widget(block, dialog);
+
+    let cols = Layout::horizontal([Constraint::Length(16), Constraint::Min(1)]).split(inner);
+
+    let tab_col = cols[0];
+    let content_col = cols[1];
+
+    // Right-border divider on the tab column.
+    let tab_border = Block::default()
+        .borders(Borders::RIGHT)
+        .border_style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(tab_border, tab_col);
+
+    // Tab list (leave 1 col for the right border).
+    let tab_inner = Rect::new(
+        tab_col.x,
+        tab_col.y,
+        tab_col.width.saturating_sub(1),
+        tab_col.height,
+    );
+    render_settings_tabs(s, frame, tab_inner);
+
+    // Content area (1 col padding on left).
+    let content_inner = Rect::new(
+        content_col.x + 1,
+        content_col.y,
+        content_col.width.saturating_sub(1),
+        content_col.height,
+    );
+    render_settings_content(s, app, frame, content_inner);
+
+    // Overlays (drawn on top of dialog, so they use dialog coords).
+    if s.confirm.is_some() {
+        render_confirm(s, frame, dialog);
+    } else if s.sub_picker.is_some() {
+        render_sub_picker(s, frame, dialog);
+    }
+}
+
+fn settings_footer_hint(s: &SettingsState) -> String {
+    let base = " [Tab/1-4] switch  [↑↓] select  [Esc] close";
+    let ctx = match s.tab {
+        0 => "  •  [Enter] load  [n] save  [d] delete",
+        1 => "  •  [m] map  [d] unmap",
+        2 => "  •  [Enter] route  [m] map to profile",
+        3 => "  •  [Enter/Space] edit/toggle",
+        _ => "",
+    };
+    format!("{base}{ctx}")
+}
+
+fn render_settings_tabs(s: &SettingsState, frame: &mut Frame, area: Rect) {
+    for (i, name) in TABS.iter().enumerate() {
+        let y = area.y + i as u16;
+        if y >= area.y + area.height {
+            break;
+        }
+        let row = Rect::new(area.x, y, area.width, 1);
+        let active = s.tab == i;
+        let label = format!("[{}] {}", i + 1, name);
+        let (marker, style) = if active {
+            ("▶", Style::default().fg(Color::Cyan).bold())
+        } else {
+            (" ", Style::default().fg(Color::DarkGray))
+        };
+        frame.render_widget(
+            Paragraph::new(format!("{marker} {label}")).style(style),
+            row,
+        );
+    }
+}
+
+fn render_settings_content(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect) {
+    match s.tab {
+        0 => render_tab_profiles(s, app, frame, area),
+        1 => render_tab_mappings(s, app, frame, area),
+        2 => render_tab_devices(s, app, frame, area),
+        3 => render_tab_prefs(s, app, frame, area),
+        _ => {}
+    }
+}
+
+fn render_tab_profiles(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect) {
+    let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
+    let content = rows[0];
+    let hints = rows[1];
+
+    let active_profile = app
+        .state
+        .as_ref()
+        .and_then(|st| st.mapped_profile.as_deref());
+
+    if s.profiles.is_empty() {
+        frame.render_widget(
+            Paragraph::new("(no profiles saved — press 'n' to save current chain)")
+                .style(Style::default().fg(Color::DarkGray)),
+            content,
+        );
+    } else {
+        let visible = content.height as usize;
+        let offset = crate::layout::band_scroll_offset(s.cursor, s.profiles.len(), visible);
+        for (vis, i) in (offset..s.profiles.len()).take(visible).enumerate() {
+            let name = &s.profiles[i];
+            let y = content.y + vis as u16;
+            let row = Rect::new(content.x, y, content.width, 1);
+            let is_active = active_profile == Some(name.as_str());
+            let selected = i == s.cursor;
+            let marker = if selected { "▶" } else { " " };
+            let suffix = if is_active { "  (active)" } else { "" };
+            let style = if selected {
+                Style::default().fg(Color::Yellow).bold()
+            } else if is_active {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            frame.render_widget(
+                Paragraph::new(format!("{marker} {name}{suffix}")).style(style),
+                row,
+            );
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(" [Enter] load  [n] save current  [d] delete")
+            .style(Style::default().fg(Color::DarkGray)),
+        hints,
+    );
+
+    // Inline text input overlay (save profile name).
+    if let Some(ti) = &s.text_input {
+        render_text_input_overlay(ti.label, &ti.buf, ti.cursor, frame, area);
+    }
+}
+
+fn render_tab_mappings(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect) {
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    let status_row = rows[0];
+    let header_row = rows[1];
+    let list_area = rows[2];
+    let hints = rows[3];
+
+    let active_output = app
+        .state
+        .as_ref()
+        .and_then(|st| st.active_output.as_deref());
+    let mapped_profile = app
+        .state
+        .as_ref()
+        .and_then(|st| st.mapped_profile.as_deref());
+
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Active: {}   Mapped profile: {}",
+            active_output.unwrap_or("none"),
+            mapped_profile.unwrap_or("none")
+        ))
+        .style(Style::default().fg(Color::Cyan)),
+        status_row,
+    );
+
+    frame.render_widget(
+        Paragraph::new(" Output Device                    Profile")
+            .style(Style::default().fg(Color::DarkGray).bold()),
+        header_row,
+    );
+
+    if s.mappings.is_empty() {
+        frame.render_widget(
+            Paragraph::new(" (no mappings — select a device and press 'm')")
+                .style(Style::default().fg(Color::DarkGray)),
+            list_area,
+        );
+    } else {
+        let visible = list_area.height as usize;
+        let offset = crate::layout::band_scroll_offset(s.cursor, s.mappings.len(), visible);
+        for (vis, i) in (offset..s.mappings.len()).take(visible).enumerate() {
+            let (out, profile) = &s.mappings[i];
+            let y = list_area.y + vis as u16;
+            let row = Rect::new(list_area.x, y, list_area.width, 1);
+            let is_active = active_output == Some(out.as_str());
+            let selected = i == s.cursor;
+            let marker = if is_active { "●" } else { " " };
+            let style = if selected {
+                Style::default().fg(Color::Yellow).bold()
+            } else if is_active {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            frame.render_widget(
+                Paragraph::new(format!(" {marker} {out:<32} {profile}")).style(style),
+                row,
+            );
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(" [m] map current output to profile  [d] unmap selected")
+            .style(Style::default().fg(Color::DarkGray)),
+        hints,
+    );
+}
+
+fn render_tab_devices(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect) {
+    let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
+    let content = rows[0];
+    let hints = rows[1];
+
+    let active_output = app
+        .state
+        .as_ref()
+        .and_then(|st| st.active_output.as_deref());
+
+    if s.sinks.is_empty() {
+        frame.render_widget(
+            Paragraph::new("(no audio sinks detected)").style(Style::default().fg(Color::DarkGray)),
+            content,
+        );
+    } else {
+        let visible = content.height as usize;
+        let offset = crate::layout::band_scroll_offset(s.cursor, s.sinks.len(), visible);
+        for (vis, i) in (offset..s.sinks.len()).take(visible).enumerate() {
+            let sink = &s.sinks[i];
+            let y = content.y + vis as u16;
+            let row = Rect::new(content.x, y, content.width, 1);
+            let is_active = active_output == Some(sink.as_str());
+            let selected = i == s.cursor;
+            let has_mapping = s.mappings.iter().any(|(out, _)| out == sink);
+            let active_mark = if is_active { "●" } else { " " };
+            let map_mark = if has_mapping { "  [mapped]" } else { "" };
+            let style = if selected {
+                Style::default().fg(Color::Yellow).bold()
+            } else if is_active {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            frame.render_widget(
+                Paragraph::new(format!(" {active_mark} {sink}{map_mark}")).style(style),
+                row,
+            );
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(" [Enter] route output here  [m] map to auto-load profile")
+            .style(Style::default().fg(Color::DarkGray)),
+        hints,
+    );
+}
+
+fn render_tab_prefs(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect) {
+    let prefs = &app.prefs;
+    let items: [(&str, String, &str); 5] = [
+        ("FPS", prefs.fps.to_string(), "(applied next launch)"),
+        (
+            "Refresh ms",
+            prefs.refresh_ms.to_string(),
+            "(state poll interval)",
+        ),
+        (
+            "Confirm delete",
+            prefs.confirm_on_delete.to_string(),
+            "(guard delete/unmap with y/n)",
+        ),
+        (
+            "Default band Q",
+            format!("{:.1}", prefs.default_band_q),
+            "(Q for new EQ bands)",
+        ),
+        (
+            "Default band type",
+            prefs.default_band_type.abbrev().to_string(),
+            "(type for new EQ bands, Space/Enter cycles)",
+        ),
+    ];
+
+    for (i, (label, value, desc)) in items.iter().enumerate() {
+        let y = area.y + i as u16;
+        if y >= area.y + area.height {
+            break;
+        }
+        let row = Rect::new(area.x, y, area.width, 1);
+        let selected = s.cursor == i;
+        let editing = selected && s.text_input.is_some();
+
+        let value_display = if editing {
+            if let Some(ti) = &s.text_input {
+                let mut buf = ti.buf.clone();
+                buf.insert(ti.cursor, '█');
+                buf
+            } else {
+                value.clone()
+            }
+        } else {
+            value.clone()
+        };
+
+        let marker = if selected { "▶" } else { " " };
+        let label_style = if selected {
+            Style::default().fg(Color::Yellow).bold()
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let val_style = if editing {
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        let desc_style = Style::default().fg(Color::DarkGray);
+
+        let line = Line::from(vec![
+            Span::styled(format!("{marker} {label:<18}  "), label_style),
+            Span::styled(value_display, val_style),
+            Span::styled(format!("  {desc}"), desc_style),
+        ]);
+        frame.render_widget(Paragraph::new(line), row);
+    }
+}
+
+fn render_text_input_overlay(
+    label: &str,
+    buf: &str,
+    cursor: usize,
+    frame: &mut Frame,
+    parent: Rect,
+) {
+    let mut display = buf.to_string();
+    display.insert(cursor, '█');
+
+    let w =
+        (label.len() as u16 + display.len() as u16 + 8).clamp(30, parent.width.saturating_sub(4));
+    let h = 3;
+    let x = parent.x + (parent.width.saturating_sub(w)) / 2;
+    let y = parent.y + (parent.height.saturating_sub(h)) / 2;
+    let dialog = Rect::new(x, y, w, h);
+
+    frame.render_widget(Clear, dialog);
+    let block = Block::default()
+        .title(Line::from(format!(" {label} ")).fg(Color::Yellow))
+        .title_bottom(Line::from(" Enter confirm  Esc cancel ").fg(Color::DarkGray))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(dialog);
+    frame.render_widget(block, dialog);
+    frame.render_widget(
+        Paragraph::new(display).style(Style::default().fg(Color::White)),
+        inner,
+    );
+}
+
+fn render_confirm(s: &SettingsState, frame: &mut Frame, parent: Rect) {
+    let msg = match &s.confirm {
+        Some(ConfirmAction::DeleteProfile(name)) => format!(" Delete profile '{name}'? [y/n] "),
+        Some(ConfirmAction::UnmapOutput) => " Remove this output mapping? [y/n] ".to_string(),
+        None => return,
+    };
+    let w = (msg.len() as u16 + 4)
+        .min(parent.width.saturating_sub(4))
+        .max(30);
+    let h = 3u16;
+    let x = parent.x + (parent.width.saturating_sub(w)) / 2;
+    let y = parent.y + (parent.height.saturating_sub(h)) / 2;
+    let dialog = Rect::new(x, y, w, h);
+
+    frame.render_widget(Clear, dialog);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Red));
+    let inner = block.inner(dialog);
+    frame.render_widget(block, dialog);
+    frame.render_widget(
+        Paragraph::new(msg).style(Style::default().fg(Color::White)),
+        inner,
+    );
+}
+
+fn render_sub_picker(s: &SettingsState, frame: &mut Frame, parent: Rect) {
+    let Some(sp) = &s.sub_picker else { return };
+    let w = (parent.width * 60 / 100).max(30);
+    let h = ((sp.profiles.len() as u16).saturating_add(4))
+        .min(parent.height * 70 / 100)
+        .max(6);
+    let x = parent.x + (parent.width.saturating_sub(w)) / 2;
+    let y = parent.y + (parent.height.saturating_sub(h)) / 2;
+    let dialog = Rect::new(x, y, w, h);
+
+    frame.render_widget(Clear, dialog);
+
+    let title = if sp.for_sink.is_some() {
+        " Map Device → Profile "
+    } else {
+        " Map Output → Profile "
+    };
+    let block = Block::default()
+        .title(Line::from(title).fg(Color::Yellow))
+        .title_bottom(Line::from(" ↑↓ move   Enter select   Esc cancel ").fg(Color::DarkGray))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(dialog);
+    frame.render_widget(block, dialog);
+
+    let items: Vec<ListItem> = sp
+        .profiles
+        .iter()
+        .map(|p| ListItem::new(format!("  {p}")).style(Style::default().fg(Color::White)))
+        .collect();
+    let mut list_state = ListState::default();
+    list_state.select(Some(sp.cursor));
+    let list = List::new(items)
+        .highlight_symbol("▶ ")
+        .highlight_style(Style::default().fg(Color::Yellow).bold());
+    frame.render_stateful_widget(list, inner, &mut list_state);
 }
 
 // ── Format helpers ────────────────────────────────────────────────────────

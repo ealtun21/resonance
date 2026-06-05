@@ -57,6 +57,8 @@ pub enum Command {
     UnmapOutput,
     /// List all output→profile mappings
     ListMappings,
+    /// Route the filter output to a specific PipeWire sink by node.name
+    SetOutputTarget { node_name: String },
     /// Subscribe to state-change events (TUI stream)
     Subscribe,
     /// Stop the daemon
@@ -205,6 +207,10 @@ pub struct DaemonState {
     pub active_output: Option<String>,
     /// Profile mapped to the active output (auto-loaded), if any
     pub mapped_profile: Option<String>,
+    /// All available PipeWire Audio/Sink node names (excluding Resonance itself)
+    pub available_sinks: Vec<String>,
+    /// The preferred output node name set by SetOutputTarget (if any)
+    pub preferred_output: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -337,6 +343,8 @@ mod tests {
             spectrum: vec![0.1, 0.2, 0.3],
             active_output: Some("alsa_output.pci".into()),
             mapped_profile: None,
+            available_sinks: vec!["alsa_output.pci".into()],
+            preferred_output: None,
         };
         let bytes = to_stdvec(&Response::State(st)).expect("encode");
         let _: Response = from_bytes(&bytes).expect("decode");

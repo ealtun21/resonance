@@ -2,6 +2,8 @@ mod app;
 mod browser;
 mod curve;
 mod layout;
+mod prefs;
+mod settings;
 mod ui;
 
 use anyhow::Result;
@@ -12,9 +14,9 @@ use crossterm::event::{
 };
 use std::time::{Duration, Instant};
 
-const DEFAULT_FPS: u64 = 30;
+const DEFAULT_FPS: u64 = 144;
 const MIN_FPS: u64 = 5;
-const MAX_FPS: u64 = 144;
+const MAX_FPS: u64 = 240;
 
 fn main() -> Result<()> {
     let fps = parse_fps();
@@ -58,11 +60,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal, fps: u64) -> Result<()> {
     app.refresh_state();
 
     let refresh = Duration::from_millis(1000 / fps);
-    // Keep input responsive even at low fps by polling at least every 33 ms.
     let poll_timeout = refresh.min(Duration::from_millis(33));
     let mut last_refresh = Instant::now();
 
     while app.running {
+        app.animate_spectrum();
         let mut frame_area = app.last_frame;
         terminal.draw(|f| {
             frame_area = f.area();
@@ -88,7 +90,6 @@ fn run(terminal: &mut ratatui::DefaultTerminal, fps: u64) -> Result<()> {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
-    // Quit with q or Ctrl+C regardless of mode
     if key.code == KeyCode::Char('q') && key.modifiers.is_empty() && app.mode.is_normal() {
         app.running = false;
         return;
@@ -101,6 +102,8 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     match &app.mode {
         InputMode::Normal => handle_normal(app, key),
         InputMode::Browse(_) => handle_browse(app, key),
+        InputMode::SelectOutput { .. } => handle_select_output(app, key),
+        InputMode::Settings(_) => handle_settings(app, key),
     }
 }
 
@@ -109,6 +112,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) {
         KeyCode::Tab => app.next_panel(),
         KeyCode::Char('p') => app.toggle_power(),
         KeyCode::Char('l') => app.begin_load_preset(),
+        KeyCode::Char('s') => app.begin_settings(),
         KeyCode::Up => app.cursor_up(),
         KeyCode::Down => app.cursor_down(),
         KeyCode::Right => {
@@ -133,6 +137,73 @@ fn handle_normal(app: &mut App, key: KeyEvent) {
         KeyCode::Char('a') if app.focus == app::Panel::Bands => app.add_band(),
         KeyCode::Char('d') | KeyCode::Delete if app.focus == app::Panel::Bands => app.remove_band(),
         KeyCode::Char('t') if app.focus == app::Panel::Bands => app.cycle_band_type(),
+        KeyCode::Char('o') => app.begin_select_output(),
+        _ => {}
+    }
+}
+
+fn handle_select_output(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => app.cancel_input(),
+        KeyCode::Up | KeyCode::Char('k') => app.output_move(-1),
+        KeyCode::Down | KeyCode::Char('j') => app.output_move(1),
+        KeyCode::Enter => app.output_enter(),
+        _ => {}
+    }
+}
+
+fn handle_settings(app: &mut App, key: KeyEvent) {
+    // Text input is active — route all keystrokes to it.
+    if app.settings_has_text_input() {
+        match key.code {
+            KeyCode::Esc => app.settings_cancel_text(),
+            KeyCode::Enter => app.settings_confirm_text(),
+            KeyCode::Left => app.settings_cursor_left(),
+            KeyCode::Right => app.settings_cursor_right(),
+            KeyCode::Backspace => app.settings_backspace(),
+            KeyCode::Char(c) => app.settings_text_char(c),
+            _ => {}
+        }
+        return;
+    }
+
+    // Confirm dialog is active.
+    if app.settings_has_confirm() {
+        match key.code {
+            KeyCode::Char('y') => app.settings_confirm_yes(),
+            KeyCode::Char('n') | KeyCode::Esc => app.settings_confirm_no(),
+            _ => {}
+        }
+        return;
+    }
+
+    // Profile sub-picker is active.
+    if app.settings_has_sub_picker() {
+        match key.code {
+            KeyCode::Esc => app.settings_close_sub_picker(),
+            KeyCode::Up | KeyCode::Char('k') => app.settings_move(-1),
+            KeyCode::Down | KeyCode::Char('j') => app.settings_move(1),
+            KeyCode::Enter => app.settings_sub_picker_confirm(),
+            _ => {}
+        }
+        return;
+    }
+
+    // Normal settings navigation.
+    match key.code {
+        KeyCode::Esc => app.settings_close(),
+        KeyCode::Tab => app.settings_tab_shift(1),
+        KeyCode::BackTab => app.settings_tab_shift(-1),
+        KeyCode::Char('1') => app.settings_set_tab(0),
+        KeyCode::Char('2') => app.settings_set_tab(1),
+        KeyCode::Char('3') => app.settings_set_tab(2),
+        KeyCode::Char('4') => app.settings_set_tab(3),
+        KeyCode::Up | KeyCode::Char('k') => app.settings_move(-1),
+        KeyCode::Down | KeyCode::Char('j') => app.settings_move(1),
+        KeyCode::Enter | KeyCode::Char(' ') => app.settings_enter(),
+        KeyCode::Char('n') => app.settings_key_n(),
+        KeyCode::Char('d') | KeyCode::Delete => app.settings_key_d(),
+        KeyCode::Char('m') => app.settings_key_m(),
         _ => {}
     }
 }

@@ -21,13 +21,15 @@ async fn main() -> Result<()> {
 
     let (cmd_tx, cmd_rx) = RingBuffer::<state::AudioCommand>::new(256);
     let (spectrum_tx, spectrum_rx) = RingBuffer::<f32>::new(pw_node::SPECTRUM_BUF);
+    let (route_tx, route_rx) = std::sync::mpsc::channel::<String>();
+    let (sinks_tx, mut sinks_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
 
     let initial_chain = ProcessorChain::builder()
         .channels(2)
         .sample_rate(48000.0)
         .build();
 
-    let shared = state::SharedState::new(cmd_tx);
+    let shared = state::SharedState::new(cmd_tx, route_tx);
 
     // Spectrum computation task
     let spectrum_state = shared.clone();
@@ -57,8 +59,23 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Available-sinks update task: keep SharedState in sync with PipeWire graph.
+    let sinks_state = shared.clone();
+    tokio::spawn(async move {
+        while let Some(sinks) = sinks_rx.recv().await {
+            sinks_state.0.lock().unwrap().available_sinks = sinks;
+        }
+    });
+
     // PipeWire filter node on dedicated RT thread
-    let pw_handle = pw_node::spawn(cmd_rx, spectrum_tx, initial_chain, output_tx)?;
+    let pw_handle = pw_node::spawn(
+        cmd_rx,
+        spectrum_tx,
+        initial_chain,
+        output_tx,
+        route_rx,
+        sinks_tx,
+    )?;
 
     // IPC server (blocks until shutdown)
     ipc_server::run(shared).await?;

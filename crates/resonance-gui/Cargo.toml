@@ -1,14 +1,23 @@
 [package]
 name = "resonance-gui"
-description = "GUI client for the Resonance daemon (future)"
+description = "GUI client for the Resonance daemon"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "resonance-gui"
+path = "src/main.rs"
+
 [dependencies]
 resonance-ipc = { path = "../resonance-ipc" }
+resonance-dsp = { path = "../resonance-dsp" }
+resonance-preset = { path = "../resonance-preset" }
+eframe = { workspace = true }
+egui = { workspace = true }
 serde = { workspace = true }
 postcard = { workspace = true }
+toml = { workspace = true }
 anyhow = { workspace = true }

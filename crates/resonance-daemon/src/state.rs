@@ -56,13 +56,22 @@ pub struct Inner {
     pub audio_tx: Producer<AudioCommand>,
     /// Latest spectrum — updated by the spectrum task, read by IPC handler.
     pub spectrum: [f32; SPECTRUM_BINS],
+    /// Available PipeWire Audio/Sink names (updated by pw_node).
+    pub available_sinks: Vec<String>,
+    /// Preferred output node name set by SetOutputTarget.
+    pub preferred_output: Option<String>,
+    /// Send a preferred-output name to the pw_node main-loop thread.
+    pub route_tx: std::sync::mpsc::Sender<String>,
 }
 
 #[derive(Clone)]
 pub struct SharedState(pub Arc<Mutex<Inner>>);
 
 impl SharedState {
-    pub fn new(audio_tx: Producer<AudioCommand>) -> Self {
+    pub fn new(
+        audio_tx: Producer<AudioCommand>,
+        route_tx: std::sync::mpsc::Sender<String>,
+    ) -> Self {
         let chain = ProcessorChain::builder()
             .channels(2)
             .sample_rate(48000.0)
@@ -74,6 +83,9 @@ impl SharedState {
             mapped_profile: None,
             audio_tx,
             spectrum: [0.0; SPECTRUM_BINS],
+            available_sinks: Vec::new(),
+            preferred_output: None,
+            route_tx,
         })))
     }
 
@@ -122,6 +134,8 @@ impl SharedState {
             spectrum: inner.spectrum.to_vec(),
             active_output: inner.active_output.clone(),
             mapped_profile: inner.mapped_profile.clone(),
+            available_sinks: inner.available_sinks.clone(),
+            preferred_output: inner.preferred_output.clone(),
         }
     }
 
@@ -148,7 +162,8 @@ mod tests {
 
     fn shared() -> SharedState {
         let (tx, _rx) = rtrb::RingBuffer::<AudioCommand>::new(16);
-        SharedState::new(tx)
+        let (route_tx, _route_rx) = std::sync::mpsc::channel();
+        SharedState::new(tx, route_tx)
     }
 
     #[test]
