@@ -59,7 +59,10 @@ async fn main() -> Result<()> {
             }
             if let Some(name) = mapped {
                 match apply_profile(&name, &output_state) {
-                    Ok(()) => info!("auto-loaded profile '{name}' for output '{output}'"),
+                    Ok(()) => {
+                        info!("auto-loaded profile '{name}' for output '{output}'");
+                        output_state.0.lock().unwrap().current_preset = Some(name);
+                    }
                     Err(e) => warn!("auto-load profile '{name}' failed: {e}"),
                 }
             }

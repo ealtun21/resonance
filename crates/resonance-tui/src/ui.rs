@@ -907,10 +907,13 @@ fn render_tab_profiles(s: &SettingsState, app: &App, frame: &mut Frame, area: Re
     let content = rows[0];
     let hints = rows[1];
 
+    // "(active)" = the profile currently loaded onto the chain. LoadProfile sets
+    // current_preset to the profile name, so match on that (mapped_profile only
+    // tracks output→profile auto-loads, which is a different concept).
     let active_profile = app
         .state
         .as_ref()
-        .and_then(|st| st.mapped_profile.as_deref());
+        .and_then(|st| st.current_preset.as_deref());
 
     if s.profiles.is_empty() {
         frame.render_widget(
