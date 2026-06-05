@@ -29,3 +29,26 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+# ── RPM packaging (cargo-generate-rpm) ───────────────────────────────────────
+# Build with `cargo build --release --all` first, then from the repo root:
+#   cargo generate-rpm -p crates/resonance-daemon
+# Asset source paths are resolved relative to the repo root.
+[package.metadata.generate-rpm]
+name = "resonance"
+summary = "Terminal/desktop EQ daemon for PipeWire with FxSound and EqualizerAPO presets"
+assets = [
+    { source = "target/release/resonanced", dest = "/usr/bin/resonanced", mode = "755" },
+    { source = "target/release/resonance", dest = "/usr/bin/resonance", mode = "755" },
+    { source = "target/release/resonance-tui", dest = "/usr/bin/resonance-tui", mode = "755" },
+    { source = "target/release/resonance-gui", dest = "/usr/bin/resonance-gui", mode = "755" },
+    { source = "contrib/io.github.ealtun21.Resonance.desktop", dest = "/usr/share/applications/io.github.ealtun21.Resonance.desktop", mode = "644" },
+    { source = "contrib/io.github.ealtun21.Resonance.svg", dest = "/usr/share/icons/hicolor/scalable/apps/io.github.ealtun21.Resonance.svg", mode = "644" },
+    { source = "contrib/io.github.ealtun21.Resonance.metainfo.xml", dest = "/usr/share/metainfo/io.github.ealtun21.Resonance.metainfo.xml", mode = "644" },
+    { source = "contrib/systemd/resonanced.service", dest = "/usr/lib/systemd/user/resonanced.service", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/licenses/resonance/LICENSE", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/resonance/README.md", mode = "644" },
+]
+
+[package.metadata.generate-rpm.requires]
+pipewire = "*"

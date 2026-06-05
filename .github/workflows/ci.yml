@@ -54,3 +54,18 @@ jobs:
             -p resonance-ipc \
             -p resonance-cli \
             -p resonance-tui
+
+  packaging:
+    name: Validate desktop/AppStream metadata
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install validators
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            desktop-file-utils appstream
+      - name: Validate .desktop
+        run: desktop-file-validate contrib/io.github.ealtun21.Resonance.desktop
+      - name: Validate AppStream metainfo
+        run: appstreamcli validate --no-net contrib/io.github.ealtun21.Resonance.metainfo.xml

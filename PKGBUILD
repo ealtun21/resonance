@@ -41,4 +41,17 @@ package() {
     install -Dm755 target/release/resonance-gui   "$pkgdir/usr/bin/resonance-gui"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
     install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+
+    # Desktop integration for the GUI.
+    local appid="io.github.ealtun21.Resonance"
+    install -Dm644 "contrib/$appid.desktop" \
+        "$pkgdir/usr/share/applications/$appid.desktop"
+    install -Dm644 "contrib/$appid.svg" \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/$appid.svg"
+    install -Dm644 "contrib/$appid.metainfo.xml" \
+        "$pkgdir/usr/share/metainfo/$appid.metainfo.xml"
+
+    # systemd user service.
+    install -Dm644 contrib/systemd/resonanced.service \
+        "$pkgdir/usr/lib/systemd/user/resonanced.service"
 }

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.ealtun21.Resonance</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Resonance</name>
+  <summary>EQ for PipeWire with FxSound and EqualizerAPO presets</summary>
+
+  <description>
+    <p>
+      Resonance is a terminal and desktop equalizer daemon for Linux and
+      PipeWire. It captures system audio, runs it through a high-precision DSP
+      chain (parametric EQ plus FxSound-style Fidelity, Ambience, Surround,
+      Dynamic Boost and Bass effects), and plays the processed audio back.
+    </p>
+    <p>
+      It loads FxSound .fac presets and EqualizerAPO .txt configs, imports
+      AutoEq headphone corrections, and can map output devices to profiles so
+      the right EQ follows your headphones.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.ealtun21.Resonance.desktop</launchable>
+
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+  </categories>
+
+  <url type="homepage">https://github.com/ealtun21/resonance</url>
+  <url type="bugtracker">https://github.com/ealtun21/resonance/issues</url>
+
+  <provides>
+    <binary>resonance-gui</binary>
+    <binary>resonance-tui</binary>
+    <binary>resonance</binary>
+    <binary>resonanced</binary>
+  </provides>
+
+  <releases>
+    <release version="0.1.0" date="2026-06-05"/>
+  </releases>
+
+  <content_rating type="oars-1.1"/>
+</component>

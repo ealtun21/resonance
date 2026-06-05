@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Resonance
+GenericName=Equalizer
+Comment=EQ for PipeWire with FxSound .fac and EqualizerAPO preset support
+Exec=resonance-gui
+Icon=io.github.ealtun21.Resonance
+Terminal=false
+Categories=AudioVideo;Audio;Mixer;
+Keywords=equalizer;eq;audio;pipewire;sound;fxsound;
+StartupNotify=true

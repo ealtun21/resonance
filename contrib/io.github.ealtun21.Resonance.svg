@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b2240"/>
+      <stop offset="1" stop-color="#15101f"/>
+    </linearGradient>
+    <linearGradient id="bar" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#7c4dff"/>
+      <stop offset="1" stop-color="#18e0d8"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="120" height="120" rx="26" fill="url(#bg)"/>
+  <!-- spectrum / EQ bars -->
+  <g fill="url(#bar)">
+    <rect x="24" y="62" width="12" height="42" rx="4"/>
+    <rect x="42" y="44" width="12" height="60" rx="4"/>
+    <rect x="60" y="28" width="12" height="76" rx="4"/>
+    <rect x="78" y="50" width="12" height="54" rx="4"/>
+    <rect x="96" y="70" width="12" height="34" rx="4"/>
+  </g>
+  <!-- EQ response curve overlay -->
+  <path d="M16 86 C 40 86, 50 40, 64 40 S 92 78, 112 56"
+        fill="none" stroke="#ffffff" stroke-opacity="0.85"
+        stroke-width="5" stroke-linecap="round"/>
+</svg>

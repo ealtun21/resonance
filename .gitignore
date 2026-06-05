@@ -2,3 +2,8 @@ target/
 .env
 *.swp
 *.swo
+
+# makepkg build output (PKGBUILD)
+pkg/
+src/
+*.pkg.tar.zst

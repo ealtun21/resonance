@@ -1,0 +1,57 @@
+# Flatpak manifest for the Resonance GUI.
+#
+# Build (locally):
+#   # one-time: generate the offline cargo sources so the build needs no network
+#   python3 flatpak-cargo-generator.py ../../Cargo.lock -o cargo-sources.json
+#   flatpak-builder --user --install --force-clean build io.github.ealtun21.Resonance.yml
+#
+# flatpak-cargo-generator.py comes from
+# https://github.com/flatpak/flatpak-builder-tools/tree/master/cargo
+#
+# NOTE: PipeWire access is granted via --socket=pipewire. The daemon (resonanced)
+# captures/plays system audio; the sandbox reaches it over the PipeWire socket.
+app-id: io.github.ealtun21.Resonance
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: resonance-gui
+
+finish-args:
+  - --socket=pipewire
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # AutoEq corrections are downloaded over HTTPS.
+  - --share=network
+  - --filesystem=xdg-config/resonance:create
+  - --filesystem=xdg-data/resonance:create
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  build-args:
+    - --share=network  # remove once cargo-sources.json is generated (offline build)
+  env:
+    CARGO_HOME: /run/build/resonance/cargo
+
+modules:
+  - name: resonance
+    buildsystem: simple
+    build-commands:
+      - cargo build --release --locked --all
+      - install -Dm755 target/release/resonance-gui /app/bin/resonance-gui
+      - install -Dm755 target/release/resonance-tui /app/bin/resonance-tui
+      - install -Dm755 target/release/resonance /app/bin/resonance
+      - install -Dm755 target/release/resonanced /app/bin/resonanced
+      - install -Dm644 contrib/io.github.ealtun21.Resonance.desktop
+          /app/share/applications/io.github.ealtun21.Resonance.desktop
+      - install -Dm644 contrib/io.github.ealtun21.Resonance.svg
+          /app/share/icons/hicolor/scalable/apps/io.github.ealtun21.Resonance.svg
+      - install -Dm644 contrib/io.github.ealtun21.Resonance.metainfo.xml
+          /app/share/metainfo/io.github.ealtun21.Resonance.metainfo.xml
+    sources:
+      - type: dir
+        path: ../..
+      # Uncomment for an offline (Flathub-compatible) build:
+      # - cargo-sources.json
