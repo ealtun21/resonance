@@ -25,6 +25,7 @@ rustfft = "6"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"] }
+toml = "0.8"
 
 # Async / runtime
 tokio = { version = "1", features = ["full"] }
@@ -52,9 +53,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # CLI
 clap = { version = "4", features = ["derive", "string"] }
 clap_complete = "4"
-
-# File watching
-notify = "6"
 
 # Test utilities (dev only)
 approx = "0.5"

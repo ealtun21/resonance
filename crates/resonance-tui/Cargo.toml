@@ -13,6 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 resonance-ipc = { path = "../resonance-ipc" }
+resonance-dsp = { path = "../resonance-dsp" }
+resonance-preset = { path = "../resonance-preset" }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 tokio = { workspace = true }

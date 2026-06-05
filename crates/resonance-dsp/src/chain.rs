@@ -175,4 +175,31 @@ mod tests {
         chain.process(&mut buf);
         assert_eq!(buf, input);
     }
+
+    #[test]
+    fn preamp_applies_exact_gain() {
+        let mut chain = ProcessorChain::builder().preamp_db(6.0).build();
+        let gain = 10f64.powf(6.0 / 20.0);
+        let input = vec![0.1, -0.2, 0.3, -0.4];
+        let mut buf = input.clone();
+        chain.process(&mut buf);
+        for (i, o) in input.iter().zip(&buf) {
+            assert!(
+                (o - i * gain).abs() < 1e-12,
+                "preamp gain mismatch: {o} vs {}",
+                i * gain
+            );
+        }
+    }
+
+    #[test]
+    fn full_default_chain_is_bit_perfect_passthrough() {
+        // Default chain: no filters, all effects at 0 intensity, preamp 0.
+        // Must pass audio through bit-for-bit.
+        let mut chain = ProcessorChain::builder().build();
+        let input: Vec<f64> = (0..256).map(|i| ((i as f64) * 0.013).sin() * 0.7).collect();
+        let mut buf = input.clone();
+        chain.process(&mut buf);
+        assert_eq!(buf, input);
+    }
 }

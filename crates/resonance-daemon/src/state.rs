@@ -1,9 +1,9 @@
 use resonance_dsp::{chain::FxEffect, chain::ProcessorChain, effects::Effect};
-use resonance_ipc::{BandState, DaemonState, EffectsState};
+use resonance_ipc::{BandState, BandType, DaemonState, EffectsState};
 use rtrb::Producer;
 use std::sync::{Arc, Mutex};
 
-const SPECTRUM_BINS: usize = 16;
+pub const SPECTRUM_BINS: usize = 64;
 
 /// Commands sent from the IPC/tokio thread to the RT audio thread.
 #[derive(Debug)]
@@ -21,12 +21,38 @@ pub enum AudioCommand {
     ReplaceChain(Box<ProcessorChain>),
     #[allow(dead_code)]
     Reset,
+    SetBand {
+        index: usize,
+        freq: f64,
+        gain_db: f64,
+        q: f64,
+    },
+    SetBandEnabled {
+        index: usize,
+        enabled: bool,
+    },
+    AddBand {
+        band_type: BandType,
+        freq: f64,
+        gain_db: f64,
+        q: f64,
+    },
+    RemoveBand {
+        index: usize,
+    },
+    SetBandType {
+        index: usize,
+        band_type: BandType,
+    },
 }
 
 pub struct Inner {
     pub chain: ProcessorChain,
     pub current_preset: Option<String>,
-    pub watched_preset: Option<String>,
+    /// Node name of the output device Resonance is currently feeding.
+    pub active_output: Option<String>,
+    /// Profile auto-loaded for the active output (if mapped).
+    pub mapped_profile: Option<String>,
     pub audio_tx: Producer<AudioCommand>,
     /// Latest spectrum — updated by the spectrum task, read by IPC handler.
     pub spectrum: [f32; SPECTRUM_BINS],
@@ -44,7 +70,8 @@ impl SharedState {
         Self(Arc::new(Mutex::new(Inner {
             chain,
             current_preset: None,
-            watched_preset: None,
+            active_output: None,
+            mapped_profile: None,
             audio_tx,
             spectrum: [0.0; SPECTRUM_BINS],
         })))
@@ -64,6 +91,7 @@ impl SharedState {
             .filters
             .iter()
             .map(|f| BandState {
+                band_type: BandType::from(f.filter_type),
                 freq: f.freq,
                 gain_db: f.gain_db,
                 q: f.q,
@@ -92,12 +120,75 @@ impl SharedState {
             sample_rate: chain.sample_rate,
             channels: chain.channels,
             spectrum: inner.spectrum.to_vec(),
-            watched_preset: inner.watched_preset.clone(),
+            active_output: inner.active_output.clone(),
+            mapped_profile: inner.mapped_profile.clone(),
         }
     }
 
     /// Update spectrum bins (called from the spectrum computation task).
     pub fn update_spectrum(&self, bins: [f32; SPECTRUM_BINS]) {
         self.0.lock().unwrap().spectrum = bins;
+    }
+
+    /// Swap the whole chain: hand `rt` to the RT thread and mirror `shadow` so
+    /// `GetState` reflects it. Callers build two identical chains (the RT one is
+    /// moved across the ring buffer; the shadow stays here).
+    pub fn replace_chain(&self, rt: ProcessorChain, shadow: ProcessorChain) {
+        self.send(AudioCommand::ReplaceChain(Box::new(rt)), move |s| {
+            *s = shadow;
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use resonance_dsp::effects::Effect;
+    use resonance_dsp::filter::{ApoFilter, FilterType};
+
+    fn shared() -> SharedState {
+        let (tx, _rx) = rtrb::RingBuffer::<AudioCommand>::new(16);
+        SharedState::new(tx)
+    }
+
+    #[test]
+    fn snapshot_maps_filter_type_to_band_type() {
+        let state = shared();
+        {
+            let mut inner = state.0.lock().unwrap();
+            inner.chain = ProcessorChain::builder()
+                .channels(2)
+                .sample_rate(48000.0)
+                .add_filter(
+                    ApoFilter::builder()
+                        .filter_type(FilterType::HighShelf)
+                        .freq(8000.0)
+                        .gain_db(3.0)
+                        .q(0.707)
+                        .enabled(true)
+                        .channels(2)
+                        .sample_rate(48000.0)
+                        .build()
+                        .unwrap(),
+                )
+                .build();
+        }
+        let snap = state.snapshot();
+        assert_eq!(snap.bands.len(), 1);
+        assert_eq!(snap.bands[0].band_type, BandType::HighShelf);
+        assert!((snap.bands[0].freq - 8000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn snapshot_reports_effect_and_preamp_state() {
+        let state = shared();
+        {
+            let mut inner = state.0.lock().unwrap();
+            inner.chain.preamp_db = -4.0;
+            inner.chain.bass.set_intensity(-0.5);
+        }
+        let snap = state.snapshot();
+        assert!((snap.preamp_db + 4.0).abs() < 1e-9);
+        assert!((snap.effects.bass_intensity + 0.5).abs() < 1e-9);
     }
 }

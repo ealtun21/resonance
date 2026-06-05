@@ -55,12 +55,19 @@ impl BiquadCoeffs {
         .normalize(1.0 + alpha / a))
     }
 
-    pub fn low_shelf(freq: f64, gain_db: f64, sample_rate: f64) -> Result<Self, FilterError> {
-        validate(freq, 1.0, sample_rate)?;
+    /// Low shelf with a resonance/slope `q`. `q = 1/√2 ≈ 0.707` gives the
+    /// classic maximally-flat (S=1) shelf; higher `q` adds a resonant bump.
+    pub fn low_shelf(
+        freq: f64,
+        gain_db: f64,
+        q: f64,
+        sample_rate: f64,
+    ) -> Result<Self, FilterError> {
+        validate(freq, q, sample_rate)?;
         let a = 10f64.powf(gain_db / 40.0);
         let w0 = 2.0 * PI * freq / sample_rate;
         let (sin_w0, cos_w0) = (w0.sin(), w0.cos());
-        let alpha = sin_w0 / 2.0 * (a + 1.0 / a).sqrt();
+        let alpha = sin_w0 / (2.0 * q);
         let sq = 2.0 * a.sqrt() * alpha;
         Ok(Self {
             b0: a * ((a + 1.0) - (a - 1.0) * cos_w0 + sq),
@@ -72,12 +79,18 @@ impl BiquadCoeffs {
         .normalize((a + 1.0) + (a - 1.0) * cos_w0 + sq))
     }
 
-    pub fn high_shelf(freq: f64, gain_db: f64, sample_rate: f64) -> Result<Self, FilterError> {
-        validate(freq, 1.0, sample_rate)?;
+    /// High shelf with a resonance/slope `q` (see [`Self::low_shelf`]).
+    pub fn high_shelf(
+        freq: f64,
+        gain_db: f64,
+        q: f64,
+        sample_rate: f64,
+    ) -> Result<Self, FilterError> {
+        validate(freq, q, sample_rate)?;
         let a = 10f64.powf(gain_db / 40.0);
         let w0 = 2.0 * PI * freq / sample_rate;
         let (sin_w0, cos_w0) = (w0.sin(), w0.cos());
-        let alpha = sin_w0 / 2.0 * (a + 1.0 / a).sqrt();
+        let alpha = sin_w0 / (2.0 * q);
         let sq = 2.0 * a.sqrt() * alpha;
         Ok(Self {
             b0: a * ((a + 1.0) + (a - 1.0) * cos_w0 + sq),
@@ -309,22 +322,7 @@ impl ApoFilterBuilder {
         let q = if self.q <= 0.0 { 0.707 } else { self.q };
         let channels = if self.channels == 0 { 2 } else { self.channels };
 
-        let coeffs = match filter_type {
-            FilterType::Peaking => BiquadCoeffs::peaking(freq, self.gain_db, q, sr)?,
-            FilterType::LowShelf | FilterType::LowShelf12Db => {
-                BiquadCoeffs::low_shelf(freq, self.gain_db, sr)?
-            }
-            FilterType::LowShelfQ => BiquadCoeffs::low_shelf(freq, self.gain_db, sr)?,
-            FilterType::HighShelf | FilterType::HighShelf12Db => {
-                BiquadCoeffs::high_shelf(freq, self.gain_db, sr)?
-            }
-            FilterType::HighShelfQ => BiquadCoeffs::high_shelf(freq, self.gain_db, sr)?,
-            FilterType::LowPass | FilterType::LowPassQ => BiquadCoeffs::low_pass(freq, q, sr)?,
-            FilterType::HighPass | FilterType::HighPassQ => BiquadCoeffs::high_pass(freq, q, sr)?,
-            FilterType::BandPass => BiquadCoeffs::band_pass(freq, q, sr)?,
-            FilterType::Notch => BiquadCoeffs::notch(freq, q, sr)?,
-            FilterType::AllPass => BiquadCoeffs::all_pass(freq, q, sr)?,
-        };
+        let coeffs = coeffs_for(filter_type, freq, self.gain_db, q, sr)?;
 
         Ok(ApoFilter {
             filter_type,
@@ -337,12 +335,56 @@ impl ApoFilterBuilder {
     }
 }
 
+/// Compute biquad coefficients for a filter type / parameters.
+fn coeffs_for(
+    filter_type: FilterType,
+    freq: f64,
+    gain_db: f64,
+    q: f64,
+    sr: f64,
+) -> Result<BiquadCoeffs, FilterError> {
+    Ok(match filter_type {
+        FilterType::Peaking => BiquadCoeffs::peaking(freq, gain_db, q, sr)?,
+        FilterType::LowShelf | FilterType::LowShelf12Db | FilterType::LowShelfQ => {
+            BiquadCoeffs::low_shelf(freq, gain_db, q, sr)?
+        }
+        FilterType::HighShelf | FilterType::HighShelf12Db | FilterType::HighShelfQ => {
+            BiquadCoeffs::high_shelf(freq, gain_db, q, sr)?
+        }
+        FilterType::LowPass | FilterType::LowPassQ => BiquadCoeffs::low_pass(freq, q, sr)?,
+        FilterType::HighPass | FilterType::HighPassQ => BiquadCoeffs::high_pass(freq, q, sr)?,
+        FilterType::BandPass => BiquadCoeffs::band_pass(freq, q, sr)?,
+        FilterType::Notch => BiquadCoeffs::notch(freq, q, sr)?,
+        FilterType::AllPass => BiquadCoeffs::all_pass(freq, q, sr)?,
+    })
+}
+
 impl ApoFilter {
     pub fn process_channel(&mut self, sample: f64, channel: usize) -> f64 {
         if !self.enabled {
             return sample;
         }
         self.biquad.process_channel(sample, channel)
+    }
+
+    /// Recompute coefficients in place, **preserving** the running filter state.
+    /// Used for live parameter changes so rapid edits don't reset history and
+    /// produce clicks/crackle. Returns without changing anything on error.
+    pub fn update(
+        &mut self,
+        filter_type: FilterType,
+        freq: f64,
+        gain_db: f64,
+        q: f64,
+        sr: f64,
+    ) -> Result<(), FilterError> {
+        let coeffs = coeffs_for(filter_type, freq, gain_db, q, sr)?;
+        self.filter_type = filter_type;
+        self.freq = freq;
+        self.gain_db = gain_db;
+        self.q = q;
+        self.biquad.coeffs = coeffs;
+        Ok(())
     }
 
     pub fn reset(&mut self) {
@@ -451,6 +493,28 @@ mod tests {
         assert!(
             g.abs() < 1.0,
             "low shelf above Fc: got {g:.2} dB (expected ~0)"
+        );
+    }
+
+    #[test]
+    fn low_shelf_q_adds_resonance() {
+        // Higher Q must create a resonant overshoot beyond the shelf gain
+        // somewhere around the corner frequency.
+        let sweep = [300.0, 500.0, 700.0, 1000.0, 1400.0, 2000.0, 3000.0];
+        let peak = |q: f64| {
+            sweep
+                .iter()
+                .map(|&f| {
+                    let mut filt = build(FilterType::LowShelf, 1000.0, 12.0, q);
+                    filter_gain_db(&mut filt, f, SR)
+                })
+                .fold(f64::MIN, f64::max)
+        };
+        let flat = peak(0.707);
+        let reso = peak(5.0);
+        assert!(
+            reso > flat + 1.0,
+            "high-Q shelf should overshoot the shelf gain: flat={flat:.2} reso={reso:.2}"
         );
     }
 

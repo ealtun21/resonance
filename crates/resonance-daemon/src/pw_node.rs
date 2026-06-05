@@ -51,6 +51,10 @@ struct GraphState {
     monitor_links: Vec<pw::link::Link>,
     metadata_obj: Option<pw::metadata::Metadata>,
     default_set: bool,
+    /// Reports the node.name of the real sink Resonance currently feeds, on change.
+    output_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    /// Last output name reported (dedupe).
+    last_output: Option<String>,
 }
 
 // SAFETY: only touched from the pw main-loop thread.
@@ -62,7 +66,13 @@ struct FilterData {
     chain: ProcessorChain,
     cmd_rx: rtrb::Consumer<AudioCommand>,
     spectrum_tx: rtrb::Producer<f32>,
+    /// Reusable interleaved f64 scratch buffer — avoids allocating every RT callback.
+    scratch: Vec<f64>,
 }
+
+/// Pre-allocated scratch capacity: a generous upper bound on the PipeWire quantum
+/// (frames × CHANNELS). Growth in the RT callback past this is rare and handled.
+const MAX_QUANTUM: usize = 8192;
 
 // SAFETY: only touched from pw_filter process callback (RT thread).
 unsafe impl Send for FilterData {}
@@ -73,11 +83,12 @@ pub fn spawn(
     cmd_rx: rtrb::Consumer<AudioCommand>,
     spectrum_tx: rtrb::Producer<f32>,
     initial_chain: ProcessorChain,
+    output_tx: tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Result<JoinHandle<()>> {
     Ok(thread::Builder::new()
         .name("resonance-pw".into())
         .spawn(move || {
-            if let Err(e) = run(cmd_rx, spectrum_tx, initial_chain) {
+            if let Err(e) = run(cmd_rx, spectrum_tx, initial_chain, output_tx) {
                 tracing::error!("PipeWire thread: {e:#}");
             }
         })?)
@@ -87,6 +98,7 @@ fn run(
     cmd_rx: rtrb::Consumer<AudioCommand>,
     spectrum_tx: rtrb::Producer<f32>,
     chain: ProcessorChain,
+    output_tx: tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Result<()> {
     pw::init();
 
@@ -103,6 +115,7 @@ fn run(
         chain,
         cmd_rx,
         spectrum_tx,
+        scratch: vec![0.0; MAX_QUANTUM * CHANNELS],
     });
     let fd_ptr = Box::into_raw(fd);
 
@@ -206,6 +219,8 @@ fn run(
         monitor_links: Vec::new(),
         metadata_obj: None,
         default_set: false,
+        output_tx,
+        last_output: None,
     }));
 
     // SAFETY: `core` and `registry` outlive the listener (same scope, dropped after mainloop).
@@ -389,6 +404,13 @@ fn reroute(g: &mut GraphState) {
             })
             .map(|(id, _)| *id);
         if let Some(tid) = real_sink_id {
+            // Report the device name to the daemon when it changes (for output→profile mapping).
+            if let Some(name) = g.nodes.get(&tid).map(|n| n.name.clone()) {
+                if g.last_output.as_deref() != Some(name.as_str()) {
+                    g.last_output = Some(name.clone());
+                    let _ = g.output_tx.send(name);
+                }
+            }
             let srcs: Vec<_> = g
                 .ports
                 .values()
@@ -492,12 +514,18 @@ unsafe extern "C" fn filter_process_cb(data: *mut c_void, position: *mut spa_io_
             return;
         }
 
-        let mut buf: Vec<f64> = Vec::with_capacity(n * 2);
-        for i in 0..n {
-            buf.push(*in0.add(i) as f64);
-            buf.push(*in1.add(i) as f64);
+        // Reuse the pre-allocated scratch buffer (grows only if the quantum exceeds
+        // MAX_QUANTUM, which is rare); no per-callback heap allocation in steady state.
+        let need = n * 2;
+        if fd.scratch.len() < need {
+            fd.scratch.resize(need, 0.0);
         }
-        fd.chain.process(&mut buf);
+        let buf = &mut fd.scratch[..need];
+        for i in 0..n {
+            buf[i * 2] = *in0.add(i) as f64;
+            buf[i * 2 + 1] = *in1.add(i) as f64;
+        }
+        fd.chain.process(buf);
         for i in 0..n {
             *out0.add(i) = buf[i * 2] as f32;
             *out1.add(i) = buf[i * 2 + 1] as f32;
@@ -526,7 +554,66 @@ fn apply_command(chain: &mut ProcessorChain, cmd: AudioCommand) {
         AudioCommand::SetEffectEnabled { effect, on } => chain.set_effect_enabled(effect, on),
         AudioCommand::ReplaceChain(c) => *chain = *c,
         AudioCommand::Reset => chain.reset(),
+        AudioCommand::SetBand {
+            index,
+            freq,
+            gain_db,
+            q,
+        } => {
+            let sr = chain.sample_rate;
+            if let Some(f) = chain.filters.get_mut(index) {
+                // Update coefficients in place — preserves filter state so rapid
+                // live edits don't reset history and crackle.
+                let _ = f.update(f.filter_type, freq, gain_db, q, sr);
+            }
+        }
+        AudioCommand::SetBandEnabled { index, enabled } => {
+            if let Some(f) = chain.filters.get_mut(index) {
+                f.enabled = enabled;
+            }
+        }
+        AudioCommand::AddBand {
+            band_type,
+            freq,
+            gain_db,
+            q,
+        } => {
+            if let Ok(f) = build_band(chain, band_type.into(), freq, gain_db, q, true) {
+                chain.filters.push(f);
+            }
+        }
+        AudioCommand::RemoveBand { index } => {
+            if index < chain.filters.len() {
+                chain.filters.remove(index);
+            }
+        }
+        AudioCommand::SetBandType { index, band_type } => {
+            let sr = chain.sample_rate;
+            if let Some(f) = chain.filters.get_mut(index) {
+                let _ = f.update(band_type.into(), f.freq, f.gain_db, f.q, sr);
+            }
+        }
     }
+}
+
+/// Build an `ApoFilter` matching the chain's sample rate / channel count.
+fn build_band(
+    chain: &ProcessorChain,
+    filter_type: resonance_dsp::filter::FilterType,
+    freq: f64,
+    gain_db: f64,
+    q: f64,
+    enabled: bool,
+) -> Result<resonance_dsp::filter::ApoFilter, resonance_dsp::filter::FilterError> {
+    resonance_dsp::filter::ApoFilter::builder()
+        .filter_type(filter_type)
+        .freq(freq)
+        .gain_db(gain_db)
+        .q(q)
+        .enabled(enabled)
+        .channels(chain.channels)
+        .sample_rate(chain.sample_rate)
+        .build()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -543,5 +630,88 @@ fn pw_props_raw(pairs: &[(&str, &str)]) -> *mut pw_sys::pw_properties {
             pw_sys::pw_properties_set(p, kc.as_ptr(), vc.as_ptr());
         }
         p
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use resonance_dsp::filter::FilterType;
+    use resonance_ipc::BandType;
+
+    fn chain() -> ProcessorChain {
+        ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48000.0)
+            .build()
+    }
+
+    #[test]
+    fn add_band_uses_requested_type() {
+        let mut c = chain();
+        apply_command(
+            &mut c,
+            AudioCommand::AddBand {
+                band_type: BandType::HighShelf,
+                freq: 8000.0,
+                gain_db: 4.0,
+                q: 0.7,
+            },
+        );
+        assert_eq!(c.filters.len(), 1);
+        assert_eq!(c.filters[0].filter_type, FilterType::HighShelf);
+    }
+
+    #[test]
+    fn set_band_type_preserves_freq_gain_q() {
+        let mut c = chain();
+        apply_command(
+            &mut c,
+            AudioCommand::AddBand {
+                band_type: BandType::Peaking,
+                freq: 1000.0,
+                gain_db: 6.0,
+                q: 2.0,
+            },
+        );
+        apply_command(
+            &mut c,
+            AudioCommand::SetBandType {
+                index: 0,
+                band_type: BandType::LowPass,
+            },
+        );
+        let f = &c.filters[0];
+        assert_eq!(f.filter_type, FilterType::LowPassQ); // BandType::LowPass → LowPassQ
+        assert!((f.freq - 1000.0).abs() < 1e-9);
+        assert!((f.gain_db - 6.0).abs() < 1e-9);
+        assert!((f.q - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn remove_band_out_of_range_is_noop() {
+        let mut c = chain();
+        apply_command(
+            &mut c,
+            AudioCommand::AddBand {
+                band_type: BandType::Peaking,
+                freq: 1000.0,
+                gain_db: 0.0,
+                q: 1.0,
+            },
+        );
+        apply_command(&mut c, AudioCommand::RemoveBand { index: 5 });
+        assert_eq!(c.filters.len(), 1);
+        apply_command(&mut c, AudioCommand::RemoveBand { index: 0 });
+        assert_eq!(c.filters.len(), 0);
+    }
+
+    #[test]
+    fn preamp_and_power_commands_apply() {
+        let mut c = chain();
+        apply_command(&mut c, AudioCommand::SetPreamp(-6.0));
+        apply_command(&mut c, AudioCommand::SetPower(false));
+        assert!((c.preamp_db + 6.0).abs() < 1e-9);
+        assert!(!c.enabled);
     }
 }

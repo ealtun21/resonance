@@ -1,5 +1,8 @@
+use crate::config::{self, Mappings, Profile};
 use crate::state::{AudioCommand, SharedState};
 use anyhow::Result;
+use resonance_dsp::chain::ProcessorChain;
+use resonance_dsp::filter::{ApoFilter, FilterError, FilterType};
 use resonance_ipc::{Command, Response};
 use resonance_preset::{apo::parse_apo, fac::parse_fac};
 use std::{env, path::PathBuf};
@@ -103,13 +106,141 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
 
         Command::ListPresets { dir } => Response::PresetList(list_presets(&dir)),
 
-        Command::WatchPreset { path } => {
-            state.0.lock().unwrap().watched_preset = Some(path);
+        Command::SaveProfile { name } => {
+            let profile = Profile::from_state(&state.snapshot());
+            match config::save_profile(&name, &profile) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error(e),
+            }
+        }
+
+        Command::LoadProfile { name } => match load_profile(&name, state) {
+            Ok(()) => {
+                state.0.lock().unwrap().current_preset = Some(name);
+                Response::Ok
+            }
+            Err(e) => Response::Error(e),
+        },
+
+        Command::DeleteProfile { name } => match config::delete_profile(&name) {
+            Ok(()) => Response::Ok,
+            Err(e) => Response::Error(e),
+        },
+
+        Command::ListProfiles => Response::PresetList(config::list_profiles()),
+
+        Command::MapOutput { profile } => {
+            let Some(output) = state.0.lock().unwrap().active_output.clone() else {
+                return Response::Error("no active output device detected yet".to_string());
+            };
+            if config::load_profile(&profile).is_err() {
+                return Response::Error(format!("profile '{profile}' not found"));
+            }
+            let mut maps = Mappings::load();
+            maps.set(output, profile.clone());
+            match maps.save() {
+                Ok(()) => {
+                    // Apply immediately so the mapping takes effect now.
+                    if load_profile(&profile, state).is_ok() {
+                        state.0.lock().unwrap().mapped_profile = Some(profile);
+                    }
+                    Response::Ok
+                }
+                Err(e) => Response::Error(e),
+            }
+        }
+
+        Command::UnmapOutput => {
+            let Some(output) = state.0.lock().unwrap().active_output.clone() else {
+                return Response::Error("no active output device detected yet".to_string());
+            };
+            let mut maps = Mappings::load();
+            maps.remove(&output);
+            match maps.save() {
+                Ok(()) => {
+                    state.0.lock().unwrap().mapped_profile = None;
+                    Response::Ok
+                }
+                Err(e) => Response::Error(e),
+            }
+        }
+
+        Command::ListMappings => Response::Mappings(Mappings::load().list()),
+
+        Command::SetBand {
+            index,
+            freq,
+            gain_db,
+            q,
+        } => {
+            state.send(
+                AudioCommand::SetBand {
+                    index,
+                    freq,
+                    gain_db,
+                    q,
+                },
+                |chain| {
+                    if let Some(f) = chain.filters.get(index) {
+                        let (ft, en) = (f.filter_type, f.enabled);
+                        if let Ok(new_f) = build_band(chain, ft, freq, gain_db, q, en) {
+                            chain.filters[index] = new_f;
+                        }
+                    }
+                },
+            );
             Response::Ok
         }
 
-        Command::UnwatchPreset { .. } => {
-            state.0.lock().unwrap().watched_preset = None;
+        Command::SetBandEnabled { index, enabled } => {
+            state.send(AudioCommand::SetBandEnabled { index, enabled }, |chain| {
+                if let Some(f) = chain.filters.get_mut(index) {
+                    f.enabled = enabled;
+                }
+            });
+            Response::Ok
+        }
+
+        Command::AddBand {
+            band_type,
+            freq,
+            gain_db,
+            q,
+        } => {
+            state.send(
+                AudioCommand::AddBand {
+                    band_type,
+                    freq,
+                    gain_db,
+                    q,
+                },
+                |chain| {
+                    if let Ok(nf) = build_band(chain, band_type.into(), freq, gain_db, q, true) {
+                        chain.filters.push(nf);
+                    }
+                },
+            );
+            Response::Ok
+        }
+
+        Command::RemoveBand { index } => {
+            state.send(AudioCommand::RemoveBand { index }, |chain| {
+                if index < chain.filters.len() {
+                    chain.filters.remove(index);
+                }
+            });
+            Response::Ok
+        }
+
+        Command::SetBandType { index, band_type } => {
+            state.send(AudioCommand::SetBandType { index, band_type }, |chain| {
+                if let Some(f) = chain.filters.get(index) {
+                    let (freq, gain_db, q, en) = (f.freq, f.gain_db, f.q, f.enabled);
+                    if let Ok(nf) = build_band(chain, band_type.into(), freq, gain_db, q, en) {
+                        chain.filters[index] = nf;
+                    }
+                }
+            });
             Response::Ok
         }
 
@@ -120,6 +251,26 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
 
         _ => Response::Error("unhandled command".to_string()),
     }
+}
+
+/// Build an `ApoFilter` matching the chain's sample rate / channel count.
+fn build_band(
+    chain: &ProcessorChain,
+    filter_type: FilterType,
+    freq: f64,
+    gain_db: f64,
+    q: f64,
+    enabled: bool,
+) -> Result<ApoFilter, FilterError> {
+    ApoFilter::builder()
+        .filter_type(filter_type)
+        .freq(freq)
+        .gain_db(gain_db)
+        .q(q)
+        .enabled(enabled)
+        .channels(chain.channels)
+        .sample_rate(chain.sample_rate)
+        .build()
 }
 
 fn load_preset(path: &str, state: &SharedState) -> Result<(), String> {
@@ -134,8 +285,23 @@ fn load_preset(path: &str, state: &SharedState) -> Result<(), String> {
         let inner = state.0.lock().unwrap();
         (inner.chain.sample_rate, inner.chain.channels)
     };
-    let new_chain = preset.into_chain(channels, sr);
-    state.send(AudioCommand::ReplaceChain(Box::new(new_chain)), |_| {});
+    // Build chain twice: one for RT thread, one to update the shadow (GetState reads shadow)
+    let chain_rt = preset.clone().into_chain(channels, sr);
+    let chain_shadow = preset.into_chain(channels, sr);
+    state.replace_chain(chain_rt, chain_shadow);
+    Ok(())
+}
+
+/// Load a named profile from the config dir and apply it to the chain.
+fn load_profile(name: &str, state: &SharedState) -> Result<(), String> {
+    let profile = config::load_profile(name)?;
+    let (sr, channels) = {
+        let inner = state.0.lock().unwrap();
+        (inner.chain.sample_rate, inner.chain.channels)
+    };
+    let chain_rt = profile.clone().into_chain(channels, sr);
+    let chain_shadow = profile.into_chain(channels, sr);
+    state.replace_chain(chain_rt, chain_shadow);
     Ok(())
 }
 

@@ -91,16 +91,23 @@ pub fn parse_fac(content: &str) -> Result<Preset, FacError> {
     ln = next_ln;
     let eq_enabled = parse_prefixed_int(eq_on_line, ln)? != 0;
 
+    // Each band is a "CF" line then a "Boost/Cut" line. Real FxSound files also
+    // prefix each band with a non-numeric header line ("Band 1", "Band 2", …),
+    // so skip any line whose prefix isn't a number before reading each value.
+    let mut read_value = |ln: &mut usize| -> Result<f64, FacError> {
+        loop {
+            let (n, line) = next(*ln)?;
+            *ln = n;
+            if let Some(v) = numeric_prefix(line) {
+                return Ok(v);
+            }
+        }
+    };
+
     let mut bands = Vec::with_capacity(num_bands);
     for _ in 0..num_bands {
-        let (next_ln, freq_line) = next(ln)?;
-        ln = next_ln;
-        let freq = parse_prefixed_f64(freq_line, ln)?;
-
-        let (next_ln, gain_line) = next(ln)?;
-        ln = next_ln;
-        let gain_db = parse_prefixed_f64(gain_line, ln)?;
-
+        let freq = read_value(&mut ln)?;
+        let gain_db = read_value(&mut ln)?;
         bands.push(EqBand {
             filter_type: ApoFilterType::Peaking,
             freq,
@@ -153,12 +160,10 @@ fn parse_prefixed_int(line: &str, ln: usize) -> Result<i32, FacError> {
     })
 }
 
-fn parse_prefixed_f64(line: &str, ln: usize) -> Result<f64, FacError> {
-    let val = line.split(':').next().unwrap_or("").trim();
-    val.parse::<f64>().map_err(|_| FacError::ParseError {
-        line: ln,
-        msg: format!("expected float prefix, got '{line}'"),
-    })
+/// Parse the leading "value: label" number, returning `None` for header lines
+/// (e.g. "Band 1") whose prefix isn't numeric.
+fn numeric_prefix(line: &str) -> Option<f64> {
+    line.split(':').next()?.trim().parse::<f64>().ok()
 }
 
 #[cfg(test)]
@@ -226,5 +231,57 @@ mod tests {
         assert!((preset.effects.fidelity.intensity - 38.0 / 127.0).abs() < 0.001);
         assert!(preset.effects.fidelity.enabled);
         assert!(preset.eq_enabled);
+    }
+
+    // Real FxSound files prefix each band with a "Band N" header line.
+    const REAL_FAC: &str = "CLASS1 : Effect Type\n\
+        9: Version\n\
+        Pop\n\
+        0: Double Params Flag\n\
+        1: Total number of elements\n\
+        38: Main 0\n\
+        0: Main 1\n\
+        0: Main 2\n\
+        13: Main 3\n\
+        89: Main 4\n\
+        25: Main 5\n\
+        0: Element Number\n\
+           0: Param 0\n\
+           0: Param 1\n\
+           0: Param 2\n\
+           0: Param 3\n\
+           0: Param 4\n\
+           0: Param 5\n\
+           0: Param 6\n\
+        7: Number of Application Dependent Integers\n\
+        0: Number of Application Dependent Reals\n\
+        0: Number of Application Dependent Strings\n\
+        1: Integer[0]\n\
+        1: Integer[1]\n\
+        1: Integer[2]\n\
+        1: Integer[3]\n\
+        1: Integer[4]\n\
+        0: Integer[5]\n\
+        2: Integer[6]\n\
+        3: Number of EQ Bands\n\
+        1: On/Off Flag\n\
+        Band 1\n\
+           62.5: CF\n\
+           1.9685: Boost/Cut\n\
+        Band 2\n\
+           110: CF\n\
+           0: Boost/Cut\n\
+        Band 3\n\
+           230: CF\n\
+           -2.5: Boost/Cut\n";
+
+    #[test]
+    fn parse_real_format_with_band_headers() {
+        let preset = parse_fac(REAL_FAC).unwrap();
+        assert_eq!(preset.bands.len(), 3);
+        assert!((preset.bands[0].freq - 62.5).abs() < 0.01);
+        assert!((preset.bands[0].gain_db - 1.9685).abs() < 0.01);
+        assert!((preset.bands[2].freq - 230.0).abs() < 0.01);
+        assert!((preset.bands[2].gain_db + 2.5).abs() < 0.01);
     }
 }

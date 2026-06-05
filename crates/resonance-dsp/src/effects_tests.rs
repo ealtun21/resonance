@@ -1,8 +1,3 @@
-/// Black-box audio tests for all five FxSound effects.
-///
-/// Tests only observable audio properties: frequency content (via FFT),
-/// signal levels, inter-channel correlation, and dynamic gain curves.
-/// No knowledge of internal implementation is assumed.
 use crate::effects::{
     AmbienceEffect, BassBoostEffect, DynamicBoostEffect, Effect, FidelityEffect, SurroundEffect,
 };
@@ -11,15 +6,12 @@ use std::f64::consts::PI;
 
 const SR: f64 = 48000.0;
 
-// ── Spectral analysis helpers ─────────────────────────────────────────────────
+// ── Spectral helpers ──────────────────────────────────────────────────────────
 
-/// Hann-windowed FFT → one-sided magnitude spectrum, peak-normalised by window.
-/// Returns magnitudes for bins 0..N/2 representing 0..SR/2.
 fn spectrum(signal: &[f64]) -> Vec<f64> {
     let n = signal.len();
     let mut planner = FftPlanner::new();
     let fft = planner.plan_fft_forward(n);
-
     let mut buf: Vec<Complex<f64>> = signal
         .iter()
         .enumerate()
@@ -28,50 +20,25 @@ fn spectrum(signal: &[f64]) -> Vec<f64> {
             Complex::new(x * w, 0.0)
         })
         .collect();
-
     fft.process(&mut buf);
-
-    // Two-sided amplitude → one-sided peak: scale = 2/N (window normalisation)
     let scale = 2.0 / n as f64;
     buf[..n / 2].iter().map(|c| c.norm() * scale).collect()
 }
 
-/// Bin index for a given frequency (nearest).
 fn bin(freq: f64, n: usize) -> usize {
     ((freq / SR * n as f64).round() as usize).min(n / 2 - 1)
 }
 
-/// Peak magnitude in a ±`radius`-bin window around `center_bin`.
 fn peak_near(spec: &[f64], center: usize, radius: usize) -> f64 {
     let lo = center.saturating_sub(radius);
     let hi = (center + radius + 1).min(spec.len());
     spec[lo..hi].iter().cloned().fold(0.0f64, f64::max)
 }
 
-/// RMS of a sample slice.
 fn rms(s: &[f64]) -> f64 {
     (s.iter().map(|x| x * x).sum::<f64>() / s.len() as f64).sqrt()
 }
 
-/// Pearson correlation coefficient between two equal-length slices.
-fn correlation(a: &[f64], b: &[f64]) -> f64 {
-    let n = a.len() as f64;
-    let mean_a = a.iter().sum::<f64>() / n;
-    let mean_b = b.iter().sum::<f64>() / n;
-    let cov: f64 = a
-        .iter()
-        .zip(b)
-        .map(|(&ai, &bi)| (ai - mean_a) * (bi - mean_b))
-        .sum();
-    let var_a: f64 = a.iter().map(|&ai| (ai - mean_a).powi(2)).sum();
-    let var_b: f64 = b.iter().map(|&bi| (bi - mean_b).powi(2)).sum();
-    if var_a == 0.0 || var_b == 0.0 {
-        return 1.0;
-    }
-    cov / (var_a * var_b).sqrt()
-}
-
-/// Generate `n` samples of a sine at `freq_hz` with given `amplitude`.
 fn sine(freq_hz: f64, n: usize, amplitude: f64) -> Vec<f64> {
     let omega = 2.0 * PI * freq_hz / SR;
     (0..n)
@@ -80,75 +47,66 @@ fn sine(freq_hz: f64, n: usize, amplitude: f64) -> Vec<f64> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FIDELITY — harmonic exciter
+// FIDELITY — harmonic exciter: Butterworth HP split + tanh odd + DC-blocked
+// squared even path. Even path dominates at low intensity, odd at high.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Fidelity must add odd harmonics to signal above the 3500 Hz crossover.
-/// Input 5 kHz → expect detectable energy at 15 kHz (3rd harmonic).
+/// 5 kHz input above the HP crossover should gain a 3rd harmonic at 15 kHz (odd path).
 #[test]
-fn fidelity_creates_third_harmonic_above_crossover() {
-    const N: usize = 32768; // ~682 ms, ~1.46 Hz/bin
-    const F0: f64 = 5000.0;
-
-    let raw_input = sine(F0, N, 0.8);
-
-    // Noise floor at 15 kHz before processing
-    let spec_in = spectrum(&raw_input);
-    let noise_floor = peak_near(&spec_in, bin(15000.0, N), 4);
+fn fidelity_creates_odd_harmonic_above_crossover() {
+    const N: usize = 32768;
+    let raw = sine(5000.0, N, 0.8);
+    let noise = peak_near(&spectrum(&raw), bin(15000.0, N), 4);
 
     let mut fx = FidelityEffect::new(1, SR);
     fx.set_intensity(1.0);
-    let mut processed = raw_input.clone();
-    fx.process(&mut processed, 1);
+    let mut out = raw.clone();
+    fx.process(&mut out, 1);
 
-    let spec_out = spectrum(&processed);
-    let harmonic_mag = peak_near(&spec_out, bin(15000.0, N), 4);
-
+    let h3 = peak_near(&spectrum(&out), bin(15000.0, N), 4);
     assert!(
-        harmonic_mag > noise_floor * 10.0,
-        "fidelity should create 3rd harmonic at 15 kHz: noise_floor={noise_floor:.5}, \
-         harmonic={harmonic_mag:.5}"
+        h3 > noise * 10.0,
+        "3rd harmonic at 15 kHz expected; noise={noise:.5} got={h3:.5}"
     );
 }
 
-/// Signal well below the 3500 Hz HP crossover should NOT gain significant harmonics.
-/// The HP filter rejects it before cubing.
+/// The odd `sin` exciter is symmetric, so it must not introduce a DC offset.
+#[test]
+fn fidelity_has_no_dc_offset() {
+    const N: usize = 32768;
+    let mut out = sine(5000.0, N, 0.8);
+    let mut fx = FidelityEffect::new(1, SR);
+    fx.set_intensity(0.6);
+    fx.process(&mut out, 1);
+    let mean = out[2000..].iter().sum::<f64>() / (out.len() - 2000) as f64;
+    assert!(mean.abs() < 1e-3, "unexpected DC offset: mean={mean:.6}");
+}
+
+/// Signal well below the HP crossover must not gain meaningful harmonics.
 #[test]
 fn fidelity_does_not_harmonise_signal_below_crossover() {
     const N: usize = 32768;
-    const F0: f64 = 300.0; // far below 3500 Hz crossover
+    let raw = sine(300.0, N, 0.8);
+    let spec_ref = spectrum(&raw);
+    let h3_ref = peak_near(&spec_ref, bin(900.0, N), 4);
 
-    let raw_input = sine(F0, N, 0.8);
-
-    // Reference: process with ZERO intensity (pure passthrough)
-    let mut ref_fx = FidelityEffect::new(1, SR);
-    ref_fx.set_intensity(0.0);
-    let mut ref_out = raw_input.clone();
-    ref_fx.process(&mut ref_out, 1);
-    let spec_ref = spectrum(&ref_out);
-    let third_harmonic_ref = peak_near(&spec_ref, bin(900.0, N), 4);
-
-    // At full intensity
     let mut fx = FidelityEffect::new(1, SR);
     fx.set_intensity(1.0);
-    let mut out = raw_input.clone();
+    let mut out = raw.clone();
     fx.process(&mut out, 1);
-    let spec_out = spectrum(&out);
-    let third_harmonic_out = peak_near(&spec_out, bin(900.0, N), 4);
 
+    let h3 = peak_near(&spectrum(&out), bin(900.0, N), 4);
     assert!(
-        third_harmonic_out < third_harmonic_ref * 5.0 + 0.001,
-        "fidelity below crossover: harmonic at 900 Hz should be negligible \
-         (ref={third_harmonic_ref:.5}, got={third_harmonic_out:.5})"
+        h3 < h3_ref * 5.0 + 0.001,
+        "no 3rd harmonic expected at 900 Hz for 300 Hz input; ref={h3_ref:.5} got={h3:.5}"
     );
 }
 
-/// More fidelity intensity → more harmonic energy at 15 kHz.
+/// More intensity → more odd-harmonic energy.
 #[test]
 fn fidelity_harmonic_level_increases_with_intensity() {
     const N: usize = 32768;
-    const F0: f64 = 5000.0;
-    let input = sine(F0, N, 0.8);
+    let input = sine(5000.0, N, 0.8);
 
     let harmonic_at = |intensity: f64| {
         let mut fx = FidelityEffect::new(1, SR);
@@ -158,18 +116,15 @@ fn fidelity_harmonic_level_increases_with_intensity() {
         peak_near(&spectrum(&buf), bin(15000.0, N), 4)
     };
 
-    let h_lo = harmonic_at(0.3);
-    let h_hi = harmonic_at(1.0);
-
     assert!(
-        h_hi > h_lo,
-        "higher intensity should produce more 3rd harmonic: {h_lo:.5} vs {h_hi:.5}"
+        harmonic_at(1.0) > harmonic_at(0.3),
+        "higher intensity must produce more 3rd harmonic"
     );
 }
 
 /// Zero intensity must be a bit-exact passthrough.
 #[test]
-fn fidelity_zero_intensity_exact_passthrough() {
+fn fidelity_zero_intensity_passthrough() {
     let input = sine(5000.0, 4096, 0.8);
     let mut fx = FidelityEffect::new(1, SR);
     fx.set_intensity(0.0);
@@ -179,62 +134,54 @@ fn fidelity_zero_intensity_exact_passthrough() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AMBIENCE — Schroeder allpass reverb
+// AMBIENCE — Freeverb (8 damped combs + 4 allpass per channel, stereo spread).
+//   knob warped ×0.34 (MUSIC_MODE2): decay 0.095→~0.21, wet 0→0.273,
+//   dry 0.897→1.0, bypass below raw MIDI 12/127.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Feed a unit impulse; the output must have non-zero energy well after the
-/// impulse (reverb tail extends beyond the original transient).
+/// Shortest comb at 48 kHz ≈ 1214 samples; a reverb tail must appear after it returns.
 #[test]
 fn ambience_produces_reverb_tail_after_impulse() {
-    let n = 4096;
+    let n = 8192;
     let mut buf = vec![0.0f64; n];
-    buf[0] = 1.0; // unit impulse
-
+    buf[0] = 1.0;
     let mut fx = AmbienceEffect::new(1, SR);
     fx.set_intensity(1.0);
     fx.process(&mut buf, 1);
-
-    // Energy in the tail 50–500 samples after the impulse
-    let tail_energy: f64 = buf[50..500].iter().map(|x| x * x).sum();
+    let tail: f64 = buf[1300..8000].iter().map(|x| x * x).sum();
     assert!(
-        tail_energy > 1e-6,
-        "ambience must produce reverb tail; tail_energy={tail_energy:.2e}"
+        tail > 1e-6,
+        "reverb tail expected after first comb returns; energy={tail:.2e}"
     );
 }
 
-/// Reverb tail energy at higher intensity must be greater than at lower intensity.
+/// Higher intensity (larger room/feedback) → louder, longer tail.
 #[test]
 fn ambience_tail_louder_at_higher_intensity() {
-    let n = 2048;
-
-    let tail_energy = |intensity: f64| {
+    let energy = |intensity: f64| {
+        let n = 16384;
         let mut buf = vec![0.0f64; n];
         buf[0] = 1.0;
         let mut fx = AmbienceEffect::new(1, SR);
         fx.set_intensity(intensity);
         fx.process(&mut buf, 1);
-        buf[50..500].iter().map(|x| x * x).sum::<f64>()
+        buf[1..].iter().map(|x| x * x).sum::<f64>()
     };
-
-    let e_lo = tail_energy(0.2);
-    let e_hi = tail_energy(1.0);
+    let e_lo = energy(0.3);
+    let e_hi = energy(1.0);
     assert!(
         e_hi > e_lo,
-        "higher ambience intensity → louder reverb tail: {e_lo:.2e} vs {e_hi:.2e}"
+        "higher intensity → more reverb energy: 0.3→{e_lo:.4} 1.0→{e_hi:.4}"
     );
 }
 
-/// After driving with signal then cutting to silence, the reverb must decay
-/// (i.e., not ring forever). Energy at 50 ms > 200 ms into silence.
 #[test]
 fn ambience_tail_decays_over_time() {
-    let drive = (SR * 0.1) as usize; // 100 ms of signal
-    let silence_len = (SR * 0.3) as usize; // 300 ms of silence to measure
-
+    let drive = (SR * 0.1) as usize;
+    let silence_len = (SR * 0.4) as usize;
     let mut fx = AmbienceEffect::new(2, SR);
     fx.set_intensity(1.0);
 
-    // Drive with a 1 kHz stereo tone
     let omega = 2.0 * PI * 1000.0 / SR;
     let mut drive_buf: Vec<f64> = (0..drive)
         .flat_map(|i| {
@@ -244,29 +191,25 @@ fn ambience_tail_decays_over_time() {
         .collect();
     fx.process(&mut drive_buf, 2);
 
-    // Now measure the decay: split silence into four 75 ms windows
     let window = silence_len / 4;
     let mut silence = vec![0.0f64; silence_len * 2];
     fx.process(&mut silence, 2);
 
-    let energy_at = |w: usize| -> f64 {
-        let start = w * window * 2;
-        let end = start + window * 2;
-        silence[start..end].iter().map(|x| x * x).sum()
+    let energy = |w: usize| -> f64 {
+        let s = w * window * 2;
+        silence[s..s + window * 2].iter().map(|x| x * x).sum()
     };
-
-    let e0 = energy_at(0);
-    let e2 = energy_at(2);
-
     assert!(
-        e0 > e2,
-        "reverb tail must decay: window-0 energy {e0:.2e} should exceed window-2 energy {e2:.2e}"
+        energy(0) > energy(3),
+        "reverb tail must decay: e0={:.2e} e3={:.2e}",
+        energy(0),
+        energy(3)
     );
 }
 
 /// Zero intensity must be a bit-exact passthrough.
 #[test]
-fn ambience_zero_intensity_exact_passthrough() {
+fn ambience_zero_intensity_passthrough() {
     let input: Vec<f64> = sine(1000.0, 512, 0.5)
         .into_iter()
         .flat_map(|s| [s, s])
@@ -278,151 +221,88 @@ fn ambience_zero_intensity_exact_passthrough() {
     assert_eq!(buf, input);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SURROUND — Haas-effect stereo widener
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Mono signal (L=R) fed through surround must lose L=R identity.
-/// Pearson correlation between L and R channels must decrease below 1.
+/// Below the bypass threshold (intensity < ~0.094) output must be a bit-exact passthrough.
 #[test]
-fn surround_reduces_lr_correlation_for_mono_input() {
-    let n_frames = 9600; // 200 ms settle
-    let measure = 4800;
-    let omega = 2.0 * PI * 1000.0 / SR;
+fn ambience_bypassed_at_very_low_intensity() {
+    let n = 1024;
+    let input = sine(1000.0, n, 0.5);
+    let mut fx = AmbienceEffect::new(1, SR);
+    fx.set_intensity(0.05);
+    let mut out = input.clone();
+    fx.process(&mut out, 1);
+    assert_eq!(out, input);
+}
 
-    let mut fx = SurroundEffect::new(SR);
+/// The first impulse sample is the dry signal scaled by the FxSound dry gain
+/// (0.897 at full intensity); combs return later.
+#[test]
+fn ambience_impulse_first_sample_is_dry_gain() {
+    let mut buf = vec![0.0f64; 8192];
+    buf[0] = 1.0;
+    let mut fx = AmbienceEffect::new(1, SR);
     fx.set_intensity(1.0);
-
-    // Settle
-    let mut settle: Vec<f64> = (0..n_frames)
-        .flat_map(|i| {
-            let s = (omega * i as f64).sin();
-            [s, s]
-        })
-        .collect();
-    fx.process(&mut settle, 2);
-
-    // Measure
-    let mut out: Vec<f64> = (0..measure)
-        .flat_map(|i| {
-            let s = (omega * (n_frames + i) as f64).sin();
-            [s, s]
-        })
-        .collect();
-    fx.process(&mut out, 2);
-
-    let ls: Vec<f64> = out.chunks(2).map(|f| f[0]).collect();
-    let rs: Vec<f64> = out.chunks(2).map(|f| f[1]).collect();
-    let corr = correlation(&ls, &rs);
-
+    fx.process(&mut buf, 1);
     assert!(
-        corr < 0.999,
-        "surround must decorrelate L and R channels: corr={corr:.5} (expected < 0.999)"
+        (buf[0] - 0.897).abs() < 0.01,
+        "first impulse output should be dry gain ≈ 0.897; got {:.6}",
+        buf[0]
     );
 }
 
-/// Higher surround intensity → lower L-R correlation.
-#[test]
-fn surround_more_decorrelation_at_higher_intensity() {
-    let n_frames = 9600;
-    let measure = 4800;
+// ─────────────────────────────────────────────────────────────────────────────
+// SURROUND — bass-protected mid/side widener, bipolar.
+//   gain_side = 1 + 2·intensity (≥0), 1 + intensity (<0). HP at 250 Hz on side.
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn width_energy(intensity: f64) -> f64 {
+    let n_frames = 4800;
     let omega = 2.0 * PI * 1000.0 / SR;
+    let stereo: Vec<f64> = (0..n_frames)
+        .flat_map(|i| {
+            let l = (omega * i as f64).sin();
+            let r = (omega * i as f64 + 0.5).sin();
+            [l, r]
+        })
+        .collect();
+    let mut fx = SurroundEffect::new(SR);
+    fx.set_intensity(intensity);
+    let mut buf = stereo.clone();
+    fx.process(&mut buf, 2);
+    buf.chunks(2).map(|f| (f[0] - f[1]).powi(2)).sum::<f64>()
+}
 
-    let correlation_at = |intensity: f64| {
-        let mut fx = SurroundEffect::new(SR);
-        fx.set_intensity(intensity);
-
-        let mut settle: Vec<f64> = (0..n_frames)
-            .flat_map(|i| {
-                let s = (omega * i as f64).sin();
-                [s, s]
-            })
-            .collect();
-        fx.process(&mut settle, 2);
-
-        let mut out: Vec<f64> = (0..measure)
-            .flat_map(|i| {
-                let s = (omega * (n_frames + i) as f64).sin();
-                [s, s]
-            })
-            .collect();
-        fx.process(&mut out, 2);
-
-        let ls: Vec<f64> = out.chunks(2).map(|f| f[0]).collect();
-        let rs: Vec<f64> = out.chunks(2).map(|f| f[1]).collect();
-        correlation(&ls, &rs)
-    };
-
-    let corr_lo = correlation_at(0.3);
-    let corr_hi = correlation_at(1.0);
-
+/// Positive intensity widens a stereo signal (more L-R difference energy).
+#[test]
+fn surround_increases_stereo_width_for_stereo_input() {
     assert!(
-        corr_lo > corr_hi,
-        "higher intensity should produce lower L-R correlation: \
-         intensity=0.3 → {corr_lo:.4}, intensity=1.0 → {corr_hi:.4}"
+        width_energy(1.0) > width_energy(0.0),
+        "surround must widen stereo at positive intensity"
     );
 }
 
-/// The Haas delay is ~0.2 ms. Cross-correlating L and R after processing a
-/// pure mono signal should show a peak at a lag of approximately that many samples.
+/// Higher positive intensity → greater width.
 #[test]
-fn surround_inter_channel_delay_is_detectable() {
-    let n_frames = 9600;
-    let measure = 4800;
-    let omega = 2.0 * PI * 1000.0 / SR;
-
-    let mut fx = SurroundEffect::new(SR);
-    fx.set_intensity(1.0);
-
-    let mut settle: Vec<f64> = (0..n_frames)
-        .flat_map(|i| {
-            let s = (omega * i as f64).sin();
-            [s, s]
-        })
-        .collect();
-    fx.process(&mut settle, 2);
-
-    let mut out: Vec<f64> = (0..measure)
-        .flat_map(|i| {
-            let s = (omega * (n_frames + i) as f64).sin();
-            [s, s]
-        })
-        .collect();
-    fx.process(&mut out, 2);
-
-    let ls: Vec<f64> = out.chunks(2).map(|f| f[0]).collect();
-    let rs: Vec<f64> = out.chunks(2).map(|f| f[1]).collect();
-
-    // Compute normalised cross-correlation for lags 0..20 samples
-    let max_lag = 20usize;
-    let search_n = measure - max_lag;
-    let xc: Vec<f64> = (0..=max_lag)
-        .map(|lag| {
-            ls[..search_n]
-                .iter()
-                .zip(&rs[lag..lag + search_n])
-                .map(|(a, b)| a * b)
-                .sum::<f64>()
-        })
-        .collect();
-
-    // Peak at lag 0 means no delay; peak elsewhere means delay
-    let peak_lag = xc
-        .iter()
-        .enumerate()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-        .map(|(i, _)| i)
-        .unwrap();
-
+fn surround_more_width_at_higher_intensity() {
     assert!(
-        peak_lag > 0,
-        "surround should introduce a non-zero inter-channel delay; peak at lag={peak_lag}"
+        width_energy(1.0) > width_energy(0.3),
+        "higher intensity → more L-R width"
+    );
+}
+
+/// Negative intensity narrows toward mono (less width than the dry signal).
+#[test]
+fn surround_negative_intensity_narrows() {
+    let dry = width_energy(0.0);
+    let narrowed = width_energy(-1.0);
+    assert!(
+        narrowed < dry,
+        "negative intensity must narrow: dry={dry:.4} narrowed={narrowed:.4}"
     );
 }
 
 /// Zero intensity must be a bit-exact passthrough.
 #[test]
-fn surround_zero_intensity_exact_passthrough() {
+fn surround_zero_intensity_passthrough() {
     let input: Vec<f64> = (0..512)
         .flat_map(|i| {
             let s = (2.0 * PI * 1000.0 / SR * i as f64).sin() * 0.5;
@@ -437,15 +317,16 @@ fn surround_zero_intensity_exact_passthrough() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DYNAMIC BOOST — upward compander
+// DYNAMIC BOOST — loudness maximizer: makeup gain + lookahead brickwall limiter.
+//   makeup = 10^(intensity·12/20), ceiling 0.9, lookahead 0.75 ms.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The gain applied to the signal must decrease as input amplitude increases.
-/// Tests three amplitude points: 0.02, 0.15, 0.85 (quiet → loud).
+/// Quiet/mid signals get the full makeup gain; loud signals are limited below it.
 #[test]
-fn dynamic_boost_gain_curve_is_downward_sloping() {
-    let n = (SR * 0.5) as usize; // 500 ms: settle + measure
+fn dynamic_boost_makeup_then_limits() {
+    let n = (SR * 0.5) as usize;
     let settle = n / 2;
+    let makeup = 10.0_f64.powf(12.0 / 20.0); // intensity 1.0
 
     let gain_at = |amp: f64| {
         let input = sine(1000.0, n, amp);
@@ -454,90 +335,111 @@ fn dynamic_boost_gain_curve_is_downward_sloping() {
         fx.set_intensity(1.0);
         let mut buf = input.clone();
         fx.process(&mut buf, 1);
-        let out_rms = rms(&buf[settle..]);
-        out_rms / in_rms
+        rms(&buf[settle..]) / in_rms
     };
 
     let g_quiet = gain_at(0.02);
-    let g_mid = gain_at(0.15);
     let g_loud = gain_at(0.85);
 
     assert!(
-        g_quiet > g_mid,
-        "quiet should have more gain than mid: {g_quiet:.3} vs {g_mid:.3}"
+        (g_quiet - makeup).abs() < 0.2,
+        "quiet signal should receive ~full makeup ({makeup:.2}); got {g_quiet:.2}"
     );
     assert!(
-        g_mid > g_loud,
-        "mid should have more gain than loud: {g_mid:.3} vs {g_loud:.3}"
-    );
-    assert!(
-        g_loud < 1.5,
-        "loud signal gain should be near unity: {g_loud:.3}"
+        g_loud < g_quiet,
+        "loud signal must be limited below quiet gain: loud={g_loud:.2} quiet={g_quiet:.2}"
     );
 }
 
-/// Quiet signal (amplitude << threshold) must receive significant gain.
-/// At intensity=1.0 the threshold is 0.4; amplitude=0.02 is well below it.
+/// Quiet signal must receive significant boost (makeup gain).
 #[test]
-fn dynamic_boost_amplifies_subthreshold_signal() {
+fn dynamic_boost_amplifies_quiet_signal() {
     let n = (SR * 0.5) as usize;
     let settle = n / 2;
-    let amp = 0.02;
-
-    let input = sine(1000.0, n, amp);
+    let input = sine(1000.0, n, 0.02);
     let in_rms = rms(&input[settle..]);
-
     let mut fx = DynamicBoostEffect::new(SR);
     fx.set_intensity(1.0);
     let mut buf = input.clone();
     fx.process(&mut buf, 1);
-    let out_rms = rms(&buf[settle..]);
-
-    let gain = out_rms / in_rms;
+    let gain = rms(&buf[settle..]) / in_rms;
     assert!(
         gain > 1.5,
-        "sub-threshold signal should receive ≥1.5× gain; got {gain:.3}"
+        "quiet signal must get ≥1.5× gain; got {gain:.3}"
     );
 }
 
-/// After loud burst → quiet signal, gain must recover (attack/release).
-/// The first 50 ms of quiet should have lower gain than the next 50 ms.
+/// After a loud burst, gain reduction must release during subsequent quiet.
 #[test]
 fn dynamic_boost_gain_recovers_from_loud_to_quiet() {
     let sr = SR as usize;
     let omega = 2.0 * PI * 1000.0 / SR;
-
     let mut fx = DynamicBoostEffect::new(SR);
     fx.set_intensity(1.0);
 
-    // Loud burst: 200 ms at amplitude 0.9
     let mut loud: Vec<f64> = (0..sr / 5)
         .map(|i| 0.9 * (omega * i as f64).sin())
         .collect();
     fx.process(&mut loud, 1);
 
-    // Quiet recovery: 400 ms at amplitude 0.02
     let quiet_n = sr * 2 / 5;
-    let amp = 0.02;
+    let amp = 0.05;
     let mut quiet: Vec<f64> = (0..quiet_n)
         .map(|i| amp * (omega * (sr / 5 + i) as f64).sin())
         .collect();
     fx.process(&mut quiet, 1);
 
-    let window = (SR * 0.05) as usize; // 50 ms windows
+    let window = (SR * 0.05) as usize;
     let rms_early = rms(&quiet[..window]);
     let rms_late = rms(&quiet[quiet_n - window..]);
-
-    // Early quiet (right after loud) should have lower amplitude than late quiet
     assert!(
         rms_late > rms_early,
-        "gain should recover after loud burst: early_rms={rms_early:.5}, late_rms={rms_late:.5}"
+        "gain must recover: early={rms_early:.5} late={rms_late:.5}"
+    );
+}
+
+/// A loud signal must be held at or below the ceiling (peak limiting).
+#[test]
+fn dynamic_boost_limits_peaks_to_ceiling() {
+    let n = (SR * 0.6) as usize;
+    let settle = n / 2;
+    let input = sine(1000.0, n, 0.9);
+    let mut fx = DynamicBoostEffect::new(SR);
+    fx.set_intensity(1.0);
+    let mut buf = input.clone();
+    fx.process(&mut buf, 1);
+    let peak = buf[settle..].iter().fold(0.0f64, |m, &x| m.max(x.abs()));
+    assert!(
+        peak <= 0.9 + 0.05,
+        "output peak must stay near ceiling 0.9; got {peak:.4}"
+    );
+}
+
+/// With intensity>0 the output is delayed by the lookahead (~0.75 ms).
+#[test]
+fn dynamic_boost_has_lookahead_delay() {
+    let delay_samples = ((0.75e-3) * SR).ceil() as usize;
+    let n = delay_samples + 200;
+    let mut buf = vec![0.0f64; n];
+    buf[0] = 0.5;
+
+    let mut fx = DynamicBoostEffect::new(SR);
+    fx.set_intensity(0.5);
+    fx.process(&mut buf, 1);
+
+    let pre_impulse_energy: f64 = buf[..delay_samples.saturating_sub(1)]
+        .iter()
+        .map(|x| x * x)
+        .sum();
+    assert!(
+        pre_impulse_energy < 1e-20,
+        "output before lookahead window must be silent; energy={pre_impulse_energy:.2e}"
     );
 }
 
 /// Zero intensity must be a bit-exact passthrough.
 #[test]
-fn dynamic_boost_zero_intensity_exact_passthrough() {
+fn dynamic_boost_zero_intensity_passthrough() {
     let input = sine(1000.0, 512, 0.5);
     let mut fx = DynamicBoostEffect::new(SR);
     fx.set_intensity(0.0);
@@ -547,92 +449,83 @@ fn dynamic_boost_zero_intensity_exact_passthrough() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BASS BOOST — sub-harmonic synthesis + low-shelf
+// BASS BOOST — peaking bell at 90 Hz, Q 2.5, gain = intensity·15 dB, bipolar.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Input at 120 Hz → should produce detectable sub-octave energy at 60 Hz.
-/// This verifies the LP→tanh sub-harmonic synthesis path.
+fn effect_gain_db(fx: &mut dyn Effect, freq: f64) -> f64 {
+    let n = (SR * 0.4) as usize;
+    let half = n / 2;
+    let omega = 2.0 * PI * freq / SR;
+    let mut dummy: Vec<f64> = (0..half).map(|i| (omega * i as f64).sin()).collect();
+    fx.process(&mut dummy, 1);
+    let mut in_sq = 0.0;
+    let mut out_sq = 0.0;
+    let mut measure: Vec<f64> = (0..half)
+        .map(|i| (omega * (half + i) as f64).sin())
+        .collect();
+    let orig = measure.clone();
+    fx.process(&mut measure, 1);
+    for (x, y) in orig.iter().zip(&measure) {
+        in_sq += x * x;
+        out_sq += y * y;
+    }
+    20.0 * (out_sq / in_sq).sqrt().log10()
+}
+
+/// At full intensity the gain at 90 Hz must be approximately +15 dB.
 #[test]
-fn bass_boost_synthesises_sub_octave_content() {
-    const N: usize = 65536; // ~1.37 s, ~0.73 Hz/bin → clean 60/120 Hz resolution
-    const F_FUND: f64 = 120.0;
-    const F_SUB: f64 = 60.0;
-
-    let input = sine(F_FUND, N, 0.5);
-
-    // Reference: noise floor at 60 Hz without processing
-    let spec_in = spectrum(&input);
-    let noise_60hz = peak_near(&spec_in, bin(F_SUB, N), 3);
-
+fn bass_boost_peak_gain_at_90hz() {
     let mut fx = BassBoostEffect::new(1, SR);
     fx.set_intensity(1.0);
-    let mut out = input.clone();
-    fx.process(&mut out, 1);
-
-    let spec_out = spectrum(&out);
-    let sub_mag = peak_near(&spec_out, bin(F_SUB, N), 3);
-
+    let g = effect_gain_db(&mut fx, 90.0);
     assert!(
-        sub_mag > noise_60hz * 10.0 + 0.002,
-        "bass boost should synthesise 60 Hz sub-octave from 120 Hz input: \
-         noise_floor={noise_60hz:.5}, sub_mag={sub_mag:.5}"
+        (g - 15.0).abs() < 2.0,
+        "bass boost at 90 Hz should be +15 dB; got {g:.2} dB"
     );
 }
 
-/// Low-shelf component: gain at 60 Hz must exceed gain at 5 kHz.
+/// Negative intensity cuts the low end (gain < 0 at 90 Hz).
 #[test]
-fn bass_boost_shelf_boost_at_low_frequency() {
-    let n = (SR * 0.6) as usize;
-    let settle = n / 2;
-
-    let gain_at = |freq: f64| {
-        let input = sine(freq, n, 0.3);
-        let in_rms = rms(&input[settle..]);
-        let mut fx = BassBoostEffect::new(1, SR);
-        fx.set_intensity(1.0);
-        let mut buf = input.clone();
-        fx.process(&mut buf, 1);
-        let out_rms = rms(&buf[settle..]);
-        20.0 * (out_rms / in_rms).log10()
-    };
-
-    let gain_60 = gain_at(60.0);
-    let gain_5k = gain_at(5000.0);
-
+fn bass_boost_negative_intensity_cuts() {
+    let mut fx = BassBoostEffect::new(1, SR);
+    fx.set_intensity(-1.0);
+    let g = effect_gain_db(&mut fx, 90.0);
     assert!(
-        gain_60 > gain_5k + 1.0,
-        "bass boost must boost 60 Hz more than 5 kHz: \
-         60Hz={gain_60:.2} dB, 5kHz={gain_5k:.2} dB"
+        (g + 15.0).abs() < 2.0,
+        "bass cut at 90 Hz should be -15 dB; got {g:.2} dB"
     );
 }
 
-/// More intensity → more sub-harmonic energy at 60 Hz.
+/// At 5 kHz (well above the 90 Hz bell) gain must be near 0 dB — it's a bell, not a shelf.
 #[test]
-fn bass_boost_sub_harmonic_scales_with_intensity() {
-    const N: usize = 65536;
-    let input = sine(120.0, N, 0.5);
+fn bass_boost_high_frequency_unchanged() {
+    let mut fx = BassBoostEffect::new(1, SR);
+    fx.set_intensity(1.0);
+    let g = effect_gain_db(&mut fx, 5000.0);
+    assert!(
+        g.abs() < 1.0,
+        "bass boost bell must be ~0 dB at 5 kHz; got {g:.2} dB"
+    );
+}
 
-    let sub_mag_at = |intensity: f64| {
+/// Higher intensity → higher gain at 100 Hz.
+#[test]
+fn bass_boost_scales_with_intensity() {
+    let gain_at = |intensity: f64| {
         let mut fx = BassBoostEffect::new(1, SR);
         fx.set_intensity(intensity);
-        let mut buf = input.clone();
-        fx.process(&mut buf, 1);
-        peak_near(&spectrum(&buf), bin(60.0, N), 3)
+        effect_gain_db(&mut fx, 100.0)
     };
-
-    let mag_lo = sub_mag_at(0.3);
-    let mag_hi = sub_mag_at(1.0);
-
     assert!(
-        mag_hi > mag_lo,
-        "higher bass boost intensity → more 60 Hz sub-harmonic: {mag_lo:.5} vs {mag_hi:.5}"
+        gain_at(0.8) > gain_at(0.3),
+        "higher intensity → more bass boost"
     );
 }
 
 /// Zero intensity must be a bit-exact passthrough.
 #[test]
-fn bass_boost_zero_intensity_exact_passthrough() {
-    let input = sine(60.0, 512, 0.5);
+fn bass_boost_zero_intensity_passthrough() {
+    let input = sine(100.0, 512, 0.5);
     let mut fx = BassBoostEffect::new(1, SR);
     fx.set_intensity(0.0);
     let mut buf = input.clone();
