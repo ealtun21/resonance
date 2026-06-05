@@ -15,9 +15,9 @@ env:
 jobs:
   build:
     name: Build release binaries
-    # Build on the oldest supported base for the widest glibc compatibility
-    # (dynamic binaries; daemon links libpipewire-0.3.so).
-    runs-on: ubuntu-22.04
+    # 24.04 is the floor: the libspa 0.10 crate needs PipeWire 1.x dev headers,
+    # which 22.04 (pipewire 0.3.48) lacks. Sets a glibc 2.39 runtime floor.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 

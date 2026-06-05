@@ -54,8 +54,9 @@ install into the prefix. Force a source build with `FROM_SOURCE=1`.
 
 Each tagged release attaches `resonance-<ver>-x86_64-linux.tar.gz`. The binaries are
 dynamically linked: they need PipeWire installed at runtime (`libpipewire-0.3.so.0`,
-shipped by every PipeWire distro) and glibc ≥ 2.35 (built on Ubuntu 22.04 for broad
-compatibility). The pure clients (`resonance`, `resonance-tui`, `resonance-gui`) run
+shipped by every PipeWire distro) and glibc ≥ 2.39 (built on Ubuntu 24.04 — the
+build floor is set by PipeWire 1.x dev headers, not glibc). The pure clients
+(`resonance`, `resonance-tui`, `resonance-gui`) run
 anywhere that floor is met; `resonanced` additionally needs a running PipeWire.
 
 ### From source (any distro)
