@@ -71,7 +71,8 @@ pub struct GuiApp {
 }
 
 impl GuiApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        install_symbol_fonts(&cc.egui_ctx);
         let mut app = Self {
             ipc: None,
             state: None,
@@ -528,7 +529,7 @@ impl GuiApp {
     fn bands_section(&mut self, ui: &mut egui::Ui, state: &DaemonState) {
         ui.horizontal(|ui| {
             ui.heading("EQ bands");
-            if ui.button("➕ Add band").clicked() {
+            if ui.button("✚ Add band").clicked() {
                 self.queue(Command::AddBand {
                     band_type: BandType::Peaking,
                     freq: 1000.0,
@@ -618,13 +619,13 @@ impl GuiApp {
                     }
 
                     if ui
-                        .selectable_label(selected, "◉")
+                        .selectable_label(selected, "●")
                         .on_hover_text("select")
                         .clicked()
                     {
                         self.selected_band = i;
                     }
-                    if ui.button("🗑").on_hover_text("remove").clicked() {
+                    if ui.button("✕").on_hover_text("remove").clicked() {
                         self.queue(Command::RemoveBand { index: i });
                     }
                     ui.end_row();
@@ -705,7 +706,7 @@ impl GuiApp {
                         if ui.button("Load").clicked() {
                             self.queue(Command::LoadProfile { name: name.clone() });
                         }
-                        if ui.button("🗑").clicked() {
+                        if ui.button("✕").clicked() {
                             self.queue(Command::DeleteProfile { name: name.clone() });
                             self.needs_meta = true;
                         }
@@ -763,14 +764,14 @@ impl GuiApp {
                     egui::ScrollArea::vertical()
                         .id_salt("files")
                         .show(&mut cols[0], |ui| {
-                            if ui.button("⬆ parent").clicked() {
+                            if ui.button("↑ parent").clicked() {
                                 go_parent = true;
                             }
                             for (i, it) in browser.entries.iter().enumerate() {
                                 let label = if it.is_dir {
-                                    format!("📁 {}", it.name)
+                                    format!("{}/", it.name)
                                 } else {
-                                    format!("📄 {}", it.name)
+                                    it.name.clone()
                                 };
                                 let resp = ui.selectable_label(i == browser.cursor, label);
                                 if resp.clicked() {
@@ -823,6 +824,32 @@ impl GuiApp {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Bundled icon font: a ~2 KB subset of DejaVu Sans containing only the eight
+/// glyphs the UI draws (●▸↑✕✚→·…), which egui's built-in fonts lack. Embedded
+/// so icons render identically everywhere with negligible binary cost.
+/// DejaVu license; see `assets/DejaVuSans-LICENSE.txt`.
+const SYMBOL_FONT: &[u8] = include_bytes!("../assets/icons.ttf");
+
+/// Register the bundled symbol font as a fallback so the geometric glyphs used
+/// in the UI (●, ▸, ↑, ✕, ✚, →, …) render instead of tofu boxes — egui's
+/// built-in fonts cover only a small symbol subset. Appended last so normal
+/// text keeps the default typeface.
+fn install_symbol_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "noto-symbols".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(SYMBOL_FONT)),
+    );
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push("noto-symbols".to_owned());
+    }
+    ctx.set_fonts(fonts);
+}
 
 fn effect_values(state: &DaemonState, id: FxEffectId) -> (f64, bool) {
     let e = &state.effects;
