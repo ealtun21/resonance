@@ -16,6 +16,9 @@ set -euo pipefail
 REPO="ealtun21/resonance"
 BINS=(resonanced resonance resonance-tui resonance-gui)
 
+_CLEANUP_DIR=""
+trap '[[ -n "${_CLEANUP_DIR:-}" ]] && rm -rf "$_CLEANUP_DIR"' EXIT
+
 err()  { echo "!! $*" >&2; exit 1; }
 info() { echo ">> $*"; }
 
@@ -71,7 +74,7 @@ install_prebuilt() {
     local name="resonance-${v}-x86_64-linux"
     local base="https://github.com/$REPO/releases/download/${ver}"
 
-    local tmp; tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+    local tmp; tmp="$(mktemp -d)"; _CLEANUP_DIR="$tmp"
     info "Downloading $name.tar.gz ($ver)"
     curl -fSL --proto '=https' --tlsv1.2 -o "$tmp/$name.tar.gz" "$base/$name.tar.gz" \
         || err "download failed: $base/$name.tar.gz"
