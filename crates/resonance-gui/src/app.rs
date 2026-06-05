@@ -9,8 +9,23 @@ use crate::browser::Browser;
 use crate::curve;
 use crate::ipc::IpcClient;
 use eframe::egui;
-use resonance_ipc::{BandType, Command, DaemonState, FxEffectId, Response};
+use resonance_ipc::{
+    BandState, BandType, Command, DaemonState, EffectsState, FxEffectId, Response,
+};
 use std::time::{Duration, Instant};
+
+/// Consecutive edits within this window coalesce into one undo entry (a drag
+/// gesture becomes a single undo step).
+const UNDO_COALESCE: Duration = Duration::from_millis(400);
+
+/// A restorable snapshot of the editable chain state (undo/redo).
+#[derive(Clone)]
+struct Snapshot {
+    preamp_db: f64,
+    enabled: bool,
+    bands: Vec<BandState>,
+    effects: EffectsState,
+}
 
 /// Repaint cadence: ~144 fps. Rendering reads the *smoothed* spectrum, so it
 /// stays buttery even though the underlying data arrives far slower.
@@ -70,6 +85,12 @@ pub struct GuiApp {
     /// Smoothed spectrum bar heights + last animation tick.
     spectrum_display: Vec<f32>,
     last_anim: Instant,
+    undo_stack: Vec<Snapshot>,
+    redo_stack: Vec<Snapshot>,
+    /// Start of the current edit burst (for undo coalescing).
+    last_edit: Option<Instant>,
+    /// While `Some` and in the future, the clip indicator flashes.
+    clip_until: Option<Instant>,
 }
 
 impl GuiApp {
@@ -93,9 +114,77 @@ impl GuiApp {
             profile_name: String::new(),
             spectrum_display: Vec::new(),
             last_anim: Instant::now(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            last_edit: None,
+            clip_until: None,
         };
         app.try_connect();
         app
+    }
+
+    // ── Undo / redo ─────────────────────────────────────────────────────────
+
+    fn snapshot(&self) -> Option<Snapshot> {
+        let s = self.state.as_ref()?;
+        Some(Snapshot {
+            preamp_db: s.preamp_db,
+            enabled: s.enabled,
+            bands: s.bands.clone(),
+            effects: s.effects.clone(),
+        })
+    }
+
+    /// Queue an edit command, recording an undo snapshot at the start of each
+    /// edit burst (consecutive edits within `UNDO_COALESCE` coalesce).
+    fn queue_edit(&mut self, cmd: Command) {
+        let now = Instant::now();
+        let coalesce = self
+            .last_edit
+            .map(|t| now.duration_since(t) < UNDO_COALESCE)
+            .unwrap_or(false);
+        if !coalesce {
+            if let Some(s) = self.snapshot() {
+                self.undo_stack.push(s);
+                if self.undo_stack.len() > 100 {
+                    self.undo_stack.remove(0);
+                }
+                self.redo_stack.clear();
+            }
+        }
+        self.last_edit = Some(now);
+        self.queue(cmd);
+    }
+
+    fn undo(&mut self) {
+        if let Some(prev) = self.undo_stack.pop() {
+            if let Some(cur) = self.snapshot() {
+                self.redo_stack.push(cur);
+            }
+            self.apply_snapshot(&prev);
+            self.last_edit = None;
+            self.status = "undo".into();
+        }
+    }
+
+    fn redo(&mut self) {
+        if let Some(next) = self.redo_stack.pop() {
+            if let Some(cur) = self.snapshot() {
+                self.undo_stack.push(cur);
+            }
+            self.apply_snapshot(&next);
+            self.last_edit = None;
+            self.status = "redo".into();
+        }
+    }
+
+    fn apply_snapshot(&mut self, s: &Snapshot) {
+        self.queue(Command::ApplyState {
+            preamp_db: s.preamp_db,
+            enabled: s.enabled,
+            bands: s.bands.clone(),
+            effects: s.effects.clone(),
+        });
     }
 
     // ── Connection / polling ────────────────────────────────────────────────
@@ -123,6 +212,9 @@ impl GuiApp {
         };
         match ipc.get_state() {
             Ok(s) => {
+                if s.meters.clip {
+                    self.clip_until = Some(Instant::now() + Duration::from_millis(250));
+                }
                 self.state = Some(s);
                 if self.status.starts_with("error") {
                     self.status.clear();
@@ -214,6 +306,21 @@ impl eframe::App for GuiApp {
             }
         }
 
+        // Keyboard: Ctrl-Z undo, Ctrl-Y / Ctrl-Shift-Z redo.
+        let (undo, redo) = ui.ctx().input(|i| {
+            let ctrl = i.modifiers.command || i.modifiers.ctrl;
+            let undo = ctrl && i.key_pressed(egui::Key::Z) && !i.modifiers.shift;
+            let redo = ctrl
+                && (i.key_pressed(egui::Key::Y)
+                    || (i.key_pressed(egui::Key::Z) && i.modifiers.shift));
+            (undo, redo)
+        });
+        if undo {
+            self.undo();
+        } else if redo {
+            self.redo();
+        }
+
         egui::Panel::top("toolbar").show_inside(ui, |ui| self.toolbar(ui));
         egui::Panel::right("side")
             .resizable(true)
@@ -246,7 +353,7 @@ impl GuiApp {
                 .add_enabled(state.is_some(), egui::Checkbox::new(&mut power, "Power"))
                 .changed()
             {
-                self.queue(Command::SetPower { enabled: power });
+                self.queue_edit(Command::SetPower { enabled: power });
             }
 
             ui.separator();
@@ -261,7 +368,7 @@ impl GuiApp {
                     )
                     .changed()
                 {
-                    self.queue(Command::SetPreamp { db });
+                    self.queue_edit(Command::SetPreamp { db });
                 }
             } else {
                 ui.add_enabled(false, egui::Slider::new(&mut 0.0, -20.0..=20.0));
@@ -282,10 +389,63 @@ impl GuiApp {
                 ui.label(format!("▸ {p}"));
             }
 
+            ui.separator();
+            if ui
+                .add_enabled(!self.undo_stack.is_empty(), egui::Button::new("Undo"))
+                .clicked()
+            {
+                self.undo();
+            }
+            if ui
+                .add_enabled(!self.redo_stack.is_empty(), egui::Button::new("Redo"))
+                .clicked()
+            {
+                self.redo();
+            }
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(&self.status);
+                if let Some(s) = &state {
+                    ui.separator();
+                    self.meters_widget(ui, s);
+                }
             });
         });
+    }
+
+    /// In/out levels, DSP load, and a clip flash, drawn right-aligned in the bar.
+    fn meters_widget(&self, ui: &mut egui::Ui, s: &DaemonState) {
+        let m = &s.meters;
+        let db = |lin: f32| {
+            if lin <= 1e-6 {
+                "-inf".to_string()
+            } else {
+                format!("{:+.0}", 20.0 * lin.log10())
+            }
+        };
+        let clip_active = self.clip_until.map(|t| Instant::now() < t).unwrap_or(false);
+
+        // Items are laid out right-to-left here, so add in reverse reading order.
+        if clip_active {
+            ui.colored_label(egui::Color32::from_rgb(230, 60, 60), "CLIP");
+        }
+        let dsp_color = if m.dsp_load > 0.8 {
+            egui::Color32::from_rgb(230, 60, 60)
+        } else if m.dsp_load > 0.5 {
+            egui::Color32::from_rgb(220, 200, 80)
+        } else {
+            egui::Color32::GRAY
+        };
+        ui.colored_label(dsp_color, format!("DSP {:.0}%", m.dsp_load * 100.0));
+        let lvl_color = if clip_active {
+            egui::Color32::from_rgb(230, 60, 60)
+        } else {
+            egui::Color32::from_rgb(90, 200, 120)
+        };
+        ui.colored_label(
+            lvl_color,
+            format!("I {} O {} dB", db(m.in_peak), db(m.out_peak)),
+        );
     }
 
     fn central(&mut self, ui: &mut egui::Ui) {
@@ -416,7 +576,7 @@ impl GuiApp {
                     if let Some(b) = state.bands.get(i) {
                         // Exponential so Q scales smoothly across its range.
                         let q = (b.q * (-dy * 0.015).exp()).clamp(0.1, 20.0);
-                        self.queue(Command::SetBand {
+                        self.queue_edit(Command::SetBand {
                             index: i,
                             freq: b.freq,
                             gain_db: b.gain_db,
@@ -429,7 +589,7 @@ impl GuiApp {
                     if let Some(b) = state.bands.get(i) {
                         let freq = 10f64.powf(logf_of(p.x)).clamp(20.0, 20000.0);
                         let gain = db_of(p.y).clamp(-20.0, 20.0);
-                        self.queue(Command::SetBand {
+                        self.queue_edit(Command::SetBand {
                             index: i,
                             freq,
                             gain_db: gain,
@@ -448,7 +608,7 @@ impl GuiApp {
             if let Some(p) = response.interact_pointer_pos() {
                 let freq = 10f64.powf(logf_of(p.x)).clamp(20.0, 20000.0);
                 let gain = db_of(p.y).clamp(-20.0, 20.0);
-                self.queue(Command::AddBand {
+                self.queue_edit(Command::AddBand {
                     band_type: BandType::Peaking,
                     freq,
                     gain_db: gain,
@@ -546,7 +706,7 @@ impl GuiApp {
                     let min = if bipolar { -1.0 } else { 0.0 };
 
                     if ui.checkbox(&mut on, "").changed() {
-                        self.queue(Command::SetEffectEnabled {
+                        self.queue_edit(Command::SetEffectEnabled {
                             effect: id,
                             enabled: on,
                         });
@@ -566,7 +726,7 @@ impl GuiApp {
                         )
                         .changed()
                     {
-                        self.queue(Command::SetEffectIntensity {
+                        self.queue_edit(Command::SetEffectIntensity {
                             effect: id,
                             value: intensity,
                         });
@@ -582,7 +742,7 @@ impl GuiApp {
         ui.horizontal(|ui| {
             ui.heading("EQ bands");
             if ui.button("✚ Add band").clicked() {
-                self.queue(Command::AddBand {
+                self.queue_edit(Command::AddBand {
                     band_type: BandType::Peaking,
                     freq: 1000.0,
                     gain_db: 0.0,
@@ -610,7 +770,7 @@ impl GuiApp {
 
                     let mut on = b.enabled;
                     if ui.checkbox(&mut on, "").changed() {
-                        self.queue(Command::SetBandEnabled {
+                        self.queue_edit(Command::SetBandEnabled {
                             index: i,
                             enabled: on,
                         });
@@ -627,7 +787,7 @@ impl GuiApp {
                             }
                         });
                     if bt != b.band_type {
-                        self.queue(Command::SetBandType {
+                        self.queue_edit(Command::SetBandType {
                             index: i,
                             band_type: bt,
                         });
@@ -662,7 +822,7 @@ impl GuiApp {
                         )
                         .changed();
                     if f_changed || g_changed || q_changed {
-                        self.queue(Command::SetBand {
+                        self.queue_edit(Command::SetBand {
                             index: i,
                             freq,
                             gain_db: gain,
@@ -678,7 +838,7 @@ impl GuiApp {
                         self.selected_band = i;
                     }
                     if ui.button("✕").on_hover_text("remove").clicked() {
-                        self.queue(Command::RemoveBand { index: i });
+                        self.queue_edit(Command::RemoveBand { index: i });
                     }
                     ui.end_row();
                 }
