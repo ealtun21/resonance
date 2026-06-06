@@ -358,16 +358,17 @@ impl App {
 
     // ── Navigation ────────────────────────────────────────────────────────
 
-    /// Tab cycles: Effects → Bands(Gain) → Bands(Freq) → Bands(Q) → Effects
+    /// Tab cycles left-to-right across columns, then wraps:
+    /// Effects → Bands(Freq) → Bands(Gain) → Bands(Q) → Effects
     pub fn next_panel(&mut self) {
         match self.focus {
             Panel::Effects => {
                 self.focus = Panel::Bands;
-                self.band_field = BandField::Gain;
+                self.band_field = BandField::Freq;
             }
             Panel::Bands => match self.band_field {
-                BandField::Gain => self.band_field = BandField::Freq,
-                BandField::Freq => self.band_field = BandField::Q,
+                BandField::Freq => self.band_field = BandField::Gain,
+                BandField::Gain => self.band_field = BandField::Q,
                 BandField::Q => self.focus = Panel::Effects,
             },
         }
@@ -501,7 +502,7 @@ impl App {
             Some(2) => BandHit::Field(BandField::Freq),
             Some(3) => BandHit::Field(BandField::Gain),
             Some(4) => BandHit::Field(BandField::Q),
-            Some(5) => BandHit::Toggle,
+            Some(6) => BandHit::Toggle, // 5 is the spacer column
             _ => BandHit::Row,
         };
         Some((idx, hit))

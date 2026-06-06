@@ -6,7 +6,7 @@ use crate::{
 };
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Style, Stylize},
     symbols,
     text::{Line, Span},
@@ -158,8 +158,8 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
     let output_str = app
         .state
         .as_ref()
-        .and_then(|s| s.active_output.as_deref())
-        .map(|o| format!("  🔊 {o}"))
+        .and_then(|s| s.active_output.as_deref().map(|o| s.sink_label(o)))
+        .map(|o| format!("🔊 {o}"))
         .unwrap_or_default();
 
     let status_color = if app.status.is_empty() {
@@ -175,6 +175,7 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
 
     // Live meters.
     let meters = app.state.as_ref().map(|s| s.meters).unwrap_or_default();
+    // Fixed-width dB readout so the value changes without shifting later spans.
     let db = |lin: f32| {
         if lin <= 1e-6 {
             "-inf".to_string()
@@ -182,6 +183,7 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
             format!("{:+.0}", 20.0 * lin.log10())
         }
     };
+    let db = |lin: f32| format!("{:>4}", db(lin));
     let clip_active = app
         .clip_until
         .map(|t| std::time::Instant::now() < t)
@@ -191,8 +193,9 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         Color::Green
     };
-    let meter_str = format!("I {} O {} dB", db(meters.in_peak), db(meters.out_peak));
-    let dsp_str = format!("DSP {:.0}%", meters.dsp_load * 100.0);
+    let in_str = format!("I {} dB", db(meters.in_peak));
+    let out_str = format!("O {} dB", db(meters.out_peak));
+    let dsp_str = format!("DSP {:>3.0}%", meters.dsp_load * 100.0);
     let dsp_color = if meters.dsp_load > 0.8 {
         Color::Red
     } else if meters.dsp_load > 0.5 {
@@ -213,17 +216,23 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         sep(),
         Span::styled(preamp, Style::default().fg(preamp_color)),
         sep(),
-        Span::styled(meter_str, Style::default().fg(level_color)),
-        Span::raw(" "),
+        Span::styled(in_str, Style::default().fg(level_color)),
+        sep(),
+        Span::styled(out_str, Style::default().fg(level_color)),
+        sep(),
         Span::styled(dsp_str, Style::default().fg(dsp_color)),
+        sep(),
     ];
+    // Always reserve the clip slot so it flips OK→CLIP in place without shifting.
     if clip_active {
-        spans.push(Span::styled(
-            " CLIP",
-            Style::default().fg(Color::Red).bold(),
-        ));
+        spans.push(Span::styled("CLIP", Style::default().fg(Color::Red).bold()));
+    } else {
+        spans.push(Span::styled(" OK ", Style::default().fg(Color::DarkGray)));
     }
-    spans.push(Span::styled(output_str, Style::default().fg(Color::Cyan)));
+    if !output_str.is_empty() {
+        spans.push(sep());
+        spans.push(Span::styled(output_str, Style::default().fg(Color::Cyan)));
+    }
     spans.push(Span::styled(status_str, Style::default().fg(status_color)));
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -589,10 +598,25 @@ fn render_bands(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
 
+    let full_names = crate::layout::band_type_full(inner.width);
+
+    // Per-column alignment: numbers right, enable centred, type/bar left.
+    let align = |c: usize| match c {
+        0 | 2 | 3 | 4 => Alignment::Right,
+        5 => Alignment::Center,
+        _ => Alignment::Left,
+    };
+    // band_columns has a spacer rect at index 5; map logical column → rect index.
+    let ri = |c: usize| if c >= 5 { c + 1 } else { c };
+
     // ── Header row ──
     let header_rect = Rect::new(inner.x, inner.y, inner.width, 1);
     let hcols = crate::layout::band_columns(header_rect);
-    let headers = ["#", "Type", "Freq", "Gain", "Q", "En"];
+    let headers: [&str; 7] = if full_names {
+        ["#", "Type", "Freq", "Gain", "Q", "Enabled", "Gain Graph"]
+    } else {
+        ["#", "Type", "Hz", "dB", "Q", "On", ""]
+    };
     let hdr_style = Style::default().bold().fg(Color::DarkGray);
     for (c, h) in headers.iter().enumerate() {
         // Highlight the active field's column header when focused.
@@ -606,13 +630,18 @@ fn render_bands(app: &App, frame: &mut Frame, area: Rect) {
         } else {
             hdr_style
         };
-        frame.render_widget(Paragraph::new(*h).style(style), hcols[c]);
+        // Type/Freq/Gain headers track their data alignment; the rest centre.
+        let halign = match c {
+            1 => Alignment::Left,            // Type
+            0 | 2 | 3 => Alignment::Right,   // #, Freq, Gain
+            _ => Alignment::Center,          // Q, Enabled, Level
+        };
+        frame.render_widget(Paragraph::new(*h).style(style).alignment(halign), hcols[ri(c)]);
     }
 
     // ── Data rows (with scroll) ──
     let visible = (inner.height - 1) as usize;
     let offset = crate::layout::band_scroll_offset(app.band_cursor, bands.len(), visible);
-    let full_names = crate::layout::band_type_full(inner.width);
 
     for (vis, i) in (offset..bands.len()).take(visible).enumerate() {
         let b = &bands[i];
@@ -621,18 +650,35 @@ fn render_bands(app: &App, frame: &mut Frame, area: Rect) {
         let cols = crate::layout::band_columns(row_rect);
         let selected = focused && app.band_cursor == i;
 
+        // Subtle stripe + arrow on the selected row so it reads as a row, not a cell.
+        if selected {
+            frame.render_widget(
+                Block::default().style(Style::default().bg(Color::Rgb(28, 28, 36))),
+                row_rect,
+            );
+        }
+
         let type_name = if full_names {
             b.band_type.full().to_string()
         } else {
             b.band_type.abbrev().to_string()
         };
+        let enable = if full_names {
+            if b.enabled { "● On" } else { "○ Off" }
+        } else if b.enabled {
+            "●"
+        } else {
+            "○"
+        };
+        let bar = gain_bar(b.gain_db, cols[ri(6)].width as usize);
         let cells = [
             format!("{}", i + 1),
             type_name,
             fmt_freq(b.freq),
             format!("{:+.1}", b.gain_db),
             format!("{:.2}", b.q),
-            (if b.enabled { "●" } else { "○" }).to_string(),
+            enable.to_string(),
+            bar,
         ];
 
         for (c, text) in cells.iter().enumerate() {
@@ -650,18 +696,45 @@ fn render_bands(app: &App, frame: &mut Frame, area: Rect) {
                 Style::default().fg(Color::DarkGray)
             } else {
                 let fg = match c {
-                    1 => Color::Cyan,           // type
-                    2 => freq_color(b.freq),    // freq across the spectrum
-                    3 => gain_color(b.gain_db), // green up / red down
-                    5 => Color::Green,          // enabled dot
-                    _ => Color::Gray,           // # and Q
+                    1 => Color::Cyan,                 // type
+                    2 => freq_color(b.freq),          // freq across the spectrum
+                    3 | 6 => gain_color(b.gain_db),   // gain text + bar
+                    5 => Color::Green,                // enabled dot
+                    _ => Color::Gray,                 // # and Q
                 };
                 let s = Style::default().fg(fg);
                 if selected { s.bold() } else { s }
             };
-            frame.render_widget(Paragraph::new(text.as_str()).style(style), cols[c]);
+            frame.render_widget(
+                Paragraph::new(text.as_str()).style(style).alignment(align(c)),
+                cols[ri(c)],
+            );
         }
     }
+}
+
+/// Horizontal gain bar: fills outward from a centre tick — right for boosts,
+/// left for cuts — scaled to ±`DB_RANGE`. Returns a `width`-char string.
+fn gain_bar(db: f64, width: usize) -> String {
+    if width < 3 {
+        return String::new();
+    }
+    let centre = width / 2;
+    let half = centre.min(width - centre - 1);
+    let t = (db / DB_RANGE).clamp(-1.0, 1.0);
+    let n = (t.abs() * half as f64).round() as usize;
+    let mut cells = vec![' '; width];
+    cells[centre] = if n == 0 { '┊' } else { '│' };
+    if db >= 0.0 {
+        for k in 1..=n {
+            cells[centre + k] = '█';
+        }
+    } else {
+        for k in 1..=n {
+            cells[centre - k] = '█';
+        }
+    }
+    cells.into_iter().collect()
 }
 
 // ── Band cell colour mapping ───────────────────────────────────────────────
@@ -822,10 +895,15 @@ fn render_output_selector(
         .iter()
         .map(|s| {
             let is_active = active.map(|a| a == s).unwrap_or(false);
+            let name = app
+                .state
+                .as_ref()
+                .map(|st| st.sink_label(s))
+                .unwrap_or_else(|| s.clone());
             let label = if is_active {
-                format!("● {s}")
+                format!("● {name}")
             } else {
-                format!("  {s}")
+                format!("  {name}")
             };
             let style = if is_active {
                 Style::default().fg(Color::Green)
@@ -1019,10 +1097,13 @@ fn render_tab_mappings(s: &SettingsState, app: &App, frame: &mut Frame, area: Re
         .as_ref()
         .and_then(|st| st.mapped_profile.as_deref());
 
+    let active_label = active_output
+        .map(|o| app.state.as_ref().map(|st| st.sink_label(o)).unwrap_or_else(|| o.to_string()))
+        .unwrap_or_else(|| "none".to_string());
     frame.render_widget(
         Paragraph::new(format!(
             "Active: {}   Mapped profile: {}",
-            active_output.unwrap_or("none"),
+            active_label,
             mapped_profile.unwrap_or("none")
         ))
         .style(Style::default().fg(Color::Cyan)),
@@ -1058,6 +1139,11 @@ fn render_tab_mappings(s: &SettingsState, app: &App, frame: &mut Frame, area: Re
             } else {
                 Style::default().fg(Color::White)
             };
+            let out = app
+                .state
+                .as_ref()
+                .map(|st| st.sink_label(out))
+                .unwrap_or_else(|| out.clone());
             frame.render_widget(
                 Paragraph::new(format!(" {marker} {out:<32} {profile}")).style(style),
                 row,
@@ -1106,6 +1192,11 @@ fn render_tab_devices(s: &SettingsState, app: &App, frame: &mut Frame, area: Rec
             } else {
                 Style::default().fg(Color::White)
             };
+            let sink = app
+                .state
+                .as_ref()
+                .map(|st| st.sink_label(sink))
+                .unwrap_or_else(|| sink.clone());
             frame.render_widget(
                 Paragraph::new(format!(" {active_mark} {sink}{map_mark}")).style(style),
                 row,

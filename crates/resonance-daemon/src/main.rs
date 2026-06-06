@@ -30,7 +30,8 @@ async fn main() -> Result<()> {
     let (cmd_tx, cmd_rx) = RingBuffer::<state::AudioCommand>::new(256);
     let (spectrum_tx, spectrum_rx) = RingBuffer::<f32>::new(pw_node::SPECTRUM_BUF);
     let (route_tx, route_rx) = std::sync::mpsc::channel::<String>();
-    let (sinks_tx, mut sinks_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
+    let (sinks_tx, mut sinks_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Vec<(String, String)>>();
 
     let initial_chain = ProcessorChain::builder()
         .channels(2)
@@ -75,7 +76,9 @@ async fn main() -> Result<()> {
     let sinks_state = shared.clone();
     tokio::spawn(async move {
         while let Some(sinks) = sinks_rx.recv().await {
-            sinks_state.0.lock().unwrap().available_sinks = sinks;
+            let mut inner = sinks_state.0.lock().unwrap();
+            inner.available_sinks = sinks.iter().map(|(name, _)| name.clone()).collect();
+            inner.sink_descriptions = sinks;
         }
     });
 

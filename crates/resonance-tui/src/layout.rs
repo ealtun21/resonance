@@ -63,16 +63,19 @@ pub fn band_type_full(width: u16) -> bool {
 }
 
 /// Column rectangles for one band row (or the header row): #, Type, Freq,
-/// Gain, Q, En. The Type column widens to fit full names on wide terminals.
+/// Gain, Q, Enable, and a gain bar that absorbs the remaining width.
+/// The Type column widens to fit full names on wide terminals.
 pub fn band_columns(row: Rect) -> Rc<[Rect]> {
-    let type_w = if band_type_full(row.width) { 11 } else { 4 };
+    let type_w = if band_type_full(row.width) { 11 } else { 5 };
     let cols = [
-        Constraint::Length(3),
-        Constraint::Length(type_w),
-        Constraint::Length(9),
-        Constraint::Length(8),
-        Constraint::Length(6),
-        Constraint::Length(4),
+        Constraint::Length(3),      // #
+        Constraint::Length(type_w), // Type
+        Constraint::Length(8),      // Freq
+        Constraint::Length(7),      // Gain
+        Constraint::Length(6),      // Q
+        Constraint::Length(2),      // spacer (extra gap before Enable)
+        Constraint::Length(7),      // Enable
+        Constraint::Min(0),         // gain bar (fills the rest)
     ];
     Layout::horizontal(cols).spacing(1).split(row)
 }

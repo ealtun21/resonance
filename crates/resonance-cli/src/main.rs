@@ -272,7 +272,7 @@ fn print_state(p: &Paint, s: &resonance_ipc::DaemonState) {
             Some(prof) => format!("  {} {}", p.dim("→ profile"), p.bold(prof)),
             None => String::new(),
         };
-        println!("{}{}{tail}", label("output"), p.cyan(out));
+        println!("{}{}{tail}", label("output"), p.cyan(&s.sink_label(out)));
     }
     println!(
         "{}{}",
@@ -374,7 +374,14 @@ fn print_devices(p: &Paint, s: &resonance_ipc::DaemonState) {
         } else {
             String::new()
         };
-        println!("  {marker} {}{tail}", p.cyan(sink));
+        let label = s.sink_label(sink);
+        // Friendly name first; keep the node.name dimmed so it's still usable in `set-output`.
+        let id = if label == *sink {
+            String::new()
+        } else {
+            format!("  {}", p.dim(sink))
+        };
+        println!("  {marker} {}{id}{tail}", p.cyan(&label));
     }
 }
 

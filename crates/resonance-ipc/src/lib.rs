@@ -240,10 +240,29 @@ pub struct DaemonState {
     pub mapped_profile: Option<String>,
     /// All available PipeWire Audio/Sink node names (excluding Resonance itself)
     pub available_sinks: Vec<String>,
+    /// Friendly `node.description` per sink, as `(node_name, description)` pairs.
+    /// Commands still key by `node_name`; this is purely for user-facing display.
+    pub sink_descriptions: Vec<(String, String)>,
     /// The preferred output node name set by SetOutputTarget (if any)
     pub preferred_output: Option<String>,
     /// Live level + DSP-load meters.
     pub meters: Meters,
+}
+
+impl DaemonState {
+    /// User-facing label for a sink `node.name`: its `node.description` if known,
+    /// else the last dot-segment of the node name, else `(default)` when empty.
+    pub fn sink_label(&self, node: &str) -> String {
+        if node.is_empty() {
+            return "(default)".to_string();
+        }
+        self.sink_descriptions
+            .iter()
+            .find(|(name, _)| name == node)
+            .map(|(_, desc)| desc.clone())
+            .filter(|d| !d.is_empty())
+            .unwrap_or_else(|| node.rsplit('.').next().unwrap_or(node).to_string())
+    }
 }
 
 /// Live level + performance meters sampled on the audio RT thread.
@@ -431,6 +450,7 @@ mod tests {
             active_output: Some("alsa_output.pci".into()),
             mapped_profile: None,
             available_sinks: vec!["alsa_output.pci".into()],
+            sink_descriptions: vec![("alsa_output.pci".into(), "Built-in Audio".into())],
             preferred_output: None,
             meters: Meters::default(),
         };

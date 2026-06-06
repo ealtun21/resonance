@@ -413,22 +413,25 @@ impl GuiApp {
         });
     }
 
-    /// In/out levels, DSP load, and a clip flash, drawn right-aligned in the bar.
+    /// Output device, in/out levels, DSP load, and a clip flash, drawn
+    /// right-aligned in the bar with separators matching the rest of the toolbar.
     fn meters_widget(&self, ui: &mut egui::Ui, s: &DaemonState) {
         let m = &s.meters;
+        // Fixed-width, monospace readouts so values change without nudging the layout.
         let db = |lin: f32| {
-            if lin <= 1e-6 {
+            let s = if lin <= 1e-6 {
                 "-inf".to_string()
             } else {
                 format!("{:+.0}", 20.0 * lin.log10())
-            }
+            };
+            format!("{s:>4}")
         };
         let clip_active = self.clip_until.map(|t| Instant::now() < t).unwrap_or(false);
-
-        // Items are laid out right-to-left here, so add in reverse reading order.
-        if clip_active {
-            ui.colored_label(egui::Color32::from_rgb(230, 60, 60), "CLIP");
-        }
+        let lvl_color = if clip_active {
+            egui::Color32::from_rgb(230, 60, 60)
+        } else {
+            egui::Color32::from_rgb(90, 200, 120)
+        };
         let dsp_color = if m.dsp_load > 0.8 {
             egui::Color32::from_rgb(230, 60, 60)
         } else if m.dsp_load > 0.5 {
@@ -436,16 +439,38 @@ impl GuiApp {
         } else {
             egui::Color32::GRAY
         };
-        ui.colored_label(dsp_color, format!("DSP {:.0}%", m.dsp_load * 100.0));
-        let lvl_color = if clip_active {
-            egui::Color32::from_rgb(230, 60, 60)
+
+        // Items are laid out right-to-left, so add in reverse reading order and put
+        // a separator between each, mirroring the left side of the toolbar.
+        // Reading order: 🔊 output │ I │ O │ DSP │ CLIP
+        // Always draw the clip slot so it flips OK→CLIP in place without shifting.
+        if clip_active {
+            ui.colored_label(
+                egui::Color32::from_rgb(230, 60, 60),
+                egui::RichText::new("CLIP").monospace(),
+            );
         } else {
-            egui::Color32::from_rgb(90, 200, 120)
-        };
+            ui.colored_label(egui::Color32::GRAY, egui::RichText::new(" OK ").monospace());
+        }
+        ui.separator();
+        ui.colored_label(
+            dsp_color,
+            egui::RichText::new(format!("DSP {:>3.0}%", m.dsp_load * 100.0)).monospace(),
+        );
+        ui.separator();
         ui.colored_label(
             lvl_color,
-            format!("I {} O {} dB", db(m.in_peak), db(m.out_peak)),
+            egui::RichText::new(format!("O {} dB", db(m.out_peak))).monospace(),
         );
+        ui.separator();
+        ui.colored_label(
+            lvl_color,
+            egui::RichText::new(format!("I {} dB", db(m.in_peak))).monospace(),
+        );
+        if let Some(out) = s.active_output.as_deref() {
+            ui.separator();
+            ui.label(format!("🔊 {}", s.sink_label(out)));
+        }
     }
 
     fn central(&mut self, ui: &mut egui::Ui) {
@@ -756,17 +781,26 @@ impl GuiApp {
             .striped(true)
             .spacing([10.0, 4.0])
             .show(ui, |ui| {
+                ui.label("#");
                 ui.label("On");
                 ui.label("Type");
                 ui.label("Freq (Hz)");
                 ui.label("Gain (dB)");
                 ui.label("Q");
                 ui.label("");
-                ui.label("");
                 ui.end_row();
 
                 for (i, b) in state.bands.iter().enumerate() {
                     let selected = i == self.selected_band;
+
+                    // Band number doubles as the row selector (replaces the old ● dot).
+                    if ui
+                        .selectable_label(selected, format!("{:>2}", i + 1))
+                        .on_hover_text("select this band")
+                        .clicked()
+                    {
+                        self.selected_band = i;
+                    }
 
                     let mut on = b.enabled;
                     if ui.checkbox(&mut on, "").changed() {
@@ -779,8 +813,8 @@ impl GuiApp {
                     // Type combo.
                     let mut bt = b.band_type;
                     egui::ComboBox::from_id_salt(("bt", i))
-                        .selected_text(bt.abbrev())
-                        .width(56.0)
+                        .selected_text(bt.full())
+                        .width(92.0)
                         .show_ui(ui, |ui| {
                             for cand in BAND_TYPES {
                                 if ui.selectable_value(&mut bt, cand, cand.full()).clicked() {}
@@ -830,13 +864,6 @@ impl GuiApp {
                         });
                     }
 
-                    if ui
-                        .selectable_label(selected, "●")
-                        .on_hover_text("select")
-                        .clicked()
-                    {
-                        self.selected_band = i;
-                    }
                     if ui.button("✕").on_hover_text("remove").clicked() {
                         self.queue_edit(Command::RemoveBand { index: i });
                     }
@@ -863,11 +890,12 @@ impl GuiApp {
                 .unwrap_or_default();
             let mut sel = current.clone();
             egui::ComboBox::from_id_salt("sink")
-                .selected_text(short_name(&sel))
+                .selected_text(s.sink_label(&sel))
                 .width(ui.available_width() - 10.0)
                 .show_ui(ui, |ui| {
                     for sink in &s.available_sinks {
-                        ui.selectable_value(&mut sel, sink.clone(), short_name(sink));
+                        let label = s.sink_label(sink);
+                        ui.selectable_value(&mut sel, sink.clone(), label);
                     }
                 });
             if sel != current && !sel.is_empty() {
@@ -953,7 +981,11 @@ impl GuiApp {
             ui.separator();
             ui.heading("Output mappings");
             for (out, prof) in &self.mappings {
-                ui.label(format!("{} → {}", short_name(out), prof));
+                let label = state
+                    .as_ref()
+                    .map(|s| s.sink_label(out))
+                    .unwrap_or_else(|| short_name(out));
+                ui.label(format!("{label} → {prof}"));
             }
         }
 

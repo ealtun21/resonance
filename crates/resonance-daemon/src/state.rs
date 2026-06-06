@@ -59,6 +59,8 @@ pub struct Inner {
     pub spectrum: [f32; SPECTRUM_BINS],
     /// Available PipeWire Audio/Sink names (updated by pw_node).
     pub available_sinks: Vec<String>,
+    /// Friendly `node.description` per sink as `(node_name, description)` (updated by pw_node).
+    pub sink_descriptions: Vec<(String, String)>,
     /// Preferred output node name set by SetOutputTarget.
     pub preferred_output: Option<String>,
     /// Send a preferred-output name to the pw_node main-loop thread.
@@ -90,6 +92,7 @@ impl SharedState {
             audio_tx,
             spectrum: [0.0; SPECTRUM_BINS],
             available_sinks: Vec::new(),
+            sink_descriptions: Vec::new(),
             preferred_output: None,
             route_tx,
             ab_slots: [None, None],
@@ -143,6 +146,7 @@ impl SharedState {
             active_output: inner.active_output.clone(),
             mapped_profile: inner.mapped_profile.clone(),
             available_sinks: inner.available_sinks.clone(),
+            sink_descriptions: inner.sink_descriptions.clone(),
             preferred_output: inner.preferred_output.clone(),
             meters: inner.meters.snapshot(),
         }

@@ -41,6 +41,7 @@ struct PortMeta {
 struct NodeMeta {
     media_class: String,
     name: String,
+    description: String,
 }
 
 struct GraphState {
@@ -67,7 +68,7 @@ struct GraphState {
     /// Receives preferred-output updates from the IPC thread.
     route_rx: std::sync::mpsc::Receiver<String>,
     /// Sends the current set of available sink names to the daemon state.
-    sinks_tx: tokio::sync::mpsc::UnboundedSender<Vec<String>>,
+    sinks_tx: tokio::sync::mpsc::UnboundedSender<Vec<(String, String)>>,
 }
 
 // SAFETY: only touched from the pw main-loop thread.
@@ -101,7 +102,7 @@ pub fn spawn(
     initial_chain: ProcessorChain,
     output_tx: tokio::sync::mpsc::UnboundedSender<String>,
     route_rx: std::sync::mpsc::Receiver<String>,
-    sinks_tx: tokio::sync::mpsc::UnboundedSender<Vec<String>>,
+    sinks_tx: tokio::sync::mpsc::UnboundedSender<Vec<(String, String)>>,
     meters: Arc<AtomicMeters>,
 ) -> Result<JoinHandle<()>> {
     // FilterData and GraphState persist across reconnects — the audio chain (EQ
@@ -381,11 +382,13 @@ fn on_global(
             };
             let mc = props.get("media.class").unwrap_or("").to_owned();
             let name = props.get("node.name").unwrap_or("").to_owned();
+            let description = props.get("node.description").unwrap_or("").to_owned();
             g.nodes.insert(
                 obj.id,
                 NodeMeta {
                     media_class: mc.clone(),
                     name: name.clone(),
+                    description,
                 },
             );
             if mc == "Audio/Sink" && name == "resonance" {
@@ -495,12 +498,12 @@ fn reroute(g: &mut GraphState) {
         }
     }
 
-    // Report available sinks so the TUI can show a selection list.
-    let mut available: Vec<String> = g
+    // Report available sinks (name + friendly description) for the selection UI.
+    let mut available: Vec<(String, String)> = g
         .nodes
         .values()
         .filter(|n| n.media_class == "Audio/Sink" && n.name != "resonance")
-        .map(|n| n.name.clone())
+        .map(|n| (n.name.clone(), n.description.clone()))
         .collect();
     available.sort();
     let _ = g.sinks_tx.send(available);
