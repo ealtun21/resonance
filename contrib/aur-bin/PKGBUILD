@@ -7,7 +7,7 @@
 # After cutting a new release, refresh the checksums with:
 #   updpkgsums
 pkgname=resonance-eq-bin
-pkgver=0.3.0
+pkgver=0.3.1
 pkgrel=1
 pkgdesc="Terminal EQ daemon for Linux/PipeWire with FxSound .fac and EqualizerAPO preset support (prebuilt binaries)"
 arch=('x86_64')
@@ -27,7 +27,7 @@ source=(
     "resonanced.service::$url/raw/v$pkgver/contrib/systemd/resonanced.service"
 )
 sha256sums=(
-    'f2063633feac45e3c8b2ec1f588f274a67ebcfdbbc9dffa89b578a5d8382e1fb'
+    '5e2b1811215444823bac9528ceccba42d0977ee73a8590dbe54c4a50684646ef'
     '539ea1381e509daa2098fde64d2aecda3de3a555855ea7a5a3cd90076f5e29c4'
     '429b3fe622774d0537269cef799fb94ed7bb4e752e1fce9f4f6f55bd8a88dd0d'
     '7c44d90ac50669cc89faa29058faf946a0a23c3239d732c3ee5d06609333eeec'
