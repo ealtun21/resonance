@@ -85,15 +85,15 @@ jobs:
           retention-days: 1
 
   build-macos:
-    name: Build macOS .app bundle (arm64 + x86_64)
+    name: Build macOS .app bundle (arm64)
     strategy:
       matrix:
-        # arm64 = Apple Silicon (macos-14 runner). x86_64 = Intel (macos-13).
+        # arm64 = Apple Silicon (macos-14 runner). Intel x86_64 dropped —
+        # GitHub's macos-13 Intel runners are slow to provision and the
+        # vast majority of macOS users are on Apple Silicon now.
         include:
           - runner: macos-14
             arch: arm64
-          - runner: macos-13
-            arch: x86_64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
