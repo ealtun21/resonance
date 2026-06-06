@@ -91,9 +91,13 @@ resolve_version() {
     if [[ -n "${RESONANCE_VERSION:-}" ]]; then echo "$RESONANCE_VERSION"; return; fi
     command -v curl >/dev/null 2>&1 || err "curl required to resolve latest release"
     info "Resolving latest release tag" >&2
-    local ver
-    ver="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-             | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
+    # Buffer the API response first: piping curl straight into `grep -m1` makes
+    # grep close the pipe early, so curl aborts its write with `curl: (23)`.
+    local json ver
+    json="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")" \
+        || err "could not reach GitHub API; set RESONANCE_VERSION"
+    ver="$(printf '%s' "$json" | grep -m1 '"tag_name"' \
+             | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
     [[ -n "$ver" ]] || err "could not determine latest tag; set RESONANCE_VERSION"
     echo "$ver"
 }
