@@ -358,31 +358,26 @@ impl eframe::App for GuiApp {
         if self.state.is_none() {
             egui::CentralPanel::default().show_inside(ui, |ui| self.disconnected(ui));
         } else {
+            // FR graph: a resizable top panel — drag its bottom edge to size it
+            // directly. Spectrum is a resizable bottom panel; effects + bands
+            // fill the central area.
+            egui::Panel::top("fr")
+                .resizable(true)
+                .default_size(220.0)
+                .min_size(70.0)
+                .show_inside(ui, |ui| {
+                    let state = self.state.clone();
+                    if let Some(s) = &state {
+                        self.eq_curve(ui, s);
+                    }
+                });
             egui::Panel::right("side")
                 .resizable(true)
                 .default_size(280.0)
                 .show_inside(ui, |ui| self.side_panel(ui));
-            // Bottom: effects + bands (resizable). Above it: spectrum (resizable).
-            // The EQ curve takes the remaining central area, so dragging either
-            // splitter up enlarges the frequency-response graph.
-            egui::Panel::bottom("controls")
-                .resizable(true)
-                .default_size(280.0)
-                .min_size(80.0)
-                .show_inside(ui, |ui| {
-                    let state = self.state.clone();
-                    if let Some(s) = &state {
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            self.effects_section(ui, s);
-                            ui.add_space(8.0);
-                            ui.separator();
-                            self.bands_section(ui, s);
-                        });
-                    }
-                });
             egui::Panel::bottom("spectrum")
                 .resizable(true)
-                .default_size(80.0)
+                .default_size(90.0)
                 .min_size(28.0)
                 .show_inside(ui, |ui| {
                     let state = self.state.clone();
@@ -393,7 +388,12 @@ impl eframe::App for GuiApp {
             egui::CentralPanel::default().show_inside(ui, |ui| {
                 let state = self.state.clone();
                 if let Some(s) = &state {
-                    self.eq_curve(ui, s);
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        self.effects_section(ui, s);
+                        ui.add_space(8.0);
+                        ui.separator();
+                        self.bands_section(ui, s);
+                    });
                 }
             });
         }
@@ -686,9 +686,8 @@ impl GuiApp {
     // ── EQ response curve (draggable nodes) ─────────────────────────────────
 
     fn eq_curve(&mut self, ui: &mut egui::Ui, state: &DaemonState) {
-        // Fill the central panel so dragging the lower splitters enlarges the
-        // frequency-response graph.
-        let height = ui.available_height().max(120.0);
+        // Fill the FR panel so dragging its bottom edge resizes the graph.
+        let height = ui.available_height().max(50.0);
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), height),
             egui::Sense::click_and_drag(),
@@ -720,7 +719,8 @@ impl GuiApp {
         for g in [-12.0, -6.0, 0.0, 6.0, 12.0] {
             let y = y_of(g);
             let stroke = if g == 0.0 {
-                egui::Stroke::new(1.0, pal.grid)
+                // Emphasised 0 dB reference line.
+                egui::Stroke::new(1.6, pal.neutral)
             } else {
                 grid
             };
@@ -883,7 +883,9 @@ impl GuiApp {
     // ── Spectrum bars ───────────────────────────────────────────────────────
 
     fn spectrum(&mut self, ui: &mut egui::Ui, state: &DaemonState) {
-        let height = 70.0;
+        // Fill the resizable spectrum panel rather than a fixed height (a fixed
+        // height taller than the panel makes the splitter bounce back).
+        let height = ui.available_height().max(16.0);
         let (rect, _) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), height),
             egui::Sense::hover(),
