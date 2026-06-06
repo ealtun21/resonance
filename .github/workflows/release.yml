@@ -52,6 +52,20 @@ jobs:
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           ( cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
 
+      - name: Stamp -bin PKGBUILD with the built tarball checksum
+        run: |
+          # The prebuilt AUR PKGBUILD must carry the sha256 of *this* release's
+          # tarball. We can't know it until the tarball is built, so generate the
+          # final PKGBUILD here and ship it as a release asset; install.sh pulls
+          # it from the release (not the tag tree), keeping the two in lockstep.
+          name="resonance-${GITHUB_REF_NAME#v}-x86_64-linux"
+          sha="$(awk '{print $1}' "dist/$name.tar.gz.sha256")"
+          cp contrib/aur-bin/PKGBUILD dist/PKGBUILD
+          # Replace the first quoted 64-hex (sha256sums[0] = the tarball) only.
+          sed -i "0,/'[0-9a-f]\{64\}'/s//'$sha'/" dist/PKGBUILD
+          echo "stamped tarball sha256 $sha into dist/PKGBUILD"
+          grep -n "$sha" dist/PKGBUILD
+
       - name: Build RPM
         run: |
           cargo install --locked cargo-generate-rpm
@@ -67,3 +81,4 @@ jobs:
             dist/*.tar.gz
             dist/*.rpm
             dist/*.sha256
+            dist/PKGBUILD

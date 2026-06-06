@@ -141,8 +141,14 @@ install_arch_bin_remote() {
     local ver; ver="$(resolve_version)" || return 1
     local tmp; tmp="$(mktemp -d)"; _CLEANUP_DIR="$tmp"
     info "Fetching resonance-eq-bin PKGBUILD ($ver) for a pacman-tracked, no-compile install"
+    # The release ships a PKGBUILD whose sha256sums match that release's tarball
+    # exactly (stamped by CI). Prefer it; fall back to the tag tree for older
+    # releases that didn't publish one.
     curl -fSL --proto '=https' --tlsv1.2 -o "$tmp/PKGBUILD" \
-        "https://raw.githubusercontent.com/$REPO/${ver}/contrib/aur-bin/PKGBUILD" || return 1
+        "https://github.com/$REPO/releases/download/${ver}/PKGBUILD" \
+        || curl -fSL --proto '=https' --tlsv1.2 -o "$tmp/PKGBUILD" \
+            "https://raw.githubusercontent.com/$REPO/${ver}/contrib/aur-bin/PKGBUILD" \
+        || return 1
     [[ -s "$tmp/PKGBUILD" ]] || return 1
     info "Building pacman package via makepkg (downloads prebuilt binaries, no compile)"
     ( cd "$tmp" && makepkg -si --noconfirm ) || return 1
