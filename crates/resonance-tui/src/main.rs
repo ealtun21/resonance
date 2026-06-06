@@ -215,6 +215,7 @@ fn handle_settings(app: &mut App, key: KeyEvent) {
         KeyCode::Char('2') => app.settings_set_tab(1),
         KeyCode::Char('3') => app.settings_set_tab(2),
         KeyCode::Char('4') => app.settings_set_tab(3),
+        KeyCode::Char('5') => app.settings_set_tab(4),
         KeyCode::Up | KeyCode::Char('k') => app.settings_move(-1),
         KeyCode::Down | KeyCode::Char('j') => app.settings_move(1),
         KeyCode::Enter | KeyCode::Char(' ') => app.settings_enter(),

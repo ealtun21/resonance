@@ -3,6 +3,7 @@ use resonance_dsp::filter::FilterType;
 use serde::{Deserialize, Serialize};
 
 pub mod paths;
+pub mod service;
 pub mod transport;
 
 pub const SOCKET_PATH_ENV: &str = "RESONANCE_SOCKET";

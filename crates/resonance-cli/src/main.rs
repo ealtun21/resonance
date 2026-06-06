@@ -118,11 +118,36 @@ enum Sub {
     },
     /// Send a raw shutdown signal to the daemon
     Shutdown,
+    /// Manage the resonanced systemd user service (start/stop/autostart)
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
     /// Print shell completions
     Completions {
         /// Shell: bash | zsh | fish | elvish | powershell
         shell: Shell,
     },
+}
+
+#[derive(Subcommand)]
+enum DaemonAction {
+    /// Start the daemon now (installs the user service if needed)
+    Start,
+    /// Stop the running daemon
+    Stop,
+    /// Restart the daemon
+    Restart,
+    /// Enable autostart at login and start now
+    Enable,
+    /// Disable autostart and stop now
+    Disable,
+    /// Write/refresh the systemd user unit file
+    Install,
+    /// Remove the systemd user unit file
+    Uninstall,
+    /// Show service install/active/enabled status (default)
+    Status,
 }
 
 fn main() -> Result<()> {
@@ -157,6 +182,11 @@ fn main() -> Result<()> {
             name,
         })?;
         return print_response(resp);
+    }
+
+    // `daemon` controls the systemd user service; it never touches the socket.
+    if let Sub::Daemon { action } = &sub {
+        return run_daemon(action);
     }
 
     // `devices` reuses GetState but renders a sink list instead of full status.
@@ -206,8 +236,38 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
         Sub::Import { path, name } => Ok(Command::ImportPreset { path, name }),
         Sub::Rename { from, to } => Ok(Command::RenameProfile { from, to }),
         Sub::Shutdown => Ok(Command::Shutdown),
-        Sub::Devices | Sub::Completions { .. } => unreachable!(),
+        Sub::Daemon { .. } | Sub::Devices | Sub::Completions { .. } => unreachable!(),
     }
+}
+
+fn run_daemon(action: &DaemonAction) -> Result<()> {
+    use resonance_ipc::service;
+    let p = Paint::auto();
+    if !service::systemd_available() {
+        bail!("systemctl --user is not available; cannot manage the daemon service");
+    }
+    match action {
+        DaemonAction::Start => service::start()?,
+        DaemonAction::Stop => service::stop()?,
+        DaemonAction::Restart => service::restart()?,
+        DaemonAction::Enable => service::enable()?,
+        DaemonAction::Disable => service::disable()?,
+        DaemonAction::Install => service::install()?,
+        DaemonAction::Uninstall => service::uninstall()?,
+        DaemonAction::Status => {}
+    }
+    let s = service::status();
+    let yn = |b: bool, yes: &str, no: &str| {
+        if b { p.green(yes) } else { p.dim(no) }
+    };
+    println!(
+        "{}  {}  {}  {}",
+        p.magenta_bold("♪ resonanced"),
+        yn(s.active, "● running", "○ stopped"),
+        yn(s.enabled, "autostart on", "autostart off"),
+        yn(s.installed, "installed", "not installed"),
+    );
+    Ok(())
 }
 
 fn send(cmd: Command) -> Result<Response> {

@@ -1,4 +1,4 @@
-pub const TABS: [&str; 4] = ["Profiles", "Mappings", "Devices", "Preferences"];
+pub const TABS: [&str; 5] = ["Profiles", "Mappings", "Devices", "Preferences", "Daemon"];
 
 #[derive(Debug, Clone)]
 pub struct SettingsState {
@@ -114,6 +114,7 @@ impl SettingsState {
             1 => self.mappings.len().saturating_sub(1),
             2 => self.sinks.len().saturating_sub(1),
             3 => 4,
+            4 => 3, // Daemon: Start / Stop / Restart / Autostart
             _ => 0,
         }
     }

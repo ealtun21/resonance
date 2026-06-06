@@ -982,12 +982,13 @@ fn render_settings(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect) 
 }
 
 fn settings_footer_hint(s: &SettingsState) -> String {
-    let base = " [Tab/←→/1-4] switch  [↑↓] select  [Esc] close";
+    let base = " [Tab/←→/1-5] switch  [↑↓] select  [Esc] close";
     let ctx = match s.tab {
         0 => "  •  [Enter] load  [n] save  [r] rename  [d] delete",
         1 => "  •  [m] map  [d] unmap",
         2 => "  •  [Enter] route  [m] map to profile",
         3 => "  •  [Enter/Space] edit/toggle",
+        4 => "  •  [Enter] run action",
         _ => "",
     };
     format!("{base}{ctx}")
@@ -1020,6 +1021,7 @@ fn render_settings_content(s: &SettingsState, app: &App, frame: &mut Frame, area
         1 => render_tab_mappings(s, app, frame, area),
         2 => render_tab_devices(s, app, frame, area),
         3 => render_tab_prefs(s, app, frame, area),
+        4 => render_tab_daemon(s, app, frame, area),
         _ => {}
     }
 }
@@ -1285,6 +1287,58 @@ fn render_tab_prefs(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect)
             Span::styled(format!("{marker} {label:<18}  "), label_style),
             Span::styled(value_display, val_style),
             Span::styled(format!("  {desc}"), desc_style),
+        ]);
+        frame.render_widget(Paragraph::new(line), row);
+    }
+}
+
+fn render_tab_daemon(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect) {
+    let st = app.daemon_status;
+    // Status summary line.
+    let on = |b: bool, yes: &str, no: &str| {
+        if b {
+            Span::styled(yes.to_string(), Style::default().fg(Color::Green).bold())
+        } else {
+            Span::styled(no.to_string(), Style::default().fg(Color::DarkGray))
+        }
+    };
+    let summary = Line::from(vec![
+        Span::styled("status  ", Style::default().fg(Color::White)),
+        on(st.active, "● running", "○ stopped"),
+        Span::styled("   ", Style::default()),
+        on(st.enabled, "autostart on", "autostart off"),
+    ]);
+    let header = Rect::new(area.x, area.y, area.width, 1);
+    frame.render_widget(Paragraph::new(summary), header);
+
+    let autostart_label = if st.enabled {
+        "Autostart at login  [on] "
+    } else {
+        "Autostart at login  [off]"
+    };
+    let items: [(&str, &str); 4] = [
+        ("Start", "launch the daemon now (installs the service)"),
+        ("Stop", "stop the running daemon"),
+        ("Restart", "restart the daemon"),
+        (autostart_label, "toggle start at login"),
+    ];
+
+    for (i, (label, desc)) in items.iter().enumerate() {
+        let y = area.y + 2 + i as u16;
+        if y >= area.y + area.height {
+            break;
+        }
+        let row = Rect::new(area.x, y, area.width, 1);
+        let selected = s.cursor == i;
+        let marker = if selected { "▶" } else { " " };
+        let label_style = if selected {
+            Style::default().fg(Color::Yellow).bold()
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let line = Line::from(vec![
+            Span::styled(format!("{marker} {label:<26}"), label_style),
+            Span::styled(format!("  {desc}"), Style::default().fg(Color::DarkGray)),
         ]);
         frame.render_widget(Paragraph::new(line), row);
     }

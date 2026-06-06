@@ -8,9 +8,10 @@
 use crate::browser::Browser;
 use crate::curve;
 use crate::ipc::IpcClient;
+use crate::theme::{Palette, Theme};
 use eframe::egui;
 use resonance_ipc::{
-    BandState, BandType, Command, DaemonState, EffectsState, FxEffectId, Response,
+    BandState, BandType, Command, DaemonState, EffectsState, FxEffectId, Response, service,
 };
 use std::time::{Duration, Instant};
 
@@ -65,6 +66,9 @@ enum Dialog {
     LoadPreset(Browser),
 }
 
+/// A zero-arg systemd service action (start/stop/restart/…).
+type ServiceFn = fn() -> std::io::Result<()>;
+
 pub struct GuiApp {
     ipc: Option<IpcClient>,
     state: Option<DaemonState>,
@@ -91,11 +95,21 @@ pub struct GuiApp {
     last_edit: Option<Instant>,
     /// While `Some` and in the future, the clip indicator flashes.
     clip_until: Option<Instant>,
+    /// Active colour theme + its semantic palette (kept in sync).
+    theme: Theme,
+    palette: Palette,
+    /// Band pinned to vertical (gain-only) movement via double-right-click.
+    vlock: Option<usize>,
+    /// Cached systemd user-service status; refreshed on a slow timer.
+    daemon_status: service::Status,
+    last_service_poll: Instant,
 }
 
 impl GuiApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install_symbol_fonts(&cc.egui_ctx);
+        let theme = Theme::System;
+        cc.egui_ctx.set_visuals(theme.visuals());
         let mut app = Self {
             ipc: None,
             state: None,
@@ -118,9 +132,21 @@ impl GuiApp {
             redo_stack: Vec::new(),
             last_edit: None,
             clip_until: None,
+            theme,
+            palette: theme.palette(),
+            vlock: None,
+            daemon_status: service::status(),
+            last_service_poll: Instant::now(),
         };
         app.try_connect();
         app
+    }
+
+    /// Switch theme: store it, refresh the cached palette, and push new visuals.
+    fn set_theme(&mut self, ctx: &egui::Context, theme: Theme) {
+        self.theme = theme;
+        self.palette = theme.palette();
+        ctx.set_visuals(theme.visuals());
     }
 
     // ── Undo / redo ─────────────────────────────────────────────────────────
@@ -321,12 +347,56 @@ impl eframe::App for GuiApp {
             self.redo();
         }
 
+        // Service status drives the toolbar daemon controls; poll it slowly.
+        if self.last_service_poll.elapsed() >= Duration::from_millis(1500) {
+            self.last_service_poll = Instant::now();
+            self.daemon_status = service::status();
+        }
+
         egui::Panel::top("toolbar").show_inside(ui, |ui| self.toolbar(ui));
-        egui::Panel::right("side")
-            .resizable(true)
-            .default_size(280.0)
-            .show_inside(ui, |ui| self.side_panel(ui));
-        egui::CentralPanel::default().show_inside(ui, |ui| self.central(ui));
+
+        if self.state.is_none() {
+            egui::CentralPanel::default().show_inside(ui, |ui| self.disconnected(ui));
+        } else {
+            egui::Panel::right("side")
+                .resizable(true)
+                .default_size(280.0)
+                .show_inside(ui, |ui| self.side_panel(ui));
+            // Bottom: effects + bands (resizable). Above it: spectrum (resizable).
+            // The EQ curve takes the remaining central area, so dragging either
+            // splitter up enlarges the frequency-response graph.
+            egui::Panel::bottom("controls")
+                .resizable(true)
+                .default_size(280.0)
+                .min_size(80.0)
+                .show_inside(ui, |ui| {
+                    let state = self.state.clone();
+                    if let Some(s) = &state {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            self.effects_section(ui, s);
+                            ui.add_space(8.0);
+                            ui.separator();
+                            self.bands_section(ui, s);
+                        });
+                    }
+                });
+            egui::Panel::bottom("spectrum")
+                .resizable(true)
+                .default_size(80.0)
+                .min_size(28.0)
+                .show_inside(ui, |ui| {
+                    let state = self.state.clone();
+                    if let Some(s) = &state {
+                        self.spectrum(ui, s);
+                    }
+                });
+            egui::CentralPanel::default().show_inside(ui, |ui| {
+                let state = self.state.clone();
+                if let Some(s) = &state {
+                    self.eq_curve(ui, s);
+                }
+            });
+        }
 
         let ctx = ui.ctx().clone();
         self.preset_dialog(&ctx);
@@ -343,17 +413,34 @@ impl eframe::App for GuiApp {
 impl GuiApp {
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         let state = self.state.clone();
-        ui.horizontal(|ui| {
+        // Wrapped so narrow windows reflow controls onto a second row instead of
+        // overlapping (the bar used to clip on small widths).
+        ui.horizontal_wrapped(|ui| {
             ui.heading("Resonance");
             ui.separator();
 
+            // Prominent power toggle: a large filled green/red button, not a
+            // tiny checkbox.
             let enabled = state.as_ref().map(|s| s.enabled).unwrap_or(false);
-            let mut power = enabled;
+            let (txt, fill) = if enabled {
+                ("●  ON", self.palette.boost)
+            } else {
+                ("○  OFF", self.palette.cut)
+            };
+            let power_btn = egui::Button::new(
+                egui::RichText::new(txt)
+                    .strong()
+                    .size(15.0)
+                    .color(egui::Color32::WHITE),
+            )
+            .fill(fill)
+            .min_size(egui::vec2(74.0, 26.0));
             if ui
-                .add_enabled(state.is_some(), egui::Checkbox::new(&mut power, "Power"))
-                .changed()
+                .add_enabled(state.is_some(), power_btn)
+                .on_hover_text("toggle DSP power")
+                .clicked()
             {
-                self.queue_edit(Command::SetPower { enabled: power });
+                self.queue_edit(Command::SetPower { enabled: !enabled });
             }
 
             ui.separator();
@@ -403,14 +490,90 @@ impl GuiApp {
                 self.redo();
             }
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.separator();
+            self.daemon_menu(ui);
+
+            ui.separator();
+            self.theme_menu(ui);
+
+            ui.separator();
+            if let Some(s) = &state {
+                self.meters_widget(ui, s);
+            }
+            if !self.status.is_empty() {
+                ui.separator();
                 ui.label(&self.status);
-                if let Some(s) = &state {
-                    ui.separator();
-                    self.meters_widget(ui, s);
+            }
+        });
+    }
+
+    /// Daemon lifecycle controls (systemd user service) as a compact menu so
+    /// users never type a `systemctl` line.
+    fn daemon_menu(&mut self, ui: &mut egui::Ui) {
+        if !service::systemd_available() {
+            return;
+        }
+        let st = self.daemon_status;
+        let (dot, color) = if st.active {
+            ("●", self.palette.boost)
+        } else {
+            ("○", self.palette.cut)
+        };
+        ui.menu_button(
+            egui::RichText::new(format!("{dot} Daemon")).color(color),
+            |ui| {
+                ui.label(format!(
+                    "{}  ·  autostart {}",
+                    if st.active { "running" } else { "stopped" },
+                    if st.enabled { "on" } else { "off" },
+                ));
+                ui.separator();
+                let actions: [(&str, ServiceFn); 3] = [
+                    ("Start", service::start),
+                    ("Stop", service::stop),
+                    ("Restart", service::restart),
+                ];
+                for (label, f) in actions {
+                    if ui.button(label).clicked() {
+                        self.status = match f() {
+                            Ok(()) => format!("{label} ok"),
+                            Err(e) => format!("{label} failed: {e}"),
+                        };
+                        self.daemon_status = service::status();
+                    }
+                }
+                ui.separator();
+                let mut autostart = st.enabled;
+                if ui.checkbox(&mut autostart, "Autostart at login").changed() {
+                    let r = if autostart {
+                        service::enable()
+                    } else {
+                        service::disable()
+                    };
+                    self.status = match r {
+                        Ok(()) => "autostart updated".into(),
+                        Err(e) => format!("autostart failed: {e}"),
+                    };
+                    self.daemon_status = service::status();
+                }
+            },
+        );
+    }
+
+    /// Theme picker combo box.
+    fn theme_menu(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let mut sel = self.theme;
+        egui::ComboBox::from_id_salt("theme")
+            .selected_text(self.theme.label())
+            .show_ui(ui, |ui| {
+                for t in Theme::ALL {
+                    ui.selectable_value(&mut sel, t, t.label());
                 }
             });
-        });
+        if sel != self.theme {
+            self.set_theme(&ctx, sel);
+        }
     }
 
     /// Output device, in/out levels, DSP load, and a clip flash, drawn
@@ -440,9 +603,26 @@ impl GuiApp {
             egui::Color32::GRAY
         };
 
-        // Items are laid out right-to-left, so add in reverse reading order and put
-        // a separator between each, mirroring the left side of the toolbar.
-        // Reading order: 🔊 output │ I │ O │ DSP │ CLIP
+        // Natural reading order: 🔊 output │ I │ O │ DSP │ CLIP.
+        if let Some(out) = s.active_output.as_deref() {
+            ui.label(format!("🔊 {}", s.sink_label(out)));
+            ui.separator();
+        }
+        ui.colored_label(
+            lvl_color,
+            egui::RichText::new(format!("I {} dB", db(m.in_peak))).monospace(),
+        );
+        ui.separator();
+        ui.colored_label(
+            lvl_color,
+            egui::RichText::new(format!("O {} dB", db(m.out_peak))).monospace(),
+        );
+        ui.separator();
+        ui.colored_label(
+            dsp_color,
+            egui::RichText::new(format!("DSP {:>3.0}%", m.dsp_load * 100.0)).monospace(),
+        );
+        ui.separator();
         // Always draw the clip slot so it flips OK→CLIP in place without shifting.
         if clip_active {
             ui.colored_label(
@@ -452,61 +632,71 @@ impl GuiApp {
         } else {
             ui.colored_label(egui::Color32::GRAY, egui::RichText::new(" OK ").monospace());
         }
-        ui.separator();
-        ui.colored_label(
-            dsp_color,
-            egui::RichText::new(format!("DSP {:>3.0}%", m.dsp_load * 100.0)).monospace(),
-        );
-        ui.separator();
-        ui.colored_label(
-            lvl_color,
-            egui::RichText::new(format!("O {} dB", db(m.out_peak))).monospace(),
-        );
-        ui.separator();
-        ui.colored_label(
-            lvl_color,
-            egui::RichText::new(format!("I {} dB", db(m.in_peak))).monospace(),
-        );
-        if let Some(out) = s.active_output.as_deref() {
-            ui.separator();
-            ui.label(format!("🔊 {}", s.sink_label(out)));
-        }
     }
 
-    fn central(&mut self, ui: &mut egui::Ui) {
-        let Some(state) = self.state.clone() else {
-            ui.centered_and_justified(|ui| {
-                ui.label("Waiting for daemon… start it with `resonanced`.");
+    /// Centre screen shown while no daemon is connected: a one-click start
+    /// button instead of asking the user to type `resonanced`.
+    fn disconnected(&mut self, ui: &mut egui::Ui) {
+        ui.centered_and_justified(|ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(40.0);
+                ui.heading("No daemon connected");
+                ui.add_space(8.0);
+                ui.label(&self.status);
+                ui.add_space(16.0);
+                if service::systemd_available() {
+                    let btn = egui::Button::new(
+                        egui::RichText::new("▶  Start daemon")
+                            .size(18.0)
+                            .color(egui::Color32::WHITE),
+                    )
+                    .fill(self.palette.boost)
+                    .min_size(egui::vec2(180.0, 40.0));
+                    if ui.add(btn).clicked() {
+                        match service::start() {
+                            Ok(()) => self.status = "starting daemon…".into(),
+                            Err(e) => self.status = format!("start failed: {e}"),
+                        }
+                        self.daemon_status = service::status();
+                        self.try_connect();
+                    }
+                    ui.add_space(6.0);
+                    let mut autostart = self.daemon_status.enabled;
+                    if ui
+                        .checkbox(&mut autostart, "Start automatically at login")
+                        .changed()
+                    {
+                        let r = if autostart {
+                            service::enable()
+                        } else {
+                            service::disable()
+                        };
+                        if let Err(e) = r {
+                            self.status = format!("autostart: {e}");
+                        }
+                        self.daemon_status = service::status();
+                    }
+                } else {
+                    ui.label("systemctl --user unavailable — run `resonanced` manually.");
+                }
             });
-            return;
-        };
-
-        self.eq_curve(ui, &state);
-        ui.add_space(6.0);
-        self.spectrum(ui, &state);
-        ui.add_space(6.0);
-        ui.separator();
-
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            self.effects_section(ui, &state);
-            ui.add_space(8.0);
-            ui.separator();
-            self.bands_section(ui, &state);
         });
     }
 
     // ── EQ response curve (draggable nodes) ─────────────────────────────────
 
     fn eq_curve(&mut self, ui: &mut egui::Ui, state: &DaemonState) {
-        let height = 220.0;
+        // Fill the central panel so dragging the lower splitters enlarges the
+        // frequency-response graph.
+        let height = ui.available_height().max(120.0);
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), height),
             egui::Sense::click_and_drag(),
         );
         let painter = ui.painter().with_clip_rect(rect);
-        let visuals = ui.visuals();
+        let pal = self.palette;
 
-        painter.rect_filled(rect, 4.0, visuals.extreme_bg_color);
+        painter.rect_filled(rect, 4.0, pal.graph_bg);
 
         let db = curve::DB_RANGE;
         let x_of = |logf: f64| -> f32 {
@@ -525,11 +715,12 @@ impl GuiApp {
             |y: f32| -> f64 { ((1.0 - (y - rect.top()) / rect.height()) as f64) * 2.0 * db - db };
 
         // Horizontal dB grid lines.
-        let grid = egui::Stroke::new(1.0, visuals.weak_text_color().gamma_multiply(0.3));
+        let label_col = pal.neutral;
+        let grid = egui::Stroke::new(1.0, pal.grid.gamma_multiply(0.6));
         for g in [-12.0, -6.0, 0.0, 6.0, 12.0] {
             let y = y_of(g);
             let stroke = if g == 0.0 {
-                egui::Stroke::new(1.0, visuals.weak_text_color())
+                egui::Stroke::new(1.0, pal.grid)
             } else {
                 grid
             };
@@ -542,7 +733,7 @@ impl GuiApp {
                 egui::Align2::LEFT_CENTER,
                 format!("{g:+.0}"),
                 egui::FontId::monospace(9.0),
-                visuals.weak_text_color(),
+                label_col,
             );
         }
         // Vertical frequency grid + labels.
@@ -557,44 +748,50 @@ impl GuiApp {
                 egui::Align2::CENTER_BOTTOM,
                 label,
                 egui::FontId::monospace(9.0),
-                visuals.weak_text_color(),
+                label_col,
             );
         }
 
-        // Response polyline.
+        // Response curve — colour-coded by gain: each segment is tinted toward
+        // boost (green) or cut (red), neutral near 0 dB.
         let pts = curve::curve_points(&state.bands, state.sample_rate, 240);
-        let line: Vec<egui::Pos2> = pts
-            .iter()
-            .map(|&(lf, g)| egui::pos2(x_of(lf), y_of(g)))
-            .collect();
-        painter.add(egui::Shape::line(
-            line,
-            egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 200, 255)),
-        ));
+        for w in pts.windows(2) {
+            let (lf0, g0) = w[0];
+            let (lf1, g1) = w[1];
+            let a = egui::pos2(x_of(lf0), y_of(g0));
+            let b = egui::pos2(x_of(lf1), y_of(g1));
+            let color = gain_color((g0 + g1) * 0.5, &pal);
+            painter.line_segment([a, b], egui::Stroke::new(2.0, color));
+        }
+
+        // Double-right-click a node → toggle vertical-lock (gain-only) movement.
+        use egui::PointerButton::{Primary, Secondary};
+        if response.double_clicked_by(Secondary) {
+            if let Some(p) = response.interact_pointer_pos() {
+                if let Some(i) = nearest_band(state, p, &x_of, &y_of) {
+                    self.vlock = if self.vlock == Some(i) { None } else { Some(i) };
+                    self.selected_band = i;
+                }
+            }
+        }
 
         // Drag handling: left button moves a node (freq+gain), right button
-        // tunes its Q (drag up = narrower). Pick the nearest node on press.
-        use egui::PointerButton::{Primary, Secondary};
+        // tunes its Q (drag up = narrower). A vertical-locked node moves on the
+        // gain axis only. Pick the nearest node on press.
         let started_primary = response.drag_started_by(Primary);
         let started_secondary = response.drag_started_by(Secondary);
         if started_primary || started_secondary {
             if let Some(p) = response.interact_pointer_pos() {
-                let mut best: Option<(usize, f32)> = None;
-                for (i, b) in state.bands.iter().enumerate() {
-                    let node = egui::pos2(x_of(curve::clampf_log(b.freq)), y_of(b.gain_db));
-                    let d = node.distance(p);
-                    if d < 14.0 && best.map(|(_, bd)| d < bd).unwrap_or(true) {
-                        best = Some((i, d));
-                    }
-                }
-                if let Some((i, _)) = best {
+                if let Some(i) = nearest_band(state, p, &x_of, &y_of) {
                     self.drag_band = Some(i);
                     self.selected_band = i;
-                    self.drag_q = started_secondary;
+                    // Locked nodes ignore the Q gesture entirely.
+                    self.drag_q = started_secondary && self.vlock != Some(i);
                 }
             }
         }
         if let Some(i) = self.drag_band {
+            let locked = self.vlock == Some(i);
             if self.drag_q && response.dragged_by(Secondary) {
                 let dy = response.drag_delta().y as f64;
                 if dy != 0.0 {
@@ -609,10 +806,17 @@ impl GuiApp {
                         });
                     }
                 }
-            } else if !self.drag_q && response.dragged_by(Primary) {
+            } else if !self.drag_q
+                && (response.dragged_by(Primary) || (locked && response.dragged_by(Secondary)))
+            {
                 if let Some(p) = response.interact_pointer_pos() {
                     if let Some(b) = state.bands.get(i) {
-                        let freq = 10f64.powf(logf_of(p.x)).clamp(20.0, 20000.0);
+                        // Locked: keep freq, move gain only.
+                        let freq = if locked {
+                            b.freq
+                        } else {
+                            10f64.powf(logf_of(p.x)).clamp(20.0, 20000.0)
+                        };
                         let gain = db_of(p.y).clamp(-20.0, 20.0);
                         self.queue_edit(Command::SetBand {
                             index: i,
@@ -628,8 +832,8 @@ impl GuiApp {
             self.drag_band = None;
             self.drag_q = false;
         }
-        // Double-click empty area → add a peaking band there.
-        if response.double_clicked() {
+        // Double-left-click empty area → add a peaking band there.
+        if response.double_clicked_by(Primary) {
             if let Some(p) = response.interact_pointer_pos() {
                 let freq = 10f64.powf(logf_of(p.x)).clamp(20.0, 20000.0);
                 let gain = db_of(p.y).clamp(-20.0, 20.0);
@@ -649,17 +853,30 @@ impl GuiApp {
             }
             let center = egui::pos2(x_of(curve::clampf_log(b.freq)), y_of(b.gain_db));
             let selected = i == self.selected_band;
-            let color = if selected {
-                egui::Color32::YELLOW
-            } else {
-                egui::Color32::from_rgb(80, 200, 255)
-            };
-            painter.circle_filled(center, if selected { 6.0 } else { 4.0 }, color);
-            painter.circle_stroke(
-                center,
-                if selected { 6.0 } else { 4.0 },
-                egui::Stroke::new(1.0, visuals.extreme_bg_color),
-            );
+            let locked = self.vlock == Some(i);
+            // Locked node: a vertical guide spanning the plot with end caps, so
+            // it reads as "this node only moves up/down".
+            if locked {
+                let x = center.x;
+                let stroke = egui::Stroke::new(1.0, pal.highlight);
+                painter.line_segment(
+                    [
+                        egui::pos2(x, rect.top() + 2.0),
+                        egui::pos2(x, rect.bottom() - 2.0),
+                    ],
+                    stroke,
+                );
+                for cap_y in [rect.top() + 2.0, rect.bottom() - 2.0] {
+                    painter.line_segment(
+                        [egui::pos2(x - 4.0, cap_y), egui::pos2(x + 4.0, cap_y)],
+                        stroke,
+                    );
+                }
+            }
+            let color = if selected { pal.highlight } else { pal.accent };
+            let r = if selected || locked { 6.0 } else { 4.0 };
+            painter.circle_filled(center, r, color);
+            painter.circle_stroke(center, r, egui::Stroke::new(1.0, pal.graph_bg));
         }
     }
 
@@ -777,7 +994,7 @@ impl GuiApp {
         });
 
         egui::Grid::new("bands_grid")
-            .num_columns(7)
+            .num_columns(8)
             .striped(true)
             .spacing([10.0, 4.0])
             .show(ui, |ui| {
@@ -787,6 +1004,7 @@ impl GuiApp {
                 ui.label("Freq (Hz)");
                 ui.label("Gain (dB)");
                 ui.label("Q");
+                ui.label("Level");
                 ui.label("");
                 ui.end_row();
 
@@ -863,6 +1081,10 @@ impl GuiApp {
                             q,
                         });
                     }
+
+                    // Centre-out gain bar (the TUI's gain graph): fills right for
+                    // boosts, left for cuts, tinted by gain colour.
+                    gain_bar(ui, b.gain_db, &self.palette);
 
                     if ui.button("✕").on_hover_text("remove").clicked() {
                         self.queue_edit(Command::RemoveBand { index: i });
@@ -1105,6 +1327,74 @@ fn install_symbol_fonts(ctx: &egui::Context) {
             .push("noto-symbols".to_owned());
     }
     ctx.set_fonts(fonts);
+}
+
+/// Index of the band whose node is nearest `p` (within a small radius).
+fn nearest_band(
+    state: &DaemonState,
+    p: egui::Pos2,
+    x_of: &dyn Fn(f64) -> f32,
+    y_of: &dyn Fn(f64) -> f32,
+) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+    for (i, b) in state.bands.iter().enumerate() {
+        let node = egui::pos2(x_of(curve::clampf_log(b.freq)), y_of(b.gain_db));
+        let d = node.distance(p);
+        if d < 14.0 && best.map(|(_, bd)| d < bd).unwrap_or(true) {
+            best = Some((i, d));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// Colour for a gain value: neutral accent near 0, tinting toward boost (green)
+/// or cut (red) as magnitude grows — the FR curve's colour coding.
+fn gain_color(db: f64, pal: &Palette) -> egui::Color32 {
+    let t = (db.abs() / curve::DB_RANGE).clamp(0.0, 1.0) as f32;
+    if db.abs() < 0.3 {
+        return pal.accent;
+    }
+    let target = if db > 0.0 { pal.boost } else { pal.cut };
+    lerp_color(pal.accent, target, t)
+}
+
+fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t) as u8;
+    egui::Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
+}
+
+/// Paint a centre-out gain bar in a fixed-size cell: a centre tick with the bar
+/// growing right for boosts and left for cuts, scaled to ±`DB_RANGE`.
+fn gain_bar(ui: &mut egui::Ui, db: f64, pal: &Palette) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(96.0, 14.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let cx = rect.center().x;
+    // Centre tick.
+    painter.line_segment(
+        [
+            egui::pos2(cx, rect.top() + 1.0),
+            egui::pos2(cx, rect.bottom() - 1.0),
+        ],
+        egui::Stroke::new(1.0, pal.grid),
+    );
+    let t = (db / curve::DB_RANGE).clamp(-1.0, 1.0) as f32;
+    let half = rect.width() * 0.5 - 2.0;
+    let w = t.abs() * half;
+    if w >= 1.0 {
+        let bar = if db >= 0.0 {
+            egui::Rect::from_min_max(
+                egui::pos2(cx, rect.top() + 2.0),
+                egui::pos2(cx + w, rect.bottom() - 2.0),
+            )
+        } else {
+            egui::Rect::from_min_max(
+                egui::pos2(cx - w, rect.top() + 2.0),
+                egui::pos2(cx, rect.bottom() - 2.0),
+            )
+        };
+        painter.rect_filled(bar, 1.0, gain_color(db, pal));
+    }
 }
 
 fn effect_values(state: &DaemonState, id: FxEffectId) -> (f64, bool) {

@@ -71,6 +71,8 @@ pub struct App {
     redo_stack: Vec<Snapshot>,
     /// While `Some` and in the future, the output clip indicator flashes.
     pub clip_until: Option<Instant>,
+    /// Cached systemd user-service status (refreshed when the Daemon tab is used).
+    pub daemon_status: resonance_ipc::service::Status,
 }
 
 /// A restorable snapshot of the editable chain state (for undo/redo).
@@ -102,6 +104,28 @@ impl App {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             clip_until: None,
+            daemon_status: resonance_ipc::service::Status::default(),
+        }
+    }
+
+    // ── Daemon (systemd user service) control ────────────────────────────────
+
+    /// Refresh the cached service status snapshot.
+    pub fn refresh_daemon_status(&mut self) {
+        self.daemon_status = resonance_ipc::service::status();
+    }
+
+    /// Run a service action, update status text + cached snapshot, and try to
+    /// (re)connect afterward so the UI reflects the change immediately.
+    pub fn daemon_action(&mut self, label: &str, r: std::io::Result<()>) {
+        self.status = match r {
+            Ok(()) => format!("daemon: {label} ok"),
+            Err(e) => format!("daemon: {label} failed: {e}"),
+        };
+        self.refresh_daemon_status();
+        if self.ipc.is_none() {
+            self.connect();
+            self.refresh_state();
         }
     }
 
@@ -646,6 +670,7 @@ impl App {
             .as_ref()
             .map(|s| s.available_sinks.clone())
             .unwrap_or_default();
+        self.refresh_daemon_status();
         self.mode = InputMode::Settings(crate::settings::SettingsState::new(
             profiles, mappings, sinks,
         ));
@@ -878,6 +903,30 @@ impl App {
             1 => {}
             2 => self.settings_route_output(),
             3 => self.settings_pref_activate(),
+            4 => self.settings_daemon_activate(),
+            _ => {}
+        }
+    }
+
+    /// Daemon tab actions: Start / Stop / Restart / toggle Autostart.
+    fn settings_daemon_activate(&mut self) {
+        use resonance_ipc::service;
+        let cursor = match &self.mode {
+            InputMode::Settings(s) => s.cursor,
+            _ => return,
+        };
+        match cursor {
+            0 => self.daemon_action("start", service::start()),
+            1 => self.daemon_action("stop", service::stop()),
+            2 => self.daemon_action("restart", service::restart()),
+            3 => {
+                let r = if self.daemon_status.enabled {
+                    service::disable()
+                } else {
+                    service::enable()
+                };
+                self.daemon_action("autostart", r);
+            }
             _ => {}
         }
     }
