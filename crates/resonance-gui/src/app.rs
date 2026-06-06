@@ -371,10 +371,8 @@ impl eframe::App for GuiApp {
                         self.eq_curve(ui, s);
                     }
                 });
-            egui::Panel::right("side")
-                .resizable(true)
-                .default_size(280.0)
-                .show_inside(ui, |ui| self.side_panel(ui));
+            // Spectrum first so it spans the full window width along the bottom;
+            // the side panel then reserves the right column above it.
             egui::Panel::bottom("spectrum")
                 .resizable(true)
                 .default_size(90.0)
@@ -385,6 +383,10 @@ impl eframe::App for GuiApp {
                         self.spectrum(ui, s);
                     }
                 });
+            egui::Panel::right("side")
+                .resizable(true)
+                .default_size(280.0)
+                .show_inside(ui, |ui| self.side_panel(ui));
             egui::CentralPanel::default().show_inside(ui, |ui| {
                 let state = self.state.clone();
                 if let Some(s) = &state {
