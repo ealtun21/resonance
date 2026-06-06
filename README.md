@@ -28,7 +28,7 @@ binaries into `/usr/local/bin` (or `~/.local/bin` if unprivileged):
 curl -fsSL https://raw.githubusercontent.com/ealtun21/resonance/master/install.sh | bash
 ```
 
-Pin a version with `RESONANCE_VERSION=v0.2.0` or change the target with
+Pin a version with `RESONANCE_VERSION=v0.3.0` or change the target with
 `PREFIX=~/.local`. The binaries are dynamic — see
 [runtime requirements](#prebuilt-release-binaries).
 
