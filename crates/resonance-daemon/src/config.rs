@@ -159,6 +159,19 @@ pub fn load_profile(name: &str) -> Result<Profile, String> {
     toml::from_str(&content).map_err(|e| e.to_string())
 }
 
+/// Read a profile from an arbitrary `.toml` path (our own export format), used
+/// when importing/exporting outside the managed profiles directory.
+pub fn load_profile_file(path: &str) -> Result<Profile, String> {
+    let content = std::fs::read_to_string(path).map_err(|e| format!("read '{path}': {e}"))?;
+    toml::from_str(&content).map_err(|e| format!("parse '{path}': {e}"))
+}
+
+/// Serialise a profile to our `.toml` format and write it to an arbitrary path.
+pub fn export_profile_file(path: &str, profile: &Profile) -> Result<(), String> {
+    let toml = toml::to_string_pretty(profile).map_err(|e| e.to_string())?;
+    std::fs::write(path, toml).map_err(|e| format!("write '{path}': {e}"))
+}
+
 pub fn delete_profile(name: &str) -> Result<(), String> {
     std::fs::remove_file(profile_path(name)).map_err(|e| format!("profile '{name}': {e}"))
 }

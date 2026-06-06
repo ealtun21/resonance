@@ -534,13 +534,18 @@ fn reroute(g: &mut GraphState) {
                         .and_then(&find_sink)
                 })
                 .or_else(|| {
+                    // Deterministic fallback: the lowest-id real sink. HashMap
+                    // iteration order is random, so `find` here used to pick a
+                    // different device run-to-run when several sinks existed —
+                    // which is why the mapped profile seemed to come and go.
                     g.nodes
                         .iter()
-                        .find(|(id, n)| {
+                        .filter(|(id, n)| {
                             n.media_class == "Audio/Sink"
                                 && n.name != "resonance"
                                 && **id != g.sink_node_id
                         })
+                        .min_by_key(|(id, _)| **id)
                         .map(|(id, _)| *id)
                 })
         };

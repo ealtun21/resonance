@@ -115,13 +115,48 @@ fn read_entries(dir: &Path) -> Vec<Item> {
 }
 
 fn is_preset(name: &str) -> bool {
-    name.ends_with(".fac") || name.ends_with(".txt")
+    name.ends_with(".fac") || name.ends_with(".txt") || name.ends_with(".toml")
+}
+
+/// Our own `.toml` export format (mirror of the daemon's `Profile`), used here
+/// only to render a preview of a native profile file.
+#[derive(serde::Deserialize)]
+struct ProfilePreview {
+    #[serde(default)]
+    preamp_db: f64,
+    #[serde(default)]
+    bands: Vec<resonance_ipc::BandState>,
 }
 
 fn preview_file(path: &Path) -> Vec<String> {
     let Ok(content) = std::fs::read_to_string(path) else {
         return vec!["(cannot read file)".to_string()];
     };
+
+    // Native `.toml` profiles render their own compact summary.
+    if path.extension().map(|e| e == "toml").unwrap_or(false) {
+        return match toml::from_str::<ProfilePreview>(&content) {
+            Ok(p) => {
+                let mut out = vec![
+                    "Resonance profile".to_string(),
+                    format!("preamp {:+.1} dB", p.preamp_db),
+                    String::new(),
+                    format!("EQ bands: {}", p.bands.len()),
+                ];
+                for b in p.bands.iter().take(16) {
+                    out.push(format!(
+                        " {:2} {:>7} {:+5.1}dB Q{:.2}",
+                        b.band_type.abbrev(),
+                        fmt_freq(b.freq),
+                        b.gain_db,
+                        b.q
+                    ));
+                }
+                out
+            }
+            Err(e) => vec![format!("(parse error: {e})")],
+        };
+    }
 
     let is_fac = path.extension().map(|e| e == "fac").unwrap_or(false);
     let parsed = if is_fac {

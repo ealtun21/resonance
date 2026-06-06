@@ -69,6 +69,8 @@ const BAND_TYPES: [BandType; 8] = [
 enum Dialog {
     None,
     LoadPreset(Browser),
+    /// Export the current chain to a `.toml` file at the held path.
+    ExportProfile(String),
 }
 
 /// A pending destructive/overwriting profile action awaiting confirmation.
@@ -432,6 +434,7 @@ impl eframe::App for GuiApp {
 
         let ctx = ui.ctx().clone();
         self.preset_dialog(&ctx);
+        self.export_dialog(&ctx);
         self.confirm_dialog(&ctx);
 
         self.dispatch();
@@ -495,7 +498,11 @@ impl GuiApp {
             }
 
             ui.separator();
-            if ui.button("Load preset…").clicked() {
+            if ui
+                .button("Load…")
+                .on_hover_text("import a .fac / APO .txt / Resonance .toml file")
+                .clicked()
+            {
                 let lib = resonance_ipc::paths::user_preset_dir();
                 let _ = std::fs::create_dir_all(&lib);
                 let start = if lib.is_dir() {
@@ -504,6 +511,20 @@ impl GuiApp {
                     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
                 };
                 self.dialog = Dialog::LoadPreset(Browser::new(start));
+            }
+            if ui
+                .button("Export…")
+                .on_hover_text("save the current chain as a Resonance .toml profile")
+                .clicked()
+            {
+                let lib = resonance_ipc::paths::user_preset_dir();
+                let _ = std::fs::create_dir_all(&lib);
+                let stem = state
+                    .as_ref()
+                    .and_then(|s| s.current_preset.clone())
+                    .unwrap_or_else(|| "resonance".to_string());
+                let path = lib.join(format!("{stem}.toml"));
+                self.dialog = Dialog::ExportProfile(path.to_string_lossy().into_owned());
             }
             if let Some(p) = state.as_ref().and_then(|s| s.current_preset.as_ref()) {
                 ui.label(format!("▸ {p}"));
@@ -1199,38 +1220,11 @@ impl GuiApp {
     fn side_panel(&mut self, ui: &mut egui::Ui) {
         let state = self.state.clone();
 
-        // Output is chosen from the title bar now; this panel only shows the
-        // current sink→profile mapping and lets you map/unmap it.
-        ui.heading("Output mapping");
+        // Device → profile table: every output device we've ever seen, each with
+        // a profile dropdown. The active device auto-loads its mapped profile.
+        ui.heading("Devices → profiles");
         if let Some(s) = &state {
-            let out_label = s
-                .active_output
-                .as_deref()
-                .map(|o| s.sink_label(o))
-                .unwrap_or_else(|| "(none)".to_string());
-            ui.label(format!("active: {out_label}"));
-            match &s.mapped_profile {
-                Some(mp) => ui.label(format!("mapped → {mp}")),
-                None => ui.label("not mapped"),
-            };
-            ui.horizontal(|ui| {
-                if ui.button("Map active→profile").clicked() {
-                    if let Some(name) = self.profiles.first().cloned() {
-                        // Map to currently selected profile name field if set.
-                        let target = if self.profile_name.is_empty() {
-                            name
-                        } else {
-                            self.profile_name.clone()
-                        };
-                        self.queue(Command::MapOutput { profile: target });
-                        self.needs_meta = true;
-                    }
-                }
-                if ui.button("Unmap").clicked() {
-                    self.queue(Command::UnmapOutput);
-                    self.needs_meta = true;
-                }
-            });
+            self.device_table(ui, s);
         } else {
             ui.label("(no daemon)");
         }
@@ -1253,6 +1247,7 @@ impl GuiApp {
         });
         let profiles = self.profiles.clone();
         egui::ScrollArea::vertical()
+            .id_salt("profiles")
             .max_height(160.0)
             .show(ui, |ui| {
                 for name in &profiles {
@@ -1275,37 +1270,98 @@ impl GuiApp {
                             });
                             self.needs_meta = true;
                         }
-                        if ui
-                            .button("Map")
-                            .on_hover_text("map active output")
-                            .clicked()
-                        {
-                            self.queue(Command::MapOutput {
-                                profile: name.clone(),
-                            });
-                            self.needs_meta = true;
-                        }
                         ui.label(name);
                     });
                 }
             });
 
-        if !self.mappings.is_empty() {
-            ui.separator();
-            ui.heading("Output mappings");
-            for (out, prof) in &self.mappings {
-                let label = state
-                    .as_ref()
-                    .map(|s| s.sink_label(out))
-                    .unwrap_or_else(|| short_name(out));
-                ui.label(format!("{label} → {prof}"));
-            }
-        }
-
         ui.separator();
         if let Some(s) = &state {
             ui.label(format!("{} Hz · {} ch", s.sample_rate as u32, s.channels));
         }
+    }
+
+    /// The device→profile mapping table. Lists every known output device
+    /// (`sink_descriptions` already merges present + remembered ones); each gets
+    /// a profile dropdown and a "forget" button. Forgetting only drops it until
+    /// PipeWire next reports it (plug in / select as output).
+    fn device_table(&mut self, ui: &mut egui::Ui, s: &DaemonState) {
+        use std::collections::HashSet;
+        let present: HashSet<&str> = s.available_sinks.iter().map(String::as_str).collect();
+        let active = s.active_output.as_deref();
+        // Own the map so the `&self.mappings` borrow ends before the closure
+        // below mutably borrows `self` (to queue commands).
+        let map: std::collections::HashMap<String, String> =
+            self.mappings.iter().cloned().collect();
+        let profiles = self.profiles.clone();
+
+        if s.sink_descriptions.is_empty() {
+            ui.label("(no devices seen yet)");
+            return;
+        }
+
+        egui::Grid::new("device_map_grid")
+            .num_columns(3)
+            .striped(true)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                for (node, _desc) in &s.sink_descriptions {
+                    let here = present.contains(node.as_str());
+                    let is_active = active == Some(node.as_str());
+                    // Status dot: green = active, dim green = present, grey = absent.
+                    let (dot, col) = if is_active {
+                        ("●", self.palette.boost)
+                    } else if here {
+                        ("●", self.palette.neutral)
+                    } else {
+                        ("○", self.palette.grid)
+                    };
+                    ui.colored_label(col, dot).on_hover_text(if here {
+                        "connected"
+                    } else {
+                        "remembered (absent)"
+                    });
+                    ui.label(s.sink_label(node)).on_hover_text(node.as_str());
+
+                    let cur: Option<&str> = map.get(node).map(String::as_str);
+                    let mut sel: Option<String> = cur.map(str::to_owned);
+                    let cur_text = sel.clone().unwrap_or_else(|| "—".to_string());
+                    egui::ComboBox::from_id_salt(("devmap", node))
+                        .selected_text(cur_text)
+                        .width(120.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut sel, None, "—");
+                            for p in &profiles {
+                                ui.selectable_value(&mut sel, Some(p.clone()), p);
+                            }
+                        });
+                    let new = sel.as_deref();
+                    if new != cur {
+                        match new {
+                            Some(p) => self.queue(Command::MapOutputFor {
+                                node_name: node.clone(),
+                                profile: p.to_string(),
+                            }),
+                            None => self.queue(Command::UnmapOutputFor {
+                                node_name: node.clone(),
+                            }),
+                        }
+                        self.needs_meta = true;
+                    }
+
+                    if ui
+                        .button("✕")
+                        .on_hover_text("forget device (re-adds when next connected)")
+                        .clicked()
+                    {
+                        self.queue(Command::ForgetSink {
+                            node_name: node.clone(),
+                        });
+                        self.needs_meta = true;
+                    }
+                    ui.end_row();
+                }
+            });
     }
 
     // ── Preset load dialog ──────────────────────────────────────────────────
@@ -1388,6 +1444,58 @@ impl GuiApp {
         }
         if !open || close {
             self.dialog = Dialog::None;
+        }
+    }
+
+    /// Modal to pick a destination path and export the current chain as a
+    /// Resonance `.toml` profile.
+    fn export_dialog(&mut self, ctx: &egui::Context) {
+        let Dialog::ExportProfile(path) = &mut self.dialog else {
+            return;
+        };
+        let mut do_export: Option<String> = None;
+        let mut close = false;
+        egui::Window::new("Export profile (.toml)")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label("Save the current settings to:");
+                ui.add(egui::TextEdit::singleline(path).desired_width(420.0));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Export").clicked() && !path.trim().is_empty() {
+                        do_export = Some(path.trim().to_string());
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if let Some(p) = do_export {
+            self.export_profile(p);
+            close = true;
+        }
+        if close {
+            self.dialog = Dialog::None;
+        }
+    }
+
+    /// Write the current chain to `path` as a `.toml` profile (round-trips via
+    /// the daemon so it captures the authoritative state).
+    fn export_profile(&mut self, path: String) {
+        let Some(ipc) = self.ipc.as_mut() else {
+            self.status = "not connected".into();
+            return;
+        };
+        match ipc.send_recv(Command::ExportProfile { path: path.clone() }) {
+            Ok(Response::Ok) => self.status = format!("exported → {path}"),
+            Ok(Response::Error(e)) => self.status = format!("export failed: {e}"),
+            Ok(_) => self.status = "export failed".into(),
+            Err(e) => {
+                self.status = format!("error: {e}");
+                self.ipc = None;
+            }
         }
     }
 
@@ -1552,12 +1660,4 @@ fn effect_values(state: &DaemonState, id: FxEffectId) -> (f64, bool) {
         FxEffectId::DynamicBoost => (e.dynamic_boost_intensity, e.dynamic_boost_enabled),
         FxEffectId::Bass => (e.bass_intensity, e.bass_enabled),
     }
-}
-
-/// Last path segment of a PipeWire node name, for compact display.
-fn short_name(node: &str) -> String {
-    if node.is_empty() {
-        return "(default)".to_string();
-    }
-    node.rsplit('.').next().unwrap_or(node).to_string()
 }

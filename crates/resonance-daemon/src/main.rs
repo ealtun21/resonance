@@ -98,6 +98,12 @@ async fn main() -> Result<()> {
             let mut inner = sinks_state.0.lock().unwrap();
             inner.available_sinks = sinks.iter().map(|(name, _)| name.clone()).collect();
             inner.sink_descriptions = descriptions;
+            // Keep mapped_profile in sync with the active output's mapping; with
+            // several devices present the active sink can be resolved here before
+            // an output-change event fires, so reconcile it from disk.
+            if let Some(active) = inner.active_output.clone() {
+                inner.mapped_profile = Mappings::load().get(&active).map(str::to_owned);
+            }
         }
     });
 

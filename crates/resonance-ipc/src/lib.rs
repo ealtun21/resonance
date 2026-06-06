@@ -53,6 +53,9 @@ pub enum Command {
     Reset,
     /// Export the current EQ (preamp + bands) to an EqualizerAPO `.txt` file
     ExportApo { path: String },
+    /// Export the full current chain state to our native `.toml` profile format
+    /// at an arbitrary path (round-trips via `ImportPreset` on a `.toml` file)
+    ExportProfile { path: String },
     /// Store the current chain state into an in-memory A/B slot ("a" or "b")
     StoreSlot { slot: AbSlot },
     /// Recall a previously stored A/B slot onto the chain
@@ -78,6 +81,13 @@ pub enum Command {
     MapOutput { profile: String },
     /// Remove the mapping for the current active output device
     UnmapOutput,
+    /// Map a specific output device (by node.name) to a profile
+    MapOutputFor { node_name: String, profile: String },
+    /// Remove the mapping for a specific output device (by node.name)
+    UnmapOutputFor { node_name: String },
+    /// Forget a remembered output device: drop it from the known-sinks registry
+    /// and its mapping. It re-appears when next plugged in / used as output.
+    ForgetSink { node_name: String },
     /// List all output→profile mappings
     ListMappings,
     /// Route the filter output to a specific PipeWire sink by node.name

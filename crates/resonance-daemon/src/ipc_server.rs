@@ -1,4 +1,4 @@
-use crate::config::{self, Mappings, Profile};
+use crate::config::{self, KnownSinks, Mappings, Profile};
 use crate::state::{AudioCommand, SharedState};
 use anyhow::Result;
 use resonance_dsp::chain::ProcessorChain;
@@ -107,21 +107,29 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
             Err(e) => Response::Error(e),
         },
 
-        Command::ImportPreset { path, name } => match parse_preset_file(&path) {
-            Ok(preset) => {
-                let raw = name.unwrap_or_else(|| file_stem_name(&path));
-                let profile_name = config::sanitize_name(&raw);
-                if profile_name.is_empty() {
-                    return Response::Error("profile name is empty".to_string());
+        Command::ImportPreset { path, name } => {
+            // Our own `.toml` exports load directly as a Profile; `.fac` / APO
+            // `.txt` go through the preset parser first.
+            let profile = if path.ends_with(".toml") {
+                config::load_profile_file(&path)
+            } else {
+                parse_preset_file(&path).map(|p| Profile::from_preset(&p))
+            };
+            match profile {
+                Ok(profile) => {
+                    let raw = name.unwrap_or_else(|| file_stem_name(&path));
+                    let profile_name = config::sanitize_name(&raw);
+                    if profile_name.is_empty() {
+                        return Response::Error("profile name is empty".to_string());
+                    }
+                    match config::save_profile(&profile_name, &profile) {
+                        Ok(()) => Response::Imported(profile_name),
+                        Err(e) => Response::Error(e),
+                    }
                 }
-                let profile = Profile::from_preset(&preset);
-                match config::save_profile(&profile_name, &profile) {
-                    Ok(()) => Response::Imported(profile_name),
-                    Err(e) => Response::Error(e),
-                }
+                Err(e) => Response::Error(e),
             }
-            Err(e) => Response::Error(e),
-        },
+        }
 
         Command::RenameProfile { from, to } => match config::rename_profile(&from, &to) {
             Ok(()) => Response::Ok,
@@ -187,6 +195,63 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
                 }
                 Err(e) => Response::Error(e),
             }
+        }
+
+        Command::MapOutputFor { node_name, profile } => {
+            if config::load_profile(&profile).is_err() {
+                return Response::Error(format!("profile '{profile}' not found"));
+            }
+            let mut maps = Mappings::load();
+            maps.set(node_name.clone(), profile.clone());
+            match maps.save() {
+                Ok(()) => {
+                    // If this is the device we're feeding right now, apply it.
+                    let is_active = state.0.lock().unwrap().active_output.as_deref()
+                        == Some(node_name.as_str());
+                    if is_active && load_profile(&profile, state).is_ok() {
+                        state.0.lock().unwrap().mapped_profile = Some(profile);
+                    }
+                    Response::Ok
+                }
+                Err(e) => Response::Error(e),
+            }
+        }
+
+        Command::UnmapOutputFor { node_name } => {
+            let mut maps = Mappings::load();
+            maps.remove(&node_name);
+            match maps.save() {
+                Ok(()) => {
+                    let mut inner = state.0.lock().unwrap();
+                    if inner.active_output.as_deref() == Some(node_name.as_str()) {
+                        inner.mapped_profile = None;
+                    }
+                    Response::Ok
+                }
+                Err(e) => Response::Error(e),
+            }
+        }
+
+        Command::ForgetSink { node_name } => {
+            // Drop both the remembered description and any mapping. PipeWire
+            // re-adds it (sinks task → KnownSinks::remember) when it next appears.
+            let mut known = KnownSinks::load();
+            known.devices.remove(&node_name);
+            let _ = known.save();
+            let mut maps = Mappings::load();
+            maps.remove(&node_name);
+            let _ = maps.save();
+            let mut inner = state.0.lock().unwrap();
+            let present: std::collections::HashSet<String> =
+                inner.available_sinks.iter().cloned().collect();
+            // Drop the description only if the device isn't currently present.
+            inner
+                .sink_descriptions
+                .retain(|(n, _)| n != &node_name || present.contains(n));
+            if inner.active_output.as_deref() == Some(node_name.as_str()) {
+                inner.mapped_profile = None;
+            }
+            Response::Ok
         }
 
         Command::ListMappings => Response::Mappings(Mappings::load().list()),
@@ -313,6 +378,14 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
             match std::fs::write(&path, text) {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error(format!("write '{path}': {e}")),
+            }
+        }
+
+        Command::ExportProfile { path } => {
+            let profile = Profile::from_state(&state.snapshot());
+            match config::export_profile_file(&path, &profile) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error(e),
             }
         }
 
