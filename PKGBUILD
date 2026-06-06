@@ -1,6 +1,9 @@
 # Maintainer: ealtun21 <ealtun21@ku.edu.tr>
-pkgname=resonance
-pkgver=0.1.0
+# 'resonance' is already taken on the AUR (an unrelated GTK4 music player),
+# so this package is named 'resonance-eq'. The installed binaries keep their
+# plain names (resonanced, resonance, resonance-tui, resonance-gui).
+pkgname=resonance-eq
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Terminal EQ daemon for Linux/PipeWire with FxSound .fac and EqualizerAPO preset support"
 arch=('x86_64')
@@ -8,7 +11,8 @@ url="https://github.com/ealtun21/resonance"
 license=('GPL-3.0-or-later')
 depends=('pipewire' 'libpipewire')
 makedepends=('cargo' 'pkgconf')
-conflicts=('resonance-git')
+provides=('resonanced')
+conflicts=('resonance-eq-git')
 # Build from the local checkout. For a tagged release source build use:
 #   source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 options=('!lto')

@@ -3810,7 +3810,7 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "resonance-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3823,7 +3823,7 @@ dependencies = [
 
 [[package]]
 name = "resonance-daemon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "libspa",
@@ -3846,7 +3846,7 @@ dependencies = [
 
 [[package]]
 name = "resonance-dsp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "approx",
  "biquad",
@@ -3857,7 +3857,7 @@ dependencies = [
 
 [[package]]
 name = "resonance-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "eframe",
@@ -3872,7 +3872,7 @@ dependencies = [
 
 [[package]]
 name = "resonance-ipc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "postcard",
  "resonance-dsp",
@@ -3882,7 +3882,7 @@ dependencies = [
 
 [[package]]
 name = "resonance-preset"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "resonance-dsp",
  "serde",
@@ -3891,7 +3891,7 @@ dependencies = [
 
 [[package]]
 name = "resonance-tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "crossterm",
