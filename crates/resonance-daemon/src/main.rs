@@ -30,8 +30,7 @@ async fn main() -> Result<()> {
     let (cmd_tx, cmd_rx) = RingBuffer::<state::AudioCommand>::new(256);
     let (spectrum_tx, spectrum_rx) = RingBuffer::<f32>::new(pw_node::SPECTRUM_BUF);
     let (route_tx, route_rx) = std::sync::mpsc::channel::<String>();
-    let (sinks_tx, mut sinks_rx) =
-        tokio::sync::mpsc::unbounded_channel::<Vec<(String, String)>>();
+    let (sinks_tx, mut sinks_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<(String, String)>>();
 
     let initial_chain = ProcessorChain::builder()
         .channels(2)

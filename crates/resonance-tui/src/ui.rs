@@ -632,11 +632,14 @@ fn render_bands(app: &App, frame: &mut Frame, area: Rect) {
         };
         // Type/Freq/Gain headers track their data alignment; the rest centre.
         let halign = match c {
-            1 => Alignment::Left,            // Type
-            0 | 2 | 3 => Alignment::Right,   // #, Freq, Gain
-            _ => Alignment::Center,          // Q, Enabled, Level
+            1 => Alignment::Left,          // Type
+            0 | 2 | 3 => Alignment::Right, // #, Freq, Gain
+            _ => Alignment::Center,        // Q, Enabled, Level
         };
-        frame.render_widget(Paragraph::new(*h).style(style).alignment(halign), hcols[ri(c)]);
+        frame.render_widget(
+            Paragraph::new(*h).style(style).alignment(halign),
+            hcols[ri(c)],
+        );
     }
 
     // ── Data rows (with scroll) ──
@@ -696,17 +699,19 @@ fn render_bands(app: &App, frame: &mut Frame, area: Rect) {
                 Style::default().fg(Color::DarkGray)
             } else {
                 let fg = match c {
-                    1 => Color::Cyan,                 // type
-                    2 => freq_color(b.freq),          // freq across the spectrum
-                    3 | 6 => gain_color(b.gain_db),   // gain text + bar
-                    5 => Color::Green,                // enabled dot
-                    _ => Color::Gray,                 // # and Q
+                    1 => Color::Cyan,               // type
+                    2 => freq_color(b.freq),        // freq across the spectrum
+                    3 | 6 => gain_color(b.gain_db), // gain text + bar
+                    5 => Color::Green,              // enabled dot
+                    _ => Color::Gray,               // # and Q
                 };
                 let s = Style::default().fg(fg);
                 if selected { s.bold() } else { s }
             };
             frame.render_widget(
-                Paragraph::new(text.as_str()).style(style).alignment(align(c)),
+                Paragraph::new(text.as_str())
+                    .style(style)
+                    .alignment(align(c)),
                 cols[ri(c)],
             );
         }
@@ -1098,7 +1103,12 @@ fn render_tab_mappings(s: &SettingsState, app: &App, frame: &mut Frame, area: Re
         .and_then(|st| st.mapped_profile.as_deref());
 
     let active_label = active_output
-        .map(|o| app.state.as_ref().map(|st| st.sink_label(o)).unwrap_or_else(|| o.to_string()))
+        .map(|o| {
+            app.state
+                .as_ref()
+                .map(|st| st.sink_label(o))
+                .unwrap_or_else(|| o.to_string())
+        })
         .unwrap_or_else(|| "none".to_string());
     frame.render_widget(
         Paragraph::new(format!(
