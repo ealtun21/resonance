@@ -140,6 +140,10 @@ fn mappings_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
+fn known_sinks_path() -> PathBuf {
+    config_dir().join("known_sinks.toml")
+}
+
 // ── Profile I/O ──────────────────────────────────────────────────────────────
 
 pub fn save_profile(name: &str, profile: &Profile) -> Result<(), String> {
@@ -237,6 +241,56 @@ impl Mappings {
 
     pub fn list(&self) -> Vec<(String, String)> {
         self.mappings
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+}
+
+// ── Known sinks (every output device ever seen → its friendly description) ────
+//
+// PipeWire only reports the *currently present* sinks. Once a device unplugs we
+// lose its `node.description`, so any output→profile mapping for it would render
+// as a bare node name and be hard to recognise. We persist a registry of every
+// sink we have ever observed; clients merge it in so labels and mappings survive
+// a device being removed and reconnected.
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+pub struct KnownSinks {
+    #[serde(default)]
+    pub devices: BTreeMap<String, String>,
+}
+
+impl KnownSinks {
+    pub fn load() -> Self {
+        std::fs::read_to_string(known_sinks_path())
+            .ok()
+            .and_then(|c| toml::from_str(&c).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self) -> Result<(), String> {
+        std::fs::create_dir_all(config_dir()).map_err(|e| e.to_string())?;
+        let toml = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
+        std::fs::write(known_sinks_path(), toml).map_err(|e| e.to_string())
+    }
+
+    /// Record a `node.name → description`. Returns true if it added or changed an
+    /// entry (so the caller can skip writing the file when nothing changed).
+    pub fn remember(&mut self, name: String, desc: String) -> bool {
+        if desc.is_empty() {
+            return false;
+        }
+        match self.devices.get(&name) {
+            Some(d) if d == &desc => false,
+            _ => {
+                self.devices.insert(name, desc);
+                true
+            }
+        }
+    }
+
+    pub fn list(&self) -> Vec<(String, String)> {
+        self.devices
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()

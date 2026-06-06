@@ -7,7 +7,7 @@ mod spectrum;
 mod state;
 
 use anyhow::Result;
-use config::{Mappings, Profile};
+use config::{KnownSinks, Mappings, Profile};
 use resonance_dsp::chain::ProcessorChain;
 use rtrb::RingBuffer;
 use tracing::{info, warn};
@@ -75,9 +75,29 @@ async fn main() -> Result<()> {
     let sinks_state = shared.clone();
     tokio::spawn(async move {
         while let Some(sinks) = sinks_rx.recv().await {
+            // Fold the freshly-seen sinks into the persistent known-device
+            // registry so descriptions survive a device being unplugged.
+            let mut known = KnownSinks::load();
+            let mut changed = false;
+            for (name, desc) in &sinks {
+                changed |= known.remember(name.clone(), desc.clone());
+            }
+            if changed {
+                if let Err(e) = known.save() {
+                    warn!("could not persist known sinks: {e}");
+                }
+            }
+            // Descriptions = present sinks first, then any remembered device not
+            // currently present, so mappings for absent devices still get a name.
+            let mut descriptions = sinks.clone();
+            for (name, desc) in known.list() {
+                if !descriptions.iter().any(|(n, _)| n == &name) {
+                    descriptions.push((name, desc));
+                }
+            }
             let mut inner = sinks_state.0.lock().unwrap();
             inner.available_sinks = sinks.iter().map(|(name, _)| name.clone()).collect();
-            inner.sink_descriptions = sinks;
+            inner.sink_descriptions = descriptions;
         }
     });
 

@@ -51,6 +51,15 @@ impl Theme {
         Theme::Matugen,
     ];
 
+    /// Resolve a theme from its [`label`](Self::label); used to restore the
+    /// persisted choice across runs. Unknown labels fall back to `System`.
+    pub fn from_label(s: &str) -> Theme {
+        Theme::ALL
+            .into_iter()
+            .find(|t| t.label() == s)
+            .unwrap_or(Theme::System)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Theme::System => "System dark",

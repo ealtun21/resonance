@@ -50,6 +50,11 @@ const EFFECTS: [(FxEffectId, &str); 5] = [
     (FxEffectId::Bass, "Bass"),
 ];
 
+/// Editable per-band limits. Generous so extreme cuts/boosts and very narrow
+/// notches are possible; the daemon/DSP impose no limit of their own.
+const GAIN_LIMIT: f64 = 40.0;
+const Q_LIMIT: f64 = 100.0;
+
 const BAND_TYPES: [BandType; 8] = [
     BandType::Peaking,
     BandType::LowShelf,
@@ -64,6 +69,15 @@ const BAND_TYPES: [BandType; 8] = [
 enum Dialog {
     None,
     LoadPreset(Browser),
+}
+
+/// A pending destructive/overwriting profile action awaiting confirmation.
+#[derive(Clone)]
+enum Confirm {
+    /// Overwrite an existing profile of this name with the current chain.
+    SaveProfile(String),
+    /// Delete this profile.
+    DeleteProfile(String),
 }
 
 /// A zero-arg systemd service action (start/stop/restart/…).
@@ -81,6 +95,8 @@ pub struct GuiApp {
     pending: Vec<Command>,
     needs_meta: bool,
     dialog: Dialog,
+    /// Pending profile save-overwrite / delete awaiting a yes/no modal.
+    confirm: Option<Confirm>,
     selected_band: usize,
     drag_band: Option<usize>,
     /// True while the active curve drag edits Q (right button) vs freq+gain.
@@ -108,7 +124,13 @@ pub struct GuiApp {
 impl GuiApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install_symbol_fonts(&cc.egui_ctx);
-        let theme = Theme::System;
+        // Restore the persisted theme (panel sizes restore automatically via
+        // eframe's egui-memory persistence).
+        let theme = cc
+            .storage
+            .and_then(|s| s.get_string("theme"))
+            .map(|s| Theme::from_label(&s))
+            .unwrap_or(Theme::System);
         cc.egui_ctx.set_visuals(theme.visuals());
         let mut app = Self {
             ipc: None,
@@ -122,6 +144,7 @@ impl GuiApp {
             pending: Vec::new(),
             needs_meta: false,
             dialog: Dialog::None,
+            confirm: None,
             selected_band: 0,
             drag_band: None,
             drag_q: false,
@@ -316,6 +339,13 @@ impl GuiApp {
 }
 
 impl eframe::App for GuiApp {
+    /// Persist the chosen theme. Panel sizes are saved by eframe's egui-memory
+    /// persistence (enabled by the `persistence` feature + default
+    /// `persist_egui_memory`).
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string("theme", self.theme.label().to_string());
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Reconnect / poll.
         if self.ipc.is_none() {
@@ -402,6 +432,7 @@ impl eframe::App for GuiApp {
 
         let ctx = ui.ctx().clone();
         self.preset_dialog(&ctx);
+        self.confirm_dialog(&ctx);
 
         self.dispatch();
 
@@ -476,6 +507,31 @@ impl GuiApp {
             }
             if let Some(p) = state.as_ref().and_then(|s| s.current_preset.as_ref()) {
                 ui.label(format!("▸ {p}"));
+            }
+
+            // Output device picker lives in the title bar now (was the side
+            // panel) so switching sinks is one click from anywhere.
+            if let Some(s) = &state {
+                ui.separator();
+                ui.label("🔊");
+                let current = s
+                    .preferred_output
+                    .clone()
+                    .or_else(|| s.active_output.clone())
+                    .unwrap_or_default();
+                let mut sel = current.clone();
+                egui::ComboBox::from_id_salt("toolbar_sink")
+                    .selected_text(s.sink_label(&sel))
+                    .width(180.0)
+                    .show_ui(ui, |ui| {
+                        for sink in &s.available_sinks {
+                            let label = s.sink_label(sink);
+                            ui.selectable_value(&mut sel, sink.clone(), label);
+                        }
+                    });
+                if sel != current && !sel.is_empty() {
+                    self.queue(Command::SetOutputTarget { node_name: sel });
+                }
             }
 
             ui.separator();
@@ -717,26 +773,41 @@ impl GuiApp {
 
         painter.rect_filled(rect, 4.0, pal.graph_bg);
 
-        let db = curve::DB_RANGE;
+        // Inset the plotting area so nodes and the curve never sit flush against
+        // the panel edge — a few px of breathing room on every side.
+        let plot = rect.shrink2(egui::vec2(8.0, 8.0));
+
+        // Response curve + auto-scaled dB axis: the axis grows to fit the
+        // loudest point (curve peak or any band's gain) plus 5 dB headroom, so
+        // big boosts/cuts stay on-screen with margin instead of clipping.
+        let pts = curve::curve_points(&state.bands, state.sample_rate, 240);
+        let peak = pts
+            .iter()
+            .map(|&(_, g)| g.abs())
+            .chain(state.bands.iter().map(|b| b.gain_db.abs()))
+            .fold(0.0_f64, f64::max);
+        let (db, db_step) = curve::display_range(peak + 5.0);
         let x_of = |logf: f64| -> f32 {
-            rect.left()
+            plot.left()
                 + ((logf - curve::LOG_MIN) / (curve::LOG_MAX - curve::LOG_MIN)) as f32
-                    * rect.width()
+                    * plot.width()
         };
         let y_of = |gain: f64| -> f32 {
-            rect.top() + (1.0 - ((gain + db) / (2.0 * db)) as f32) * rect.height()
+            plot.top() + (1.0 - ((gain + db) / (2.0 * db)) as f32) * plot.height()
         };
         let logf_of = |x: f32| -> f64 {
             curve::LOG_MIN
-                + ((x - rect.left()) / rect.width()) as f64 * (curve::LOG_MAX - curve::LOG_MIN)
+                + ((x - plot.left()) / plot.width()) as f64 * (curve::LOG_MAX - curve::LOG_MIN)
         };
         let db_of =
-            |y: f32| -> f64 { ((1.0 - (y - rect.top()) / rect.height()) as f64) * 2.0 * db - db };
+            |y: f32| -> f64 { ((1.0 - (y - plot.top()) / plot.height()) as f64) * 2.0 * db - db };
 
-        // Horizontal dB grid lines.
+        // Horizontal dB grid lines at multiples of the step within ±range.
         let label_col = pal.neutral;
         let grid = egui::Stroke::new(1.0, pal.grid.gamma_multiply(0.6));
-        for g in [-12.0, -6.0, 0.0, 6.0, 12.0] {
+        let n_lines = (db / db_step) as i32;
+        for k in -n_lines..=n_lines {
+            let g = k as f64 * db_step;
             let y = y_of(g);
             let stroke = if g == 0.0 {
                 // Emphasised 0 dB reference line.
@@ -745,11 +816,11 @@ impl GuiApp {
                 grid
             };
             painter.line_segment(
-                [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+                [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
                 stroke,
             );
             painter.text(
-                egui::pos2(rect.left() + 2.0, y),
+                egui::pos2(plot.left() + 2.0, y),
                 egui::Align2::LEFT_CENTER,
                 format!("{g:+.0}"),
                 egui::FontId::monospace(9.0),
@@ -760,11 +831,11 @@ impl GuiApp {
         for (logf, label) in curve::x_axis_ticks() {
             let x = x_of(logf);
             painter.line_segment(
-                [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                [egui::pos2(x, plot.top()), egui::pos2(x, plot.bottom())],
                 grid,
             );
             painter.text(
-                egui::pos2(x, rect.bottom() - 2.0),
+                egui::pos2(x, plot.bottom() - 2.0),
                 egui::Align2::CENTER_BOTTOM,
                 label,
                 egui::FontId::monospace(9.0),
@@ -774,7 +845,6 @@ impl GuiApp {
 
         // Response curve — colour-coded by gain: each segment is tinted toward
         // boost (green) or cut (red), neutral near 0 dB.
-        let pts = curve::curve_points(&state.bands, state.sample_rate, 240);
         for w in pts.windows(2) {
             let (lf0, g0) = w[0];
             let (lf1, g1) = w[1];
@@ -805,8 +875,9 @@ impl GuiApp {
                 if let Some(i) = nearest_band(state, p, &x_of, &y_of) {
                     self.drag_band = Some(i);
                     self.selected_band = i;
-                    // Locked nodes ignore the Q gesture entirely.
-                    self.drag_q = started_secondary && self.vlock != Some(i);
+                    // Right button always tunes Q — the vertical lock pins only
+                    // frequency, never Q.
+                    self.drag_q = started_secondary;
                 }
             }
         }
@@ -817,7 +888,7 @@ impl GuiApp {
                 if dy != 0.0 {
                     if let Some(b) = state.bands.get(i) {
                         // Exponential so Q scales smoothly across its range.
-                        let q = (b.q * (-dy * 0.015).exp()).clamp(0.1, 20.0);
+                        let q = (b.q * (-dy * 0.015).exp()).clamp(0.1, Q_LIMIT);
                         self.queue_edit(Command::SetBand {
                             index: i,
                             freq: b.freq,
@@ -826,9 +897,7 @@ impl GuiApp {
                         });
                     }
                 }
-            } else if !self.drag_q
-                && (response.dragged_by(Primary) || (locked && response.dragged_by(Secondary)))
-            {
+            } else if !self.drag_q && response.dragged_by(Primary) {
                 if let Some(p) = response.interact_pointer_pos() {
                     if let Some(b) = state.bands.get(i) {
                         // Locked: keep freq, move gain only.
@@ -837,7 +906,7 @@ impl GuiApp {
                         } else {
                             10f64.powf(logf_of(p.x)).clamp(20.0, 20000.0)
                         };
-                        let gain = db_of(p.y).clamp(-20.0, 20.0);
+                        let gain = db_of(p.y).clamp(-GAIN_LIMIT, GAIN_LIMIT);
                         self.queue_edit(Command::SetBand {
                             index: i,
                             freq,
@@ -856,7 +925,7 @@ impl GuiApp {
         if response.double_clicked_by(Primary) {
             if let Some(p) = response.interact_pointer_pos() {
                 let freq = 10f64.powf(logf_of(p.x)).clamp(20.0, 20000.0);
-                let gain = db_of(p.y).clamp(-20.0, 20.0);
+                let gain = db_of(p.y).clamp(-GAIN_LIMIT, GAIN_LIMIT);
                 self.queue_edit(Command::AddBand {
                     band_type: BandType::Peaking,
                     freq,
@@ -871,7 +940,12 @@ impl GuiApp {
             if !b.enabled {
                 continue;
             }
-            let center = egui::pos2(x_of(curve::clampf_log(b.freq)), y_of(b.gain_db));
+            // Clamp the node inside the plot so it can never draw off-screen
+            // even if the response momentarily exceeds the axis.
+            let center = egui::pos2(
+                x_of(curve::clampf_log(b.freq)).clamp(plot.left(), plot.right()),
+                y_of(b.gain_db).clamp(plot.top(), plot.bottom()),
+            );
             let selected = i == self.selected_band;
             let locked = self.vlock == Some(i);
             // Locked node: a vertical guide spanning the plot with end caps, so
@@ -881,12 +955,12 @@ impl GuiApp {
                 let stroke = egui::Stroke::new(1.0, pal.highlight);
                 painter.line_segment(
                     [
-                        egui::pos2(x, rect.top() + 2.0),
-                        egui::pos2(x, rect.bottom() - 2.0),
+                        egui::pos2(x, plot.top() + 2.0),
+                        egui::pos2(x, plot.bottom() - 2.0),
                     ],
                     stroke,
                 );
-                for cap_y in [rect.top() + 2.0, rect.bottom() - 2.0] {
+                for cap_y in [plot.top() + 2.0, plot.bottom() - 2.0] {
                     painter.line_segment(
                         [egui::pos2(x - 4.0, cap_y), egui::pos2(x + 4.0, cap_y)],
                         stroke,
@@ -1083,7 +1157,7 @@ impl GuiApp {
                         .add(
                             egui::DragValue::new(&mut gain)
                                 .speed(0.1)
-                                .range(-20.0..=20.0)
+                                .range(-GAIN_LIMIT..=GAIN_LIMIT)
                                 .fixed_decimals(1),
                         )
                         .changed();
@@ -1091,7 +1165,7 @@ impl GuiApp {
                         .add(
                             egui::DragValue::new(&mut q)
                                 .speed(0.02)
-                                .range(0.1..=20.0)
+                                .range(0.1..=Q_LIMIT)
                                 .fixed_decimals(2),
                         )
                         .changed();
@@ -1125,29 +1199,20 @@ impl GuiApp {
     fn side_panel(&mut self, ui: &mut egui::Ui) {
         let state = self.state.clone();
 
-        ui.heading("Output device");
+        // Output is chosen from the title bar now; this panel only shows the
+        // current sink→profile mapping and lets you map/unmap it.
+        ui.heading("Output mapping");
         if let Some(s) = &state {
-            let current = s
-                .preferred_output
-                .clone()
-                .or_else(|| s.active_output.clone())
-                .unwrap_or_default();
-            let mut sel = current.clone();
-            egui::ComboBox::from_id_salt("sink")
-                .selected_text(s.sink_label(&sel))
-                .width(ui.available_width() - 10.0)
-                .show_ui(ui, |ui| {
-                    for sink in &s.available_sinks {
-                        let label = s.sink_label(sink);
-                        ui.selectable_value(&mut sel, sink.clone(), label);
-                    }
-                });
-            if sel != current && !sel.is_empty() {
-                self.queue(Command::SetOutputTarget { node_name: sel });
-            }
-            if let Some(mp) = &s.mapped_profile {
-                ui.label(format!("mapped profile: {mp}"));
-            }
+            let out_label = s
+                .active_output
+                .as_deref()
+                .map(|o| s.sink_label(o))
+                .unwrap_or_else(|| "(none)".to_string());
+            ui.label(format!("active: {out_label}"));
+            match &s.mapped_profile {
+                Some(mp) => ui.label(format!("mapped → {mp}")),
+                None => ui.label("not mapped"),
+            };
             ui.horizontal(|ui| {
                 if ui.button("Map active→profile").clicked() {
                     if let Some(name) = self.profiles.first().cloned() {
@@ -1175,10 +1240,15 @@ impl GuiApp {
         ui.horizontal(|ui| {
             ui.text_edit_singleline(&mut self.profile_name);
             if ui.button("Save").clicked() && !self.profile_name.trim().is_empty() {
-                self.queue(Command::SaveProfile {
-                    name: self.profile_name.trim().to_string(),
-                });
-                self.needs_meta = true;
+                let name = self.profile_name.trim().to_string();
+                // Overwriting an existing profile asks first; a brand-new name
+                // saves straight away.
+                if self.profiles.iter().any(|p| p == &name) {
+                    self.confirm = Some(Confirm::SaveProfile(name));
+                } else {
+                    self.queue(Command::SaveProfile { name });
+                    self.needs_meta = true;
+                }
             }
         });
         let profiles = self.profiles.clone();
@@ -1190,9 +1260,8 @@ impl GuiApp {
                         if ui.button("Load").clicked() {
                             self.queue(Command::LoadProfile { name: name.clone() });
                         }
-                        if ui.button("✕").clicked() {
-                            self.queue(Command::DeleteProfile { name: name.clone() });
-                            self.needs_meta = true;
+                        if ui.button("✕").on_hover_text("delete profile").clicked() {
+                            self.confirm = Some(Confirm::DeleteProfile(name.clone()));
                         }
                         if ui
                             .button("Rename")
@@ -1321,6 +1390,61 @@ impl GuiApp {
             self.dialog = Dialog::None;
         }
     }
+
+    /// Yes/no modal for overwriting or deleting a profile (destructive actions
+    /// confirm before running).
+    fn confirm_dialog(&mut self, ctx: &egui::Context) {
+        let Some(action) = self.confirm.clone() else {
+            return;
+        };
+        let (title, body, ok_label) = match &action {
+            Confirm::SaveProfile(name) => (
+                "Overwrite profile",
+                format!(
+                    "Profile '{name}' already exists.\nOverwrite it with the current settings?"
+                ),
+                "Overwrite",
+            ),
+            Confirm::DeleteProfile(name) => (
+                "Delete profile",
+                format!("Really delete profile '{name}'?\nThis cannot be undone."),
+                "Delete",
+            ),
+        };
+        let mut decision: Option<bool> = None;
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(body);
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let ok = egui::Button::new(
+                        egui::RichText::new(ok_label).color(egui::Color32::WHITE),
+                    )
+                    .fill(self.palette.cut);
+                    if ui.add(ok).clicked() {
+                        decision = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        decision = Some(false);
+                    }
+                });
+            });
+        match decision {
+            Some(true) => {
+                match action {
+                    Confirm::SaveProfile(name) => self.queue(Command::SaveProfile { name }),
+                    Confirm::DeleteProfile(name) => self.queue(Command::DeleteProfile { name }),
+                }
+                self.needs_meta = true;
+                self.confirm = None;
+            }
+            Some(false) => self.confirm = None,
+            None => {}
+        }
+    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -1372,7 +1496,7 @@ fn nearest_band(
 /// Colour for a gain value: neutral accent near 0, tinting toward boost (green)
 /// or cut (red) as magnitude grows — the FR curve's colour coding.
 fn gain_color(db: f64, pal: &Palette) -> egui::Color32 {
-    let t = (db.abs() / curve::DB_RANGE).clamp(0.0, 1.0) as f32;
+    let t = (db.abs() / GAIN_LIMIT).clamp(0.0, 1.0) as f32;
     if db.abs() < 0.3 {
         return pal.accent;
     }
@@ -1400,7 +1524,7 @@ fn gain_bar(ui: &mut egui::Ui, db: f64, pal: &Palette) {
         ],
         egui::Stroke::new(1.0, pal.grid),
     );
-    let t = (db / curve::DB_RANGE).clamp(-1.0, 1.0) as f32;
+    let t = (db / GAIN_LIMIT).clamp(-1.0, 1.0) as f32;
     let half = rect.width() * 0.5 - 2.0;
     let w = t.abs() * half;
     if w >= 1.0 {

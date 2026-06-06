@@ -8,7 +8,29 @@ use resonance_ipc::{BandState, BandType};
 
 pub const LOG_MIN: f64 = 1.301_029_9; // log10(20)
 pub const LOG_MAX: f64 = 4.301_029_9; // log10(20000)
+/// Smallest (default) ± dB the FR graph shows; it auto-expands past this.
 pub const DB_RANGE: f64 = 18.0;
+/// Absolute cap the response is clamped to (and the largest the axis grows to).
+pub const MAX_DB: f64 = 60.0;
+
+/// Pick a "nice" ± dB axis range (and grid step) that fits `peak_db`. The axis
+/// starts at ±[`DB_RANGE`] and grows through fixed stops up to ±[`MAX_DB`].
+pub fn display_range(peak_db: f64) -> (f64, f64) {
+    const STOPS: [(f64, f64); 6] = [
+        (DB_RANGE, 6.0),
+        (24.0, 8.0),
+        (30.0, 10.0),
+        (40.0, 10.0),
+        (50.0, 10.0),
+        (60.0, 20.0),
+    ];
+    for (range, step) in STOPS {
+        if peak_db <= range * 0.98 {
+            return (range, step);
+        }
+    }
+    (MAX_DB, 20.0)
+}
 
 /// Combined frequency response in dB at `freq_hz`.
 pub fn response_db(bands: &[BandState], freq_hz: f64, sample_rate: f64) -> f64 {
@@ -53,7 +75,7 @@ pub fn curve_points(bands: &[BandState], sample_rate: f64, n: usize) -> Vec<(f64
                     best = db;
                 }
             }
-            (log_freq, best.clamp(-DB_RANGE, DB_RANGE))
+            (log_freq, best.clamp(-MAX_DB, MAX_DB))
         })
         .collect()
 }
