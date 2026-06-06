@@ -498,6 +498,14 @@ impl GuiApp {
             ui.separator();
             self.theme_menu(ui);
 
+            if ui
+                .button("Reset layout")
+                .on_hover_text("restore default panel sizes")
+                .clicked()
+            {
+                self.reset_layout(ui.ctx());
+            }
+
             ui.separator();
             if let Some(s) = &state {
                 self.meters_widget(ui, s);
@@ -560,6 +568,16 @@ impl GuiApp {
                 }
             },
         );
+    }
+
+    /// Clear the persisted panel sizes so the resizable panels fall back to
+    /// their defaults next frame.
+    fn reset_layout(&mut self, ctx: &egui::Context) {
+        use egui::containers::panel::PanelState;
+        for id in ["fr", "spectrum", "side"] {
+            ctx.data_mut(|d| d.remove::<PanelState>(egui::Id::new(id)));
+        }
+        self.status = "layout reset".into();
     }
 
     /// Theme picker combo box.

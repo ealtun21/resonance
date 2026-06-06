@@ -35,7 +35,8 @@ ratatui = "0.30"
 crossterm = "0.29"
 
 # GUI
-eframe = "0.34"
+# `persistence` lets eframe save egui memory (panel sizes, etc.) between runs.
+eframe = { version = "0.34", features = ["persistence"] }
 egui = "0.34"
 
 # Audio / PipeWire
