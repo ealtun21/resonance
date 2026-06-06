@@ -7,3 +7,6 @@ target/
 /pkg/
 /src/
 *.pkg.tar.zst
+
+# macOS app bundle (contrib/macos/build-app.sh output)
+/Resonance.app/

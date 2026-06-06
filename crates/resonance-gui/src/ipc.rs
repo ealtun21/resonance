@@ -9,7 +9,6 @@ use resonance_ipc::{
     transport::{read_response, write_command},
 };
 use std::{
-    env,
     io::{BufReader, BufWriter, Write},
     os::unix::net::UnixStream,
     path::PathBuf,
@@ -56,9 +55,5 @@ impl IpcClient {
 }
 
 fn socket_path() -> PathBuf {
-    if let Ok(p) = env::var(resonance_ipc::SOCKET_PATH_ENV) {
-        return PathBuf::from(p);
-    }
-    let runtime = env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(runtime).join(resonance_ipc::DEFAULT_SOCKET_FILENAME)
+    resonance_ipc::paths::default_socket_path()
 }

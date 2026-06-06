@@ -1,10 +1,12 @@
-/// PipeWire backend — mirrors FxSound AudioPassthruPipeWire architecture:
-///   1. null-audio-sink "Resonance EQ" — routable device; apps play into it.
-///   2. pw_filter "Resonance EQ Processor" — 2-in/2-out, driven by same clock
-///      as the sink (no ring-buffer choppy artefacts).
-///   3. Registry listener creates links: sink-monitor → filter-in,
-///      filter-out → real device.
-///   4. WirePlumber metadata sets "Resonance EQ" as system default sink.
+//! PipeWire backend — mirrors FxSound AudioPassthruPipeWire architecture:
+//!   1. null-audio-sink "Resonance EQ" — routable device; apps play into it.
+//!   2. pw_filter "Resonance EQ Processor" — 2-in/2-out, driven by same clock
+//!      as the sink (no ring-buffer choppy artefacts).
+//!   3. Registry listener creates links: sink-monitor → filter-in,
+//!      filter-out → real device.
+//!   4. WirePlumber metadata sets "Resonance EQ" as system default sink.
+
+use super::{CHANNELS, SAMPLE_RATE, apply_command};
 use crate::meters::{AtomicMeters, Sample, peak_rms, peak_rms_f32};
 use crate::state::AudioCommand;
 use anyhow::Result;
@@ -22,10 +24,6 @@ use std::{
     time::{Duration, Instant},
 };
 use tracing::info;
-
-pub const CHANNELS: usize = 2;
-pub const SAMPLE_RATE: u32 = 48000;
-pub const SPECTRUM_BUF: usize = 8192;
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -742,82 +740,6 @@ unsafe extern "C" fn filter_process_cb(data: *mut c_void, position: *mut spa_io_
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AudioCommand dispatch
-// ─────────────────────────────────────────────────────────────────────────────
-
-fn apply_command(chain: &mut ProcessorChain, cmd: AudioCommand) {
-    match cmd {
-        AudioCommand::SetPower(on) => chain.enabled = on,
-        AudioCommand::SetPreamp(db) => chain.preamp_db = db,
-        AudioCommand::SetEffectIntensity { effect, value } => {
-            chain.set_effect_intensity(effect, value)
-        }
-        AudioCommand::SetEffectEnabled { effect, on } => chain.set_effect_enabled(effect, on),
-        AudioCommand::ReplaceChain(c) => *chain = *c,
-        AudioCommand::Reset => chain.reset(),
-        AudioCommand::SetBand {
-            index,
-            freq,
-            gain_db,
-            q,
-        } => {
-            let sr = chain.sample_rate;
-            if let Some(f) = chain.filters.get_mut(index) {
-                // Update coefficients in place — preserves filter state so rapid
-                // live edits don't reset history and crackle.
-                let _ = f.update(f.filter_type, freq, gain_db, q, sr);
-            }
-        }
-        AudioCommand::SetBandEnabled { index, enabled } => {
-            if let Some(f) = chain.filters.get_mut(index) {
-                f.enabled = enabled;
-            }
-        }
-        AudioCommand::AddBand {
-            band_type,
-            freq,
-            gain_db,
-            q,
-        } => {
-            if let Ok(f) = build_band(chain, band_type.into(), freq, gain_db, q, true) {
-                chain.filters.push(f);
-            }
-        }
-        AudioCommand::RemoveBand { index } => {
-            if index < chain.filters.len() {
-                chain.filters.remove(index);
-            }
-        }
-        AudioCommand::SetBandType { index, band_type } => {
-            let sr = chain.sample_rate;
-            if let Some(f) = chain.filters.get_mut(index) {
-                let _ = f.update(band_type.into(), f.freq, f.gain_db, f.q, sr);
-            }
-        }
-    }
-}
-
-/// Build an `ApoFilter` matching the chain's sample rate / channel count.
-fn build_band(
-    chain: &ProcessorChain,
-    filter_type: resonance_dsp::filter::FilterType,
-    freq: f64,
-    gain_db: f64,
-    q: f64,
-    enabled: bool,
-) -> Result<resonance_dsp::filter::ApoFilter, resonance_dsp::filter::FilterError> {
-    resonance_dsp::filter::ApoFilter::builder()
-        .filter_type(filter_type)
-        .freq(freq)
-        .gain_db(gain_db)
-        .q(q)
-        .enabled(enabled)
-        .channels(chain.channels)
-        .sample_rate(chain.sample_rate)
-        .build()
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Raw pw_properties helper (for pw_filter FFI only)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -837,15 +759,6 @@ fn pw_props_raw(pairs: &[(&str, &str)]) -> *mut pw_sys::pw_properties {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use resonance_dsp::filter::FilterType;
-    use resonance_ipc::BandType;
-
-    fn chain() -> ProcessorChain {
-        ProcessorChain::builder()
-            .channels(2)
-            .sample_rate(48000.0)
-            .build()
-    }
 
     #[test]
     fn parse_metadata_name_extracts_sink() {
@@ -860,74 +773,5 @@ mod tests {
         );
         assert_eq!(parse_metadata_name("null"), None);
         assert_eq!(parse_metadata_name("{}"), None);
-    }
-
-    #[test]
-    fn add_band_uses_requested_type() {
-        let mut c = chain();
-        apply_command(
-            &mut c,
-            AudioCommand::AddBand {
-                band_type: BandType::HighShelf,
-                freq: 8000.0,
-                gain_db: 4.0,
-                q: 0.7,
-            },
-        );
-        assert_eq!(c.filters.len(), 1);
-        assert_eq!(c.filters[0].filter_type, FilterType::HighShelf);
-    }
-
-    #[test]
-    fn set_band_type_preserves_freq_gain_q() {
-        let mut c = chain();
-        apply_command(
-            &mut c,
-            AudioCommand::AddBand {
-                band_type: BandType::Peaking,
-                freq: 1000.0,
-                gain_db: 6.0,
-                q: 2.0,
-            },
-        );
-        apply_command(
-            &mut c,
-            AudioCommand::SetBandType {
-                index: 0,
-                band_type: BandType::LowPass,
-            },
-        );
-        let f = &c.filters[0];
-        assert_eq!(f.filter_type, FilterType::LowPassQ); // BandType::LowPass → LowPassQ
-        assert!((f.freq - 1000.0).abs() < 1e-9);
-        assert!((f.gain_db - 6.0).abs() < 1e-9);
-        assert!((f.q - 2.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn remove_band_out_of_range_is_noop() {
-        let mut c = chain();
-        apply_command(
-            &mut c,
-            AudioCommand::AddBand {
-                band_type: BandType::Peaking,
-                freq: 1000.0,
-                gain_db: 0.0,
-                q: 1.0,
-            },
-        );
-        apply_command(&mut c, AudioCommand::RemoveBand { index: 5 });
-        assert_eq!(c.filters.len(), 1);
-        apply_command(&mut c, AudioCommand::RemoveBand { index: 0 });
-        assert_eq!(c.filters.len(), 0);
-    }
-
-    #[test]
-    fn preamp_and_power_commands_apply() {
-        let mut c = chain();
-        apply_command(&mut c, AudioCommand::SetPreamp(-6.0));
-        apply_command(&mut c, AudioCommand::SetPower(false));
-        assert!((c.preamp_db + 6.0).abs() < 1e-9);
-        assert!(!c.enabled);
     }
 }

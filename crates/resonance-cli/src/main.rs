@@ -8,7 +8,6 @@ use resonance_ipc::{
     transport::{read_response, write_command},
 };
 use std::{
-    env,
     io::{self, BufReader, BufWriter, IsTerminal, Write},
     os::unix::net::UnixStream,
     path::PathBuf,
@@ -118,7 +117,8 @@ enum Sub {
     },
     /// Send a raw shutdown signal to the daemon
     Shutdown,
-    /// Manage the resonanced systemd user service (start/stop/autostart)
+    /// Manage the resonanced user service (start/stop/autostart).
+    /// Backed by systemd on Linux, launchd on macOS.
     Daemon {
         #[command(subcommand)]
         action: DaemonAction,
@@ -142,9 +142,9 @@ enum DaemonAction {
     Enable,
     /// Disable autostart and stop now
     Disable,
-    /// Write/refresh the systemd user unit file
+    /// Write/refresh the user service unit (systemd unit or launchd plist)
     Install,
-    /// Remove the systemd user unit file
+    /// Remove the user service unit (systemd unit or launchd plist)
     Uninstall,
     /// Show service install/active/enabled status (default)
     Status,
@@ -184,7 +184,8 @@ fn main() -> Result<()> {
         return print_response(resp);
     }
 
-    // `daemon` controls the systemd user service; it never touches the socket.
+    // `daemon` controls the user service (systemd on Linux, launchd on
+    // macOS); it never touches the socket.
     if let Sub::Daemon { action } = &sub {
         return run_daemon(action);
     }
@@ -244,6 +245,9 @@ fn run_daemon(action: &DaemonAction) -> Result<()> {
     use resonance_ipc::service;
     let p = Paint::auto();
     if !service::systemd_available() {
+        #[cfg(target_os = "macos")]
+        bail!("launchctl is not available; cannot manage the daemon service");
+        #[cfg(not(target_os = "macos"))]
         bail!("systemctl --user is not available; cannot manage the daemon service");
     }
     match action {
@@ -521,9 +525,5 @@ fn parse_effect(s: &str) -> Result<FxEffectId> {
 }
 
 fn socket_path() -> PathBuf {
-    if let Ok(p) = env::var(resonance_ipc::SOCKET_PATH_ENV) {
-        return PathBuf::from(p);
-    }
-    let runtime = env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(runtime).join(resonance_ipc::DEFAULT_SOCKET_FILENAME)
+    resonance_ipc::paths::default_socket_path()
 }

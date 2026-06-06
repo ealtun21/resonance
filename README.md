@@ -1,9 +1,16 @@
 # Resonance
 
-A terminal-driven equalizer daemon for Linux / PipeWire. Resonance captures system
-audio, runs it through an `f64` DSP chain (parametric EQ + FxSound-style effects),
-and plays the processed result back. It loads FxSound `.fac` presets and
-EqualizerAPO `.txt` configs.
+A terminal-driven equalizer daemon. Resonance routes audio through an `f64`
+DSP chain (parametric EQ + FxSound-style effects) and plays the processed
+result back. It loads FxSound `.fac` presets and EqualizerAPO `.txt` configs.
+
+**Platforms:**
+- **Linux / PipeWire** — creates a virtual "Resonance EQ" sink; apps that play
+  to it are processed and forwarded to the real default device. See
+  [PipeWire architecture](#architecture).
+- **macOS / CoreAudio** — default input device → DSP → default output device
+  (no kernel extension or virtual driver required). Acts as a real-time audio
+  effect chain on whatever device you select as your input.
 
 [![CI](https://github.com/ealtun21/resonance/actions/workflows/ci.yml/badge.svg)](https://github.com/ealtun21/resonance/actions/workflows/ci.yml)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
@@ -76,6 +83,105 @@ cargo build --release --all
 Binaries land in `target/release/`: `resonanced`, `resonance`, `resonance-tui`,
 `resonance-gui`.
 
+### macOS
+
+Requires **macOS 14.2+** (Core Audio Process Tap API). No third-party
+software (BlackHole, Loopback, kexts) needed — the daemon taps system
+audio natively via Apple's `CATapDescription`.
+
+**Build the .app bundle (required for first-run permission prompt):**
+
+```sh
+git clone https://github.com/ealtun21/resonance && cd resonance
+contrib/macos/build-app.sh
+mv Resonance.app ~/Applications/
+```
+
+A plain `cargo build` binary works for compilation, but macOS will silently
+deny audio capture from an unbundled CLI. The `build-app.sh` script
+produces an ad-hoc-signed `.app` wrapper with the correct `Info.plist` +
+entitlements so the TCC permission prompt fires.
+
+**Grant Screen Recording permission (one-time):**
+
+On macOS 14.2+ Apple gates the Process Tap API behind the **Screen
+Recording** TCC service (`kTCCServiceScreenCapture`), even though we
+don't actually capture the screen. The permission *cannot* be granted
+via the usual first-launch prompt for ad-hoc signed apps — you have to
+add it manually:
+
+```sh
+# Open the right Settings pane:
+open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+```
+
+1. Click the **+** at the bottom of the list.
+2. Add `~/Applications/Resonance.app`.
+3. Toggle Resonance **ON**.
+4. Launch the daemon via Launch Services (NOT from your terminal —
+   TCC attributes child processes' permissions to the parent terminal,
+   not the daemon):
+
+```sh
+open ~/Applications/Resonance.app
+```
+
+From then on every running app's audio flows through the daemon's DSP
+chain:
+
+```
+all system apps → CATapDescription (private, stereo mixdown)
+              → AudioAggregateDevice (wraps the tap)
+              → DSP chain (EQ + Fidelity + Ambience + Surround + Bass + …)
+              → default output device (speakers / headphones / interface)
+```
+
+If the permission was denied the daemon log says so explicitly:
+```
+WARN tap IOProc has fired N times but every block was silent — macOS is
+     most likely refusing system audio capture. Open the bundled
+     Resonance.app via Launch Services and grant the prompt: ...
+```
+
+**Re-signing invalidates the grant.** Every `build-app.sh` rebuild
+changes the bundle's cdhash, and macOS TCC keys grants by code
+requirement, not bundle ID alone. After each rebuild you must re-add
+Resonance to the Screen Recording panel. For a stable grant across
+builds, sign with a real Developer ID identity:
+
+```sh
+SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" contrib/macos/build-app.sh
+```
+
+**Drive the daemon from any client (same as Linux):**
+
+```sh
+~/Applications/Resonance.app/Contents/MacOS/resonance status
+# Symlink to ~/.local/bin if you want it on PATH:
+ln -s ~/Applications/Resonance.app/Contents/MacOS/resonance ~/.local/bin/resonance
+```
+
+**Run at login (launchd).** The IPC clients can install a per-user
+LaunchAgent (`~/Library/LaunchAgents/com.ealtun21.resonanced.plist`) the
+same way they install the systemd unit on Linux — the underlying
+`resonance_ipc::service` module dispatches by OS. The CLI `resonance` exposes
+the same `enable / disable / start / stop / restart` commands as on Linux.
+
+**File locations on macOS:**
+- Config (profiles, mappings): `~/Library/Application Support/resonance/`
+- Logs (when running via launchd): `~/Library/Logs/resonance/`
+- Socket: `$TMPDIR/resonance.sock` (e.g. `/var/folders/.../T/resonance.sock`)
+
+### Architecture
+
+- **Linux**: virtual sink "Resonance EQ" + pw_filter ↔ real device, set as
+  default via WirePlumber metadata. Apps → virtual sink → DSP → real device.
+- **macOS**: cpal duplex stream (input device → SPSC ring → output device,
+  with the DSP chain in the output callback). Sample rate negotiated between
+  the two devices (target 48 kHz). To process system audio rather than mic
+  input, route system audio through an aggregate device or a loopback driver
+  of your choice and select it as the default input.
+
 ## Usage
 
 Start the daemon:
@@ -101,8 +207,11 @@ resonance-tui      # ratatui terminal UI
 resonance-gui      # egui desktop UI
 ```
 
-The daemon listens on a Unix socket at `$XDG_RUNTIME_DIR/resonance.sock`
-(override with `RESONANCE_SOCKET`).
+The daemon listens on a Unix socket. The default path is platform-aware:
+- Linux: `$XDG_RUNTIME_DIR/resonance.sock`
+- macOS: `$TMPDIR/resonance.sock`
+
+Override anywhere with `RESONANCE_SOCKET=/some/path`.
 
 ## Architecture
 
@@ -112,14 +221,27 @@ resonance/
     ├── resonance-dsp/      platform-agnostic DSP engine (f64)
     ├── resonance-preset/   .fac + APO .txt parsers → Preset model
     ├── resonance-ipc/      serde protocol + length-prefixed postcard transport
-    ├── resonance-daemon/   PipeWire node + tokio Unix-socket IPC server
+    │                       + platform-aware paths + service control
+    │                       (systemd on Linux, launchd on macOS)
+    ├── resonance-daemon/   audio node + tokio Unix-socket IPC server.
+    │                       Audio backend dispatches by target_os:
+    │                         linux → src/audio/pipewire.rs (PipeWire)
+    │                         macos → src/audio/coreaudio.rs (cpal/CoreAudio)
     ├── resonance-cli/      CLI client  (resonance)
     ├── resonance-tui/      ratatui TUI client (resonance-tui)
     └── resonance-gui/      egui/eframe desktop client (resonance-gui)
 ```
 
-Signal flow: PipeWire capture → ProcessorChain (APO filter bank → Fidelity →
-Ambience → Surround → Dynamic Boost → Bass) → PipeWire playback.
+Signal flow:
+- **Linux**: PipeWire virtual-sink capture → ProcessorChain (APO filter bank
+  → Fidelity → Ambience → Surround → Dynamic Boost → Bass) → PipeWire real
+  device.
+- **macOS**: `CATapDescription` (stereo mixdown of every process) →
+  `AudioHardwareCreateProcessTap` → private `AudioAggregateDevice` →
+  cpal input stream → ring buffer → output callback runs the same
+  ProcessorChain → default output device. The tap is `MutedWhenTapped`
+  so the original audio path is suppressed while we own routing; the
+  user hears only the DSP-processed signal.
 
 ## Development
 

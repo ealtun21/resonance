@@ -3,24 +3,15 @@
 
 use std::path::PathBuf;
 
-/// `$XDG_RUNTIME_DIR` (falls back to `/tmp`).
-fn runtime_dir() -> PathBuf {
-    std::env::var("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp"))
-}
-
-/// Unix socket path: `$RESONANCE_SOCKET` else `$XDG_RUNTIME_DIR/resonance.sock`.
+/// Unix socket path. Re-exported from `resonance_ipc::paths` so daemon and
+/// every client agree on the location.
 pub fn socket_path() -> PathBuf {
-    if let Ok(p) = std::env::var(resonance_ipc::SOCKET_PATH_ENV) {
-        return PathBuf::from(p);
-    }
-    runtime_dir().join(resonance_ipc::DEFAULT_SOCKET_FILENAME)
+    resonance_ipc::paths::default_socket_path()
 }
 
-/// `$XDG_RUNTIME_DIR/resonanced.pid`.
+/// `<runtime_dir>/resonanced.pid` — single-instance lockfile.
 pub fn pidfile_path() -> PathBuf {
-    runtime_dir().join("resonanced.pid")
+    resonance_ipc::paths::runtime_dir().join("resonanced.pid")
 }
 
 /// Remove the socket and pidfile. Idempotent; missing files are ignored.
@@ -50,9 +41,27 @@ pub fn acquire_pidfile() -> Result<(), String> {
         .map_err(|e| format!("write pidfile {}: {e}", path.display()))
 }
 
-/// Whether a process with this PID currently exists (Linux `/proc`).
+/// Whether a process with this PID currently exists.
+///
+/// Uses `kill(pid, 0)`: returns 0 if the signal could be sent (process is
+/// alive), -1 with `errno = ESRCH` if no such process. This is the POSIX way
+/// — works on Linux, macOS, BSD, and avoids the Linux-specific `/proc` probe.
 fn process_alive(pid: u32) -> bool {
-    PathBuf::from(format!("/proc/{pid}")).exists()
+    if pid == 0 {
+        return false;
+    }
+    // SAFETY: `kill(pid, 0)` performs no signal delivery; it only checks
+    // whether `pid` denotes a process the caller could signal. No memory
+    // safety concerns — pure syscall.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if rc == 0 {
+        return true;
+    }
+    // Errno ESRCH = process gone (reclaim pidfile). EPERM = process exists but
+    // we lack permission to signal it (still alive — refuse to start).
+    // SAFETY: errno_location returns a thread-local pointer that's always valid.
+    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    errno == libc::EPERM
 }
 
 /// Install SIGINT/SIGTERM handlers that clean up and exit.
@@ -92,8 +101,26 @@ mod tests {
     }
 
     #[test]
+    fn pid_zero_is_not_alive() {
+        // PID 0 is reserved (kernel scheduler) — kill(0, …) targets the
+        // whole process group, not pid 0 the process. Treat it as "not
+        // alive" so a corrupted/empty pidfile doesn't wedge startup.
+        assert!(!process_alive(0));
+    }
+
+    #[test]
     fn improbable_pid_is_not_alive() {
-        // PID_MAX_LIMIT is 2^22; this is above any real pid.
+        // PID_MAX_LIMIT is 2^22 on Linux; macOS hands out far smaller pids.
+        // Either way this value will not be in use.
         assert!(!process_alive(4_194_305));
+    }
+
+    #[test]
+    fn pid_1_is_alive_on_unix() {
+        // pid 1 is the init/launchd process on every Unix — always running.
+        // We use this instead of a `fork()`-based test to keep tests pure.
+        // On macOS we may get EPERM (process exists, caller can't signal it)
+        // — `process_alive` treats that as "alive", which is correct.
+        assert!(process_alive(1));
     }
 }

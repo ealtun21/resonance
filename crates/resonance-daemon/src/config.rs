@@ -1,6 +1,10 @@
 //! On-disk config: named profiles + output→profile mappings.
 //!
-//! Layout under `$XDG_CONFIG_HOME/resonance` (else `$HOME/.config/resonance`):
+//! Layout under the platform config dir (`resonance_ipc::paths::config_dir`):
+//!   - Linux: `$XDG_CONFIG_HOME/resonance` else `~/.config/resonance`
+//!   - macOS: `~/Library/Application Support/resonance` (XDG vars honoured if set)
+//!
+//! Files:
 //!   profiles/<name>.toml   — one saved chain state per file
 //!   config.toml            — `[mappings]` table: output node.name → profile name
 
@@ -117,15 +121,10 @@ impl Profile {
 
 // ── Paths ────────────────────────────────────────────────────────────────────
 
-/// `$XDG_CONFIG_HOME/resonance` else `$HOME/.config/resonance`.
+/// Platform-aware config dir. Re-exported through the daemon to keep callers
+/// simple — defers to the shared `resonance_ipc::paths::config_dir`.
 pub fn config_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("XDG_CONFIG_HOME") {
-        if !p.is_empty() {
-            return PathBuf::from(p).join("resonance");
-        }
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".config").join("resonance")
+    resonance_ipc::paths::config_dir()
 }
 
 fn profiles_dir() -> PathBuf {

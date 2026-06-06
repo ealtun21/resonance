@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/ealtun21/resonance"
@@ -39,10 +39,25 @@ crossterm = "0.29"
 eframe = { version = "0.34", features = ["persistence"] }
 egui = "0.34"
 
-# Audio / PipeWire
+# Audio / PipeWire (Linux backend; gated to cfg(target_os = "linux") in
+# `crates/resonance-daemon/Cargo.toml`).
 pipewire = "0.10"
 spa = { version = "0.10", package = "libspa" }
 spa-sys = { version = "0.10", package = "libspa-sys" }
+
+# Audio / CoreAudio (macOS backend, via cpal cross-platform abstraction).
+cpal = "0.17"
+
+# macOS Core Audio Process Tap API (macOS 14.2+) — taps system audio output
+# natively so the daemon can EQ all app audio without BlackHole / kext.
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-core-audio = "0.3"
+objc2-core-foundation = "0.3"
+objc2-core-audio-types = "0.3"
+
+# Process-existence probing without /proc (kill(pid, 0)).
+libc = "0.2"
 
 # Real-time audio ring buffer (lock-free SPSC)
 rtrb = "0.3"

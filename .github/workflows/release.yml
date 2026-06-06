@@ -73,6 +73,73 @@ jobs:
           cp target/generate-rpm/*.rpm dist/
           ( cd dist && for f in *.rpm; do sha256sum "$f" > "$f.sha256"; done )
 
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-dist
+          path: |
+            dist/*.tar.gz
+            dist/*.rpm
+            dist/*.sha256
+            dist/PKGBUILD
+          retention-days: 1
+
+  build-macos:
+    name: Build macOS .app bundle (arm64 + x86_64)
+    strategy:
+      matrix:
+        # arm64 = Apple Silicon (macos-14 runner). x86_64 = Intel (macos-13).
+        include:
+          - runner: macos-14
+            arch: arm64
+          - runner: macos-13
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build .app bundle
+        run: |
+          # build-app.sh runs `cargo build --release -p resonance-daemon`
+          # then bundles all four binaries + icns into Resonance.app and
+          # ad-hoc codesigns with the entitlements TCC needs.
+          contrib/macos/build-app.sh
+
+      - name: Package tarball
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          name="resonance-${ver}-${{ matrix.arch }}-macos"
+          mkdir -p "dist/$name"
+          cp -R Resonance.app "dist/$name/"
+          cp README.md LICENSE "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          ( cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256" )
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}-dist
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          retention-days: 1
+
+  publish:
+    name: Publish GitHub release
+    needs: [build, build-macos]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:

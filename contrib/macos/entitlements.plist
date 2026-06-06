@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Required for AudioHardwareCreateProcessTap (macOS 14.2+).
+         Without this entitlement embedded in the codesign sig, the API
+         silently returns zero-filled buffers instead of prompting TCC. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <!-- macOS 14+ gates Process Tap behind kTCCServiceScreenCapture
+         (Screen Recording in System Settings), even though we don't
+         actually capture the screen. The entitlement lets our signed
+         bundle request the permission. -->
+    <key>com.apple.security.screen-recording</key>
+    <true/>
+    <!-- Daemon needs to talk to user-domain Unix sockets and read/write
+         config files outside its own container. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <key>com.apple.security.network.server</key>
+    <true/>
+    <!-- Allow JIT / dynamic linking that cpal / objc2 do at runtime
+         (some objc method resolution paths). Harmless to grant. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <!-- Don't sandbox: the daemon talks to system Core Audio + writes its
+         pidfile/config to user dirs the sandbox would block.  -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+</dict>
+</plist>

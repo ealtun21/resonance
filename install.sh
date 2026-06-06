@@ -5,19 +5,23 @@
 #   - On Arch it installs a pacman-tracked package of the *prebuilt* binaries
 #     (clean uninstall + dependency handling, no compile) via the resonance-eq-bin
 #     PKGBUILD.
-#   - Elsewhere it drops the prebuilt binaries straight into PREFIX/bin.
+#   - On macOS it downloads Resonance.app and copies it to /Applications
+#     (with sudo if available) or ~/Applications.
+#   - Elsewhere it drops the prebuilt Linux binaries straight into PREFIX/bin.
 # Source builds happen only when you ask for them (PACMAN_BUILD=1 / FROM_SOURCE=1)
 # or when there is no prebuilt for your architecture.
 #
 #   # 1. curl | bash  (no checkout)
 #   curl -fsSL https://raw.githubusercontent.com/ealtun21/resonance/master/install.sh | bash
-#       Arch default:   pacman-tracked prebuilt package (no compile) via makepkg
-#       other distros:  download the prebuilt binary tarball into PREFIX/bin
+#       Linux/Arch:     pacman-tracked prebuilt package (no compile) via makepkg
+#       Linux/other:    download the prebuilt binary tarball into PREFIX/bin
+#       macOS:          download Resonance.app, install + xattr-clear + symlink CLI
 #       PACMAN_BUILD=1: on Arch, download the tagged source and `makepkg -si` (compiles)
 #       NO_PACMAN=1:    skip pacman; install plain (untracked) prebuilt binaries
+#       FROM_SOURCE=1:  build from source instead of using prebuilts
 #
 #   # 2. inside a git checkout: builds from source
-#   ./install.sh            # Arch -> makepkg -si, else cargo build + install
+#   ./install.sh            # Arch -> makepkg -si; macOS -> .app bundle; else cargo build + install
 #
 # Env overrides:
 #   RESONANCE_VERSION=v0.3.0   pin a release tag (default: latest)
@@ -52,13 +56,21 @@ pick_prefix() {
     fi
 }
 
+is_macos() {
+    [[ "$(uname -s)" == "Darwin" ]]
+}
+
 APPID="io.github.ealtun21.Resonance"
 
 # Install the GUI desktop entry + icon + AppStream metadata so it shows up in
 # the application menu. $1 = directory containing the contrib/ files (skipped if
 # missing). $2 = prefix, $3 = sudo prefix ("" or "sudo").
+#
+# These are XDG application-launcher conventions — meaningless on macOS, where
+# apps live in `.app` bundles. We skip them on Darwin.
 install_desktop() {
     local contrib="$1" prefix="$2" sudo="$3"
+    is_macos && return 0
     [[ -f "$contrib/$APPID.desktop" ]] || return 0
     info "Installing desktop entry + icon for the application menu"
     $sudo install -Dm644 "$contrib/$APPID.desktop" \
@@ -154,6 +166,99 @@ install_arch_bin_remote() {
     ( cd "$tmp" && makepkg -si --noconfirm ) || return 1
 }
 
+# -------- macOS prebuilt path: download Resonance.app from the release --
+# Returns non-zero on failure so the caller can fall back to a source
+# build. Installs to /Applications when sudo is available (system-wide,
+# Launchpad + Spotlight + Cmd-Tab visible) else ~/Applications.
+install_macos_prebuilt() {
+    command -v curl  >/dev/null 2>&1 || return 1
+    command -v tar   >/dev/null 2>&1 || return 1
+    command -v xattr >/dev/null 2>&1 || return 1
+    local arch; arch="$(uname -m)"
+    case "$arch" in
+        arm64|x86_64) ;;
+        *) info "no macOS prebuilt for arch '$arch'"; return 1 ;;
+    esac
+
+    local ver; ver="$(resolve_version)" || return 1
+    local v="${ver#v}"
+    local name="resonance-${v}-${arch}-macos"
+    local base="https://github.com/$REPO/releases/download/${ver}"
+
+    local tmp; tmp="$(mktemp -d)"; _CLEANUP_DIR="$tmp"
+    info "Downloading $name.tar.gz ($ver)"
+    if ! curl -fSL --proto '=https' --tlsv1.2 -o "$tmp/$name.tar.gz" \
+            "$base/$name.tar.gz" 2>/dev/null; then
+        info "macOS prebuilt not published for $ver (falling back to source)"
+        return 1
+    fi
+
+    if curl -fsSL -o "$tmp/$name.tar.gz.sha256" "$base/$name.tar.gz.sha256" 2>/dev/null; then
+        info "Verifying sha256"
+        ( cd "$tmp" && shasum -a 256 -c "$name.tar.gz.sha256" >/dev/null ) \
+            || err "checksum verification failed"
+    fi
+
+    tar -C "$tmp" -xzf "$tmp/$name.tar.gz"
+    local app; app="$(find "$tmp/$name" -maxdepth 2 -name 'Resonance.app' | head -1)"
+    [[ -d "$app" ]] || err "tarball did not contain Resonance.app"
+
+    install_macos_app_bundle "$app"
+}
+
+# Build + install Resonance.app from a source checkout. Used when prebuilt
+# isn't available (FROM_SOURCE=1, or no release tarball yet).
+install_macos_from_source() {
+    local dir="$1"
+    cd "$dir"
+    command -v cargo >/dev/null 2>&1 || err "cargo not found. Install Rust: https://rustup.rs"
+    info "Building Resonance.app from source via contrib/macos/build-app.sh"
+    contrib/macos/build-app.sh
+    install_macos_app_bundle "$dir/Resonance.app"
+}
+
+# Copy Resonance.app into /Applications (sudo path) or ~/Applications
+# (no-sudo fallback), strip the quarantine xattr Gatekeeper would
+# otherwise add, register with LaunchServices, and install CLI symlinks
+# into ~/.local/bin.
+install_macos_app_bundle() {
+    local src="$1"
+    local dest_root
+    if [[ $EUID -eq 0 ]]; then
+        dest_root="/Applications"
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+        dest_root="/Applications"
+    else
+        dest_root="$HOME/Applications"
+    fi
+    mkdir -p "$dest_root" 2>/dev/null || true
+    local dest="$dest_root/Resonance.app"
+    local sudo=""
+    if [[ "$dest_root" == "/Applications" && $EUID -ne 0 ]]; then
+        sudo="sudo"
+    fi
+    info "Installing to $dest${sudo:+ (via sudo)}"
+    $sudo rm -rf "$dest"
+    $sudo cp -R "$src" "$dest"
+    # Strip the "downloaded from internet" quarantine xattr so the user
+    # isn't blocked by Gatekeeper on first launch.
+    $sudo xattr -dr com.apple.quarantine "$dest" 2>/dev/null || true
+
+    # Register with Launch Services so Spotlight + Launchpad index it now.
+    local lsreg=/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister
+    [[ -x "$lsreg" ]] && "$lsreg" -f "$dest" >/dev/null 2>&1 || true
+
+    # CLI symlinks so `resonance` + `resonance-tui` work in the terminal.
+    local cli_dir="$HOME/.local/bin"
+    mkdir -p "$cli_dir"
+    for c in resonance resonance-tui; do
+        ln -sf "$dest/Contents/MacOS/$c" "$cli_dir/$c"
+    done
+
+    info "Done. Launch Resonance from Spotlight / Launchpad."
+    info "CLI: ensure $cli_dir is on PATH then run 'resonance status'."
+}
+
 # -------- prebuilt path (curl | bash) --------
 install_prebuilt() {
     command -v curl >/dev/null 2>&1 || err "curl required"
@@ -197,7 +302,14 @@ install_prebuilt() {
 install_from_source() {
     local dir="$1"
     cd "$dir"
-    if [[ "${FROM_SOURCE:-0}" != "1" ]] && command -v makepkg >/dev/null 2>&1 && [[ -f PKGBUILD ]]; then
+    # macOS: build the .app bundle, not a raw binary install.
+    if is_macos; then
+        install_macos_from_source "$dir"
+        return
+    fi
+    # `makepkg` is Arch-only.
+    if [[ "${FROM_SOURCE:-0}" != "1" ]] \
+        && command -v makepkg >/dev/null 2>&1 && [[ -f PKGBUILD ]]; then
         info "Arch detected — building pacman package via PKGBUILD"
         [[ $EUID -ne 0 ]] || err "do not run as root; makepkg refuses root"
         exec makepkg -si --noconfirm
@@ -213,6 +325,24 @@ main() {
     # Inside a checkout: source path already prefers makepkg on Arch.
     if dir="$(script_dir)" && [[ -f "$dir/Cargo.toml" || -f "$dir/PKGBUILD" ]]; then
         install_from_source "$dir"
+        return
+    fi
+
+    # macOS: prefer the prebuilt Resonance.app bundle from the release.
+    # Falls back to a source build if the tarball isn't published yet or
+    # the user passes FROM_SOURCE=1.
+    if is_macos; then
+        if [[ "${FROM_SOURCE:-0}" != "1" ]] && install_macos_prebuilt; then
+            return
+        fi
+        command -v git   >/dev/null 2>&1 || err "git required for source install on macOS"
+        command -v cargo >/dev/null 2>&1 || err "cargo not found. Install Rust: https://rustup.rs"
+        local tmp; tmp="$(mktemp -d)"; _CLEANUP_DIR="$tmp"
+        local ver; ver="$(resolve_version)"
+        info "Cloning $REPO@$ver for source build"
+        git -C "$tmp" clone --depth 1 --branch "$ver" "https://github.com/$REPO" src \
+            || err "git clone failed"
+        install_macos_from_source "$tmp/src"
         return
     fi
 

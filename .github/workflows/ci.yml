@@ -11,7 +11,7 @@ env:
 
 jobs:
   check:
-    name: Check & Test
+    name: Check & Test (Linux)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -54,6 +54,36 @@ jobs:
             -p resonance-ipc \
             -p resonance-cli \
             -p resonance-tui
+
+  macos:
+    name: Check & Test (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        # CoreAudio backend pulls cpal — no system deps required on macOS;
+        # the linker finds CoreAudio.framework / AudioToolbox automatically.
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build
+        run: cargo build --all
+
+      - name: Test
+        # CoreAudio init requires no microphone permission for unit tests
+        # (they don't open streams), so this works on GitHub-hosted runners.
+        run: cargo test --all
 
   packaging:
     name: Validate desktop/AppStream metadata

@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Identity / metadata ------------------------------------------------ -->
+    <key>CFBundleName</key>
+    <string>Resonance</string>
+    <key>CFBundleDisplayName</key>
+    <string>Resonance EQ</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.ealtun21.resonance</string>
+    <key>CFBundleVersion</key>
+    <string>0.4.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.4.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <!-- Main executable is the GUI; it auto-spawns the daemon (also
+         bundled in Contents/MacOS/) on launch if it isn't already
+         running. That way a Launchpad/Spotlight click brings up a
+         visible window AND ensures audio processing is active. -->
+    <key>CFBundleExecutable</key>
+    <string>resonance-gui</string>
+    <key>CFBundleSignature</key>
+    <string>????</string>
+    <!-- App icon shown in Launchpad, Dock, Cmd-Tab, Finder Get Info.
+         Without this key macOS falls back to the generic white app icon.
+         The .icns file lives in Contents/Resources/ — build-app.sh
+         copies it there from contrib/macos/. -->
+    <key>CFBundleIconFile</key>
+    <string>Resonance</string>
+
+    <!-- TCC usage strings — shown in the macOS permission prompt.
+         macOS will NOT issue the prompt if these are missing; the call
+         to AudioHardwareCreateProcessTap then returns silent buffers
+         instead of failing, which is the bug we hit in the unwrapped
+         CLI build.                                                  -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Resonance EQ taps system audio output to apply real-time DSP (EQ + effects). It does not record your microphone.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Resonance EQ taps every running app's audio so it can apply EQ + effects in real time and play the processed result back to your speakers.</string>
+    <key>NSSystemAudioCaptureUsageDescription</key>
+    <string>Resonance EQ taps system audio output to apply real-time DSP (EQ + effects).</string>
+    <!-- macOS 14+ gates Core Audio Process Tap behind Screen Recording
+         (kTCCServiceScreenCapture). Without this key the app cannot appear
+         in System Settings → Privacy & Security → Screen Recording, and
+         the tap returns silent buffers even when Microphone is granted. -->
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Resonance EQ uses the system-audio tap API. On macOS 14+ this requires the Screen Recording permission, even though Resonance does not capture your screen.</string>
+
+    <!-- Show in Dock + Cmd-Tab — the bundle's main exe is the GUI, so
+         it's a normal user-facing app. The daemon it spawns runs
+         headless in the background. -->
+    <key>LSUIElement</key>
+    <false/>
+    <key>LSBackgroundOnly</key>
+    <false/>
+    <!-- High-resolution display support so the egui canvas isn't
+         pixel-doubled on Retina screens. -->
+    <key>NSHighResolutionCapable</key>
+    <true/>
+
+    <key>LSMinimumSystemVersion</key>
+    <string>14.2</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>GPL-3.0-or-later</string>
+</dict>
+</plist>

@@ -21,3 +21,7 @@ serde = { workspace = true }
 postcard = { workspace = true }
 toml = { workspace = true }
 anyhow = { workspace = true }
+# PNG encoder, used only by the `--dump-iconset` build helper. The image
+# crate is already pulled in transitively by eframe; depending on its
+# `png` feature directly costs nothing in binary size.
+image = { version = "0.25", default-features = false, features = ["png"] }

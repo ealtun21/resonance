@@ -15,10 +15,6 @@ path = "src/main.rs"
 resonance-dsp = { path = "../resonance-dsp" }
 resonance-preset = { path = "../resonance-preset" }
 resonance-ipc = { path = "../resonance-ipc" }
-pipewire = { workspace = true }
-pipewire-sys = "0.10"
-spa = { workspace = true }
-spa-sys = { workspace = true }
 rtrb = { workspace = true }
 rustfft = { workspace = true }
 tokio = { workspace = true }
@@ -29,6 +25,23 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+libc = { workspace = true }
+
+# ── Linux backend (PipeWire) ──────────────────────────────────────────────────
+[target.'cfg(target_os = "linux")'.dependencies]
+pipewire = { workspace = true }
+pipewire-sys = "0.10"
+spa = { workspace = true }
+spa-sys = { workspace = true }
+
+# ── macOS backend (CoreAudio via cpal + native Process Tap) ───────────────────
+[target.'cfg(target_os = "macos")'.dependencies]
+cpal = { workspace = true }
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true }
+objc2-core-audio = { workspace = true }
+objc2-core-foundation = { workspace = true }
+objc2-core-audio-types = { workspace = true }
 
 # ── RPM packaging (cargo-generate-rpm) ───────────────────────────────────────
 # Build with `cargo build --release --all` first, then from the repo root:

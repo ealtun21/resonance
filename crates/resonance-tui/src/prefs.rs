@@ -46,13 +46,9 @@ impl Default for Prefs {
 
 impl Prefs {
     pub fn config_dir() -> PathBuf {
-        if let Ok(p) = std::env::var("XDG_CONFIG_HOME") {
-            return PathBuf::from(p).join("resonance");
-        }
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(".config").join("resonance");
-        }
-        PathBuf::from(".config").join("resonance")
+        // Defer to the shared platform-aware resolver: Linux → XDG, macOS →
+        // ~/Library/Application Support/resonance, XDG vars honoured everywhere.
+        resonance_ipc::paths::config_dir()
     }
 
     pub fn path() -> PathBuf {

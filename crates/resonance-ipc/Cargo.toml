@@ -12,3 +12,7 @@ resonance-dsp = { path = "../resonance-dsp" }
 serde = { workspace = true }
 postcard = { workspace = true }
 thiserror = { workspace = true }
+
+# Cross-platform uid lookup for the macOS launchd backend.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = { workspace = true }

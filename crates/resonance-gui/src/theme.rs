@@ -196,14 +196,16 @@ fn blend(a: Color32, b: Color32, t: f32) -> Color32 {
 
 /// Candidate colour files, newest-style first. pywal and most matugen templates
 /// write a JSON document with `special.background/foreground` and `colors.colorN`.
+///
+/// The platform-aware `colors.json` lives next to other Resonance config
+/// (Linux: `~/.config/resonance`; macOS: `~/Library/Application Support/resonance`).
+/// pywal's `~/.cache/wal/colors.json` is a Linux-only convention but harmless
+/// to probe on macOS — it simply won't exist.
 fn matugen_files() -> Vec<std::path::PathBuf> {
     let mut v = Vec::new();
-    if let Ok(cfg) = std::env::var("XDG_CONFIG_HOME") {
-        v.push(std::path::PathBuf::from(cfg).join("resonance/colors.json"));
-    }
+    v.push(resonance_ipc::paths::config_dir().join("colors.json"));
     if let Ok(home) = std::env::var("HOME") {
         let h = std::path::PathBuf::from(home);
-        v.push(h.join(".config/resonance/colors.json"));
         v.push(h.join(".cache/wal/colors.json"));
     }
     v

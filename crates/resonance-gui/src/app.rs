@@ -133,6 +133,60 @@ enum Confirm {
 /// A zero-arg systemd service action (start/stop/restart/…).
 type ServiceFn = fn() -> std::io::Result<()>;
 
+/// One unit of work for the service worker thread.
+enum ServiceAction {
+    /// Re-read installed/active/enabled status from the platform manager.
+    RefreshStatus,
+    /// Run a lifecycle op (start/stop/restart/enable/disable). The static
+    /// `label` is shown in the toolbar status when the result comes back.
+    Run {
+        label: &'static str,
+        f: ServiceFn,
+    },
+}
+
+/// Worker → UI message. Carries an updated Status snapshot (always) plus
+/// optional toolbar feedback (only for Run results).
+struct ServiceWorkerResult {
+    status: service::Status,
+    feedback: Option<String>,
+}
+
+/// Spawn the service worker thread. It serialises `service::start/stop/
+/// status/...` calls so the UI thread never blocks on launchctl.
+fn spawn_service_worker(
+    rx: std::sync::mpsc::Receiver<ServiceAction>,
+    tx: std::sync::mpsc::Sender<ServiceWorkerResult>,
+    ctx: egui::Context,
+) {
+    std::thread::Builder::new()
+        .name("resonance-service".into())
+        .spawn(move || {
+            while let Ok(action) = rx.recv() {
+                let feedback = match action {
+                    ServiceAction::RefreshStatus => None,
+                    ServiceAction::Run { label, f } => Some(match f() {
+                        Ok(()) => format!("{label} ok"),
+                        Err(e) => format!("{label} failed: {e}"),
+                    }),
+                };
+                let status = service::status();
+                if tx
+                    .send(ServiceWorkerResult { status, feedback })
+                    .is_err()
+                {
+                    break;
+                }
+                // Wake the UI so it consumes the result on the next frame
+                // (egui sleeps between frames when idle; without this the
+                // updated daemon status would only appear on the next mouse
+                // move / keystroke).
+                ctx.request_repaint();
+            }
+        })
+        .expect("spawn service worker");
+}
+
 /// Transient toolbar status feedback (e.g. "layout reset", "undo") clears after
 /// this long so it stops reading like a permanent label.
 const STATUS_TTL: Duration = Duration::from_secs(4);
@@ -275,6 +329,17 @@ pub struct GuiApp {
     /// Cached systemd user-service status; refreshed on a slow timer.
     daemon_status: service::Status,
     last_service_poll: Instant,
+    /// Channel into the service worker. We send `ServiceAction` requests
+    /// off the UI thread because `launchctl` calls + the daemon's
+    /// CoreAudio teardown can take 200–800 ms — synchronous on the UI
+    /// thread froze egui visibly when the user clicked Start/Stop.
+    service_tx: std::sync::mpsc::Sender<ServiceAction>,
+    /// Worker result channel. Each tick we drain it and apply updates
+    /// (status text + cached Status).
+    service_rx: std::sync::mpsc::Receiver<ServiceWorkerResult>,
+    /// True while a Start/Stop/Restart is in flight — we grey-out the
+    /// menu so the user can't fire overlapping ops.
+    service_busy: bool,
     /// When the current `status` text should auto-clear (transient feedback).
     status_until: Option<Instant>,
     /// Window-decoration mode + the last decoration value pushed to the
@@ -297,6 +362,13 @@ pub struct GuiApp {
 impl GuiApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install_symbol_fonts(&cc.egui_ctx);
+        let (service_tx, service_worker_rx) = std::sync::mpsc::channel::<ServiceAction>();
+        let (service_worker_tx, service_rx) =
+            std::sync::mpsc::channel::<ServiceWorkerResult>();
+        spawn_service_worker(service_worker_rx, service_worker_tx, cc.egui_ctx.clone());
+        // Kick off an initial status fetch so the toolbar doesn't show
+        // "stopped" for the first 1.5 s while the poll timer warms up.
+        let _ = service_tx.send(ServiceAction::RefreshStatus);
         // Restore the persisted theme (panel sizes restore automatically via
         // eframe's egui-memory persistence).
         let theme = cc
@@ -341,8 +413,11 @@ impl GuiApp {
             view_log: (curve::LOG_MIN, curve::LOG_MAX),
             zoom_sel: None,
             show_help: false,
-            daemon_status: service::status(),
+            daemon_status: service::Status::default(),
             last_service_poll: Instant::now(),
+            service_tx,
+            service_rx,
+            service_busy: false,
             status_until: None,
             titlebar_mode,
             decorations_applied: None,
@@ -589,10 +664,24 @@ impl eframe::App for GuiApp {
             }
         });
 
-        // Service status drives the toolbar daemon controls; poll it slowly.
+        // Drain any results the service worker thread has produced. Each
+        // result carries a fresh Status snapshot and (for Run requests)
+        // a feedback string for the toolbar status line.
+        while let Ok(res) = self.service_rx.try_recv() {
+            self.daemon_status = res.status;
+            if let Some(msg) = res.feedback {
+                self.set_status(msg);
+            }
+            // Receiving a result always clears the "busy" gate; further
+            // clicks can fire again.
+            self.service_busy = false;
+        }
+        // Service status drives the toolbar daemon controls; poll it on a
+        // slow timer via the worker (off the UI thread so launchctl
+        // latency never freezes egui).
         if self.last_service_poll.elapsed() >= Duration::from_millis(1500) {
             self.last_service_poll = Instant::now();
-            self.daemon_status = service::status();
+            let _ = self.service_tx.send(ServiceAction::RefreshStatus);
         }
 
         // Expire transient status feedback so it stops reading like a label.
@@ -1163,13 +1252,17 @@ impl GuiApp {
     }
 
     /// Daemon lifecycle controls (systemd user service) as a compact menu so
-    /// users never type a `systemctl` line.
+    /// users never type a `systemctl` line. All ops dispatch to a worker
+    /// thread so the UI never blocks on launchctl / systemctl latency.
     fn daemon_menu(&mut self, ui: &mut egui::Ui) {
         if !service::systemd_available() {
             return;
         }
         let st = self.daemon_status;
-        let (dot, color) = if st.active {
+        let busy = self.service_busy;
+        let (dot, color) = if busy {
+            ("…", self.palette.boost)
+        } else if st.active {
             ("●", self.palette.boost)
         } else {
             ("○", self.palette.cut)
@@ -1179,7 +1272,13 @@ impl GuiApp {
             |ui| {
                 ui.label(format!(
                     "{}  ·  autostart {}",
-                    if st.active { "running" } else { "stopped" },
+                    if busy {
+                        "…"
+                    } else if st.active {
+                        "running"
+                    } else {
+                        "stopped"
+                    },
                     if st.enabled { "on" } else { "off" },
                 ));
                 ui.separator();
@@ -1189,27 +1288,29 @@ impl GuiApp {
                     ("Restart", service::restart),
                 ];
                 for (label, f) in actions {
-                    if ui.button(label).clicked() {
-                        self.set_status(match f() {
-                            Ok(()) => format!("{label} ok"),
-                            Err(e) => format!("{label} failed: {e}"),
-                        });
-                        self.daemon_status = service::status();
+                    let btn = ui.add_enabled(!busy, egui::Button::new(label));
+                    if btn.clicked() {
+                        self.service_busy = true;
+                        let _ = self.service_tx.send(ServiceAction::Run { label, f });
                     }
                 }
                 ui.separator();
                 let mut autostart = st.enabled;
-                if ui.checkbox(&mut autostart, "Autostart at login").changed() {
-                    let r = if autostart {
-                        service::enable()
+                let auto = ui.add_enabled(
+                    !busy,
+                    egui::Checkbox::new(&mut autostart, "Autostart at login"),
+                );
+                if auto.changed() {
+                    self.service_busy = true;
+                    let f: ServiceFn = if autostart {
+                        service::enable
                     } else {
-                        service::disable()
+                        service::disable
                     };
-                    self.set_status(match r {
-                        Ok(()) => "autostart updated".to_string(),
-                        Err(e) => format!("autostart failed: {e}"),
+                    let _ = self.service_tx.send(ServiceAction::Run {
+                        label: "autostart",
+                        f,
                     });
-                    self.daemon_status = service::status();
                 }
             },
         );
@@ -1454,36 +1555,38 @@ impl GuiApp {
                 ui.label(&self.status);
                 ui.add_space(16.0);
                 if service::systemd_available() {
+                    let busy = self.service_busy;
                     let btn = egui::Button::new(
-                        egui::RichText::new("▶  Start daemon")
+                        egui::RichText::new(if busy { "starting…" } else { "▶  Start daemon" })
                             .size(18.0)
                             .color(egui::Color32::WHITE),
                     )
                     .fill(self.palette.boost)
                     .min_size(egui::vec2(180.0, 40.0));
-                    if ui.add(btn).clicked() {
-                        match service::start() {
-                            Ok(()) => self.set_status("starting daemon…"),
-                            Err(e) => self.set_status(format!("start failed: {e}")),
-                        }
-                        self.daemon_status = service::status();
-                        self.try_connect();
+                    if ui.add_enabled(!busy, btn).clicked() {
+                        self.service_busy = true;
+                        let _ = self.service_tx.send(ServiceAction::Run {
+                            label: "Start",
+                            f: service::start,
+                        });
                     }
                     ui.add_space(6.0);
                     let mut autostart = self.daemon_status.enabled;
-                    if ui
-                        .checkbox(&mut autostart, "Start automatically at login")
-                        .changed()
-                    {
-                        let r = if autostart {
-                            service::enable()
+                    let auto = ui.add_enabled(
+                        !busy,
+                        egui::Checkbox::new(&mut autostart, "Start automatically at login"),
+                    );
+                    if auto.changed() {
+                        self.service_busy = true;
+                        let f: ServiceFn = if autostart {
+                            service::enable
                         } else {
-                            service::disable()
+                            service::disable
                         };
-                        if let Err(e) = r {
-                            self.set_status(format!("autostart: {e}"));
-                        }
-                        self.daemon_status = service::status();
+                        let _ = self.service_tx.send(ServiceAction::Run {
+                            label: "autostart",
+                            f,
+                        });
                     }
                 } else {
                     ui.label("systemctl --user unavailable — run `resonanced` manually.");

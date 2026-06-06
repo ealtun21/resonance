@@ -1,7 +1,7 @@
+mod audio;
 mod config;
 mod ipc_server;
 mod meters;
-mod pw_node;
 mod shutdown;
 mod spectrum;
 mod state;
@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
     shutdown::install_signal_handlers();
 
     let (cmd_tx, cmd_rx) = RingBuffer::<state::AudioCommand>::new(256);
-    let (spectrum_tx, spectrum_rx) = RingBuffer::<f32>::new(pw_node::SPECTRUM_BUF);
+    let (spectrum_tx, spectrum_rx) = RingBuffer::<f32>::new(audio::SPECTRUM_BUF);
     let (route_tx, route_rx) = std::sync::mpsc::channel::<String>();
     let (sinks_tx, mut sinks_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<(String, String)>>();
 
@@ -108,7 +108,7 @@ async fn main() -> Result<()> {
     });
 
     // PipeWire filter node on dedicated RT thread
-    let pw_handle = pw_node::spawn(
+    let pw_handle = audio::spawn(
         cmd_rx,
         spectrum_tx,
         initial_chain,
