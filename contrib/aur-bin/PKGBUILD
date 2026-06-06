@@ -27,7 +27,7 @@ source=(
     "resonanced.service::$url/raw/v$pkgver/contrib/systemd/resonanced.service"
 )
 sha256sums=(
-    '5e2b1811215444823bac9528ceccba42d0977ee73a8590dbe54c4a50684646ef'
+    '96eac20d292437ee8a249345b55e1522ab76582a17eb5f0bf6808535b8e028ea'
     '539ea1381e509daa2098fde64d2aecda3de3a555855ea7a5a3cd90076f5e29c4'
     '429b3fe622774d0537269cef799fb94ed7bb4e752e1fce9f4f6f55bd8a88dd0d'
     '7c44d90ac50669cc89faa29058faf946a0a23c3239d732c3ee5d06609333eeec'
