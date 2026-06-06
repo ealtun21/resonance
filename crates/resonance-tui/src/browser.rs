@@ -123,7 +123,7 @@ fn read_entries(dir: &Path) -> Vec<Item> {
 }
 
 fn is_preset(name: &str) -> bool {
-    name.ends_with(".fac") || name.ends_with(".txt")
+    name.ends_with(".fac") || name.ends_with(".txt") || name.ends_with(".toml")
 }
 
 /// Build a human-readable preview for a preset file (falls back to a raw head).
@@ -132,8 +132,21 @@ fn preview_file(path: &Path) -> Vec<String> {
         return vec!["(cannot read file)".to_string()];
     };
 
-    let is_fac = path.extension().map(|e| e == "fac").unwrap_or(false);
-    let parsed = if is_fac {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    // `.toml` profiles aren't preset files — the daemon owns their schema. Show
+    // a raw head instead of running them through the preset parsers.
+    if ext == "toml" {
+        let mut out = vec!["⮞ profile (.toml)".to_string(), String::new()];
+        out.extend(content.lines().take(30).map(|l| l.to_string()));
+        return out;
+    }
+    // GraphicEQ target curves are fitted to a parametric bank on import — an
+    // expensive optimisation. Don't run it for a hover preview; summarise the
+    // raw target instead.
+    if let Some(summary) = graphic_eq_preview(&content) {
+        return summary;
+    }
+    let parsed = if ext == "fac" {
         parse_fac(&content).map_err(|e| e.to_string())
     } else {
         parse_apo(&content).map_err(|e| e.to_string())
@@ -199,4 +212,46 @@ fn fmt_freq(hz: f64) -> String {
     } else {
         format!("{hz:.0}Hz")
     }
+}
+
+/// Cheap preview for an EqualizerAPO `GraphicEQ:` target line — point count and
+/// range, without running the (expensive) curve-fit that import performs.
+fn graphic_eq_preview(content: &str) -> Option<Vec<String>> {
+    let line = content
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("GraphicEQ:"))?;
+    let rest = line.strip_prefix("GraphicEQ:").unwrap_or("").trim();
+    let mut n = 0usize;
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut min_g, mut max_g) = (f64::INFINITY, f64::NEG_INFINITY);
+    for pair in rest.split(';').filter(|p| !p.trim().is_empty()) {
+        let mut it = pair.split_whitespace();
+        let Some(first) = it.next() else { continue };
+        let (fs, gs) = match it.next() {
+            Some(g) => (first, g),
+            None => match first.find('-') {
+                Some(i) => (&first[..i], &first[i..]),
+                None => continue,
+            },
+        };
+        if let (Ok(f), Ok(g)) = (fs.parse::<f64>(), gs.parse::<f64>()) {
+            n += 1;
+            lo = lo.min(f);
+            hi = hi.max(f);
+            min_g = min_g.min(g);
+            max_g = max_g.max(g);
+        }
+    }
+    if n == 0 {
+        return None;
+    }
+    Some(vec![
+        "⮞ GraphicEQ target curve".to_string(),
+        format!("{n} points  {}–{}", fmt_freq(lo), fmt_freq(hi)),
+        format!("gain {min_g:+.1} … {max_g:+.1} dB"),
+        String::new(),
+        "Fitted to parametric bands".to_string(),
+        "(shelves + peaks) on import.".to_string(),
+    ])
 }

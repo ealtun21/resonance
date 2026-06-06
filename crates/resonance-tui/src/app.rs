@@ -788,6 +788,25 @@ impl App {
                     }
                 }
             }
+            TextPurpose::ExportProfile => {
+                let name = buf.trim().trim_end_matches(".toml").to_string();
+                if !name.is_empty() {
+                    let dir = resonance_ipc::paths::user_preset_dir();
+                    let _ = std::fs::create_dir_all(&dir);
+                    let path = dir.join(format!("{name}.toml"));
+                    let path_str = path.to_string_lossy().to_string();
+                    match self.query(Command::ExportProfile {
+                        path: path_str.clone(),
+                    }) {
+                        Some(Response::Ok) => self.status = format!("exported → {path_str}"),
+                        Some(Response::Error(e)) => self.status = format!("export failed: {e}"),
+                        _ => self.status = "export failed".into(),
+                    }
+                }
+                if let InputMode::Settings(s) = &mut self.mode {
+                    s.text_input = None;
+                }
+            }
             TextPurpose::RenameProfile(from) => {
                 let to = buf.trim().to_string();
                 if !to.is_empty() && to != from {
@@ -1003,6 +1022,20 @@ impl App {
         if let InputMode::Settings(s) = &mut self.mode {
             if s.tab == 0 {
                 s.text_input = Some(TextInput::new("", TextPurpose::SaveProfile, "Profile name"));
+            }
+        }
+    }
+
+    /// Export the current chain to a `.toml` file in the preset library.
+    pub fn settings_key_e(&mut self) {
+        use crate::settings::{TextInput, TextPurpose};
+        if let InputMode::Settings(s) = &mut self.mode {
+            if s.tab == 0 {
+                s.text_input = Some(TextInput::new(
+                    "",
+                    TextPurpose::ExportProfile,
+                    "Export filename (.toml)",
+                ));
             }
         }
     }

@@ -984,7 +984,7 @@ fn render_settings(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect) 
 fn settings_footer_hint(s: &SettingsState) -> String {
     let base = " [Tab/←→/1-5] switch  [↑↓] select  [Esc] close";
     let ctx = match s.tab {
-        0 => "  •  [Enter] load  [n] save  [r] rename  [d] delete",
+        0 => "  •  [Enter] load  [n] save  [e] export  [r] rename  [d] delete",
         1 => "  •  [m] map  [d] unmap",
         2 => "  •  [Enter] route  [m] map to profile",
         3 => "  •  [Enter/Space] edit/toggle",
@@ -1071,7 +1071,7 @@ fn render_tab_profiles(s: &SettingsState, app: &App, frame: &mut Frame, area: Re
     }
 
     frame.render_widget(
-        Paragraph::new(" [Enter] load  [n] save current  [r] rename  [d] delete")
+        Paragraph::new(" [Enter] load  [n] save current  [e] export  [r] rename  [d] delete")
             .style(Style::default().fg(Color::DarkGray)),
         hints,
     );

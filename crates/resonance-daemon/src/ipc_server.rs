@@ -99,36 +99,27 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
             Response::Ok
         }
 
-        Command::LoadPreset { path } => match load_preset(&path, state) {
-            Ok(_) => {
-                state.0.lock().unwrap().current_preset = Some(path);
-                Response::Ok
+        Command::LoadPreset { path } => {
+            // Parse off the runtime (GraphicEQ files curve-fit); apply once parsed.
+            let p = path.clone();
+            match tokio::task::spawn_blocking(move || parse_preset_file(&p)).await {
+                Ok(Ok(preset)) => {
+                    apply_preset(preset, state);
+                    state.0.lock().unwrap().current_preset = Some(path);
+                    Response::Ok
+                }
+                Ok(Err(e)) => Response::Error(e),
+                Err(e) => Response::Error(format!("load task failed: {e}")),
             }
-            Err(e) => Response::Error(e),
-        },
+        }
 
         Command::ImportPreset { path, name } => {
-            // Our own `.toml` exports load directly as a Profile; `.fac` / APO
-            // `.txt` go through the preset parser first.
-            let profile = if path.ends_with(".toml") {
-                config::load_profile_file(&path)
-            } else {
-                parse_preset_file(&path).map(|p| Profile::from_preset(&p))
-            };
-            match profile {
-                Ok(profile) => {
-                    let raw = name.unwrap_or_else(|| file_stem_name(&path));
-                    let profile_name = config::sanitize_name(&raw);
-                    if profile_name.is_empty() {
-                        return Response::Error("profile name is empty".to_string());
-                    }
-                    match config::save_profile(&profile_name, &profile) {
-                        Ok(()) => Response::Imported(profile_name),
-                        Err(e) => Response::Error(e),
-                    }
-                }
-                Err(e) => Response::Error(e),
-            }
+            // Parsing a preset can be expensive — a GraphicEQ `.txt` runs a
+            // curve-fit optimisation. Do it (and the file IO) on a blocking
+            // thread so the async IPC loop keeps serving other clients.
+            tokio::task::spawn_blocking(move || import_preset(path, name))
+                .await
+                .unwrap_or_else(|e| Response::Error(format!("import task failed: {e}")))
         }
 
         Command::RenameProfile { from, to } => match config::rename_profile(&from, &to) {
@@ -517,9 +508,35 @@ fn file_stem_name(path: &str) -> String {
         .unwrap_or_else(|| "imported".to_string())
 }
 
-fn load_preset(path: &str, state: &SharedState) -> Result<(), String> {
-    let preset = parse_preset_file(path)?;
+/// Import a preset file into the managed profile store. Sync + CPU-heavy
+/// (GraphicEQ files curve-fit) — call from a blocking context, never directly on
+/// the async runtime.
+fn import_preset(path: String, name: Option<String>) -> Response {
+    // Our own `.toml` exports load directly as a Profile; `.fac` / APO `.txt`
+    // go through the preset parser first.
+    let profile = if path.ends_with(".toml") {
+        config::load_profile_file(&path)
+    } else {
+        parse_preset_file(&path).map(|p| Profile::from_preset(&p))
+    };
+    match profile {
+        Ok(profile) => {
+            let raw = name.unwrap_or_else(|| file_stem_name(&path));
+            let profile_name = config::sanitize_name(&raw);
+            if profile_name.is_empty() {
+                return Response::Error("profile name is empty".to_string());
+            }
+            match config::save_profile(&profile_name, &profile) {
+                Ok(()) => Response::Imported(profile_name),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Err(e) => Response::Error(e),
+    }
+}
 
+/// Build the DSP chain from an already-parsed preset and swap it in.
+fn apply_preset(preset: resonance_preset::model::Preset, state: &SharedState) {
     let (sr, channels) = {
         let inner = state.0.lock().unwrap();
         (inner.chain.sample_rate, inner.chain.channels)
@@ -528,7 +545,6 @@ fn load_preset(path: &str, state: &SharedState) -> Result<(), String> {
     let chain_rt = preset.clone().into_chain(channels, sr);
     let chain_shadow = preset.into_chain(channels, sr);
     state.replace_chain(chain_rt, chain_shadow);
-    Ok(())
 }
 
 /// Load a named profile from the config dir and apply it to the chain.

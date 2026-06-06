@@ -185,6 +185,13 @@ fn lighten(c: Color32, f: f32) -> Color32 {
     )
 }
 
+/// Linear interpolation `a → b` by `t` (0..1), per channel.
+fn blend(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t) as u8;
+    Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
+}
+
 // ── matugen / pywal palette loading ─────────────────────────────────────────
 
 /// Candidate colour files, newest-style first. pywal and most matugen templates
@@ -253,33 +260,57 @@ fn parse_hex(s: &str) -> Option<Color32> {
 
 fn matugen_palette() -> Option<Palette> {
     let m = load_color_map()?;
-    let bg = m
-        .get("background")
-        .or_else(|| m.get("color0"))
-        .copied()
-        .unwrap_or(rgb(20, 22, 26));
-    let accent = m
-        .get("color4")
-        .or_else(|| m.get("color12"))
-        .or_else(|| m.get("foreground"))
-        .copied()
-        .unwrap_or(rgb(80, 200, 255));
-    let boost = m.get("color2").copied().unwrap_or(rgb(70, 200, 90));
-    let cut = m.get("color1").copied().unwrap_or(rgb(225, 80, 80));
-    let highlight = m
-        .get("color3")
-        .or_else(|| m.get("color5"))
-        .copied()
-        .unwrap_or(Color32::YELLOW);
+    // First non-empty key from the list, else the fallback. pywal/matugen files
+    // vary wildly: some fill color0-15, some only a handful (the rest empty
+    // strings, which never land in the map), some use material tokens. Walk a
+    // broad chain per slot so a sparse palette still produces a usable theme
+    // instead of silently falling back to the hard-coded default colours.
+    let pick = |keys: &[&str], fallback: Color32| -> Color32 {
+        keys.iter()
+            .find_map(|k| m.get(*k).copied())
+            .unwrap_or(fallback)
+    };
+    let bg = pick(&["background", "color0", "surface"], rgb(20, 22, 26));
+    let fg = pick(
+        &[
+            "foreground",
+            "color15",
+            "color7",
+            "onSurface",
+            "onBackground",
+        ],
+        rgb(220, 220, 230),
+    );
+    let accent = pick(
+        &[
+            "color4", "color12", "color6", "color14", "primary", "color10", "color13", "color5",
+        ],
+        fg,
+    );
+    // Bright slots only — a dark "highlight" (e.g. color13 on some palettes)
+    // makes the selected EQ node look greyed-out instead of standing out.
+    let highlight = pick(
+        &["color3", "color11", "color5", "color10", "secondary"],
+        accent,
+    );
     Some(Palette {
         accent,
-        boost,
-        cut,
-        neutral: m.get("color8").copied().unwrap_or(rgb(150, 150, 160)),
+        boost: pick(&["color2", "color10"], rgb(70, 200, 90)),
+        cut: pick(&["color1", "color9"], rgb(225, 80, 80)),
+        neutral: pick(&["color8", "color7"], blend(bg, fg, 0.55)),
         graph_bg: bg,
-        grid: lighten(bg, 1.6),
+        // Blend bg toward fg so grid lines stay visible on any matugen palette
+        // (a plain `lighten` of a dark bg stays dark and disappears).
+        grid: blend(bg, fg, 0.45),
         highlight,
     })
+}
+
+/// Modification time of the active matugen/pywal colour file, if any exists.
+/// Lets the app live-reload the Matugen theme when the file is rewritten.
+pub fn matugen_source_mtime() -> Option<std::time::SystemTime> {
+    let path = matugen_files().into_iter().find(|p| p.is_file())?;
+    std::fs::metadata(path).ok()?.modified().ok()
 }
 
 /// Heuristic: a matugen background brighter than mid-grey ⇒ light theme.

@@ -1,0 +1,58 @@
+# Maintainer: ealtun21 <ealtun21@ku.edu.tr>
+# Prebuilt ("-bin") package: installs the published release binaries without
+# compiling. Pacman-tracked (clean uninstall, dependency handling) but fast —
+# nothing is built from source. For a from-source build use the 'resonance-eq'
+# PKGBUILD in the repo root instead.
+#
+# After cutting a new release, refresh the checksums with:
+#   updpkgsums
+pkgname=resonance-eq-bin
+pkgver=0.3.0
+pkgrel=1
+pkgdesc="Terminal EQ daemon for Linux/PipeWire with FxSound .fac and EqualizerAPO preset support (prebuilt binaries)"
+arch=('x86_64')
+url="https://github.com/ealtun21/resonance"
+license=('GPL-3.0-or-later')
+depends=('pipewire' 'libpipewire')
+provides=('resonanced' 'resonance-eq')
+conflicts=('resonance-eq' 'resonance-eq-git')
+
+_appid="io.github.ealtun21.Resonance"
+_dist="resonance-$pkgver-x86_64-linux"
+source=(
+    "$_dist.tar.gz::$url/releases/download/v$pkgver/$_dist.tar.gz"
+    "$_appid.desktop::$url/raw/v$pkgver/contrib/$_appid.desktop"
+    "$_appid.svg::$url/raw/v$pkgver/contrib/$_appid.svg"
+    "$_appid.metainfo.xml::$url/raw/v$pkgver/contrib/$_appid.metainfo.xml"
+    "resonanced.service::$url/raw/v$pkgver/contrib/systemd/resonanced.service"
+)
+sha256sums=(
+    'f2063633feac45e3c8b2ec1f588f274a67ebcfdbbc9dffa89b578a5d8382e1fb'
+    '539ea1381e509daa2098fde64d2aecda3de3a555855ea7a5a3cd90076f5e29c4'
+    '429b3fe622774d0537269cef799fb94ed7bb4e752e1fce9f4f6f55bd8a88dd0d'
+    '7c44d90ac50669cc89faa29058faf946a0a23c3239d732c3ee5d06609333eeec'
+    '0d2f8ca3ae4472556000845ae8acfcfbe4e69cea799739910a8b9a727f58d37a'
+)
+
+package() {
+    cd "$srcdir/$_dist"
+    install -Dm755 resonanced     "$pkgdir/usr/bin/resonanced"
+    install -Dm755 resonance      "$pkgdir/usr/bin/resonance"
+    install -Dm755 resonance-tui  "$pkgdir/usr/bin/resonance-tui"
+    install -Dm755 resonance-gui  "$pkgdir/usr/bin/resonance-gui"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+
+    cd "$srcdir"
+    # Desktop integration for the GUI.
+    install -Dm644 "$_appid.desktop" \
+        "$pkgdir/usr/share/applications/$_appid.desktop"
+    install -Dm644 "$_appid.svg" \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/$_appid.svg"
+    install -Dm644 "$_appid.metainfo.xml" \
+        "$pkgdir/usr/share/metainfo/$_appid.metainfo.xml"
+
+    # systemd user service.
+    install -Dm644 resonanced.service \
+        "$pkgdir/usr/lib/systemd/user/resonanced.service"
+}

@@ -220,6 +220,7 @@ fn handle_settings(app: &mut App, key: KeyEvent) {
         KeyCode::Down | KeyCode::Char('j') => app.settings_move(1),
         KeyCode::Enter | KeyCode::Char(' ') => app.settings_enter(),
         KeyCode::Char('n') => app.settings_key_n(),
+        KeyCode::Char('e') => app.settings_key_e(),
         KeyCode::Char('r') => app.settings_key_r(),
         KeyCode::Char('d') | KeyCode::Delete => app.settings_key_d(),
         KeyCode::Char('m') => app.settings_key_m(),

@@ -34,7 +34,12 @@ pub fn parse_apo(content: &str) -> Result<Preset, ApoError> {
         }
 
         if let Some(rest) = line.strip_prefix("GraphicEQ:") {
-            let graphic_bands = parse_graphic_eq(rest.trim(), ln)?;
+            // A GraphicEQ line is a *target curve*, not filters — fit it to a
+            // parametric bank (shelves + peaks) so the summed response matches.
+            // The broadband level folds into the preamp.
+            let points = parse_graphic_eq(rest.trim(), ln)?;
+            let (preamp_adj, graphic_bands) = crate::graphic::fit_graphic_eq(&points);
+            preamp_db += preamp_adj;
             bands.extend(graphic_bands);
             continue;
         }
@@ -205,29 +210,35 @@ fn parse_filter_type(s: &str, ln: usize) -> Result<ApoFilterType, ApoError> {
     }
 }
 
-fn parse_graphic_eq(s: &str, ln: usize) -> Result<Vec<EqBand>, ApoError> {
-    // Format: "20 0; 25 -1.2; 31 0.5; ..."
+/// Parse the `GraphicEQ:` value into `(freq Hz, gain dB)` target points.
+fn parse_graphic_eq(s: &str, ln: usize) -> Result<Vec<(f64, f64)>, ApoError> {
+    // Format: "20 0; 25 -1.2; 31 0.5; ..." — a freq/gain pair per ';'.
     s.split(';')
         .filter(|p| !p.trim().is_empty())
         .map(|pair| {
             let mut parts = pair.split_whitespace();
-            let freq = parts
+            let first = parts
                 .next()
-                .ok_or_else(|| err(ln, "missing freq in GraphicEQ"))?
+                .ok_or_else(|| err(ln, "missing freq in GraphicEQ"))?;
+            // The gain is normally a separate token, but AutoEq exports often
+            // glue the last pair (e.g. "19871-3.0"). When there's no second
+            // token, split the freq off at the gain's leading minus sign.
+            let (freq_str, gain_str) = match parts.next() {
+                Some(g) => (first, g),
+                None => {
+                    let idx = first
+                        .find('-')
+                        .ok_or_else(|| err(ln, "missing gain in GraphicEQ"))?;
+                    (&first[..idx], &first[idx..])
+                }
+            };
+            let freq = freq_str
                 .parse::<f64>()
                 .map_err(|_| err(ln, "invalid freq in GraphicEQ"))?;
-            let gain_db = parts
-                .next()
-                .ok_or_else(|| err(ln, "missing gain in GraphicEQ"))?
+            let gain_db = gain_str
                 .parse::<f64>()
                 .map_err(|_| err(ln, "invalid gain in GraphicEQ"))?;
-            Ok(EqBand {
-                filter_type: ApoFilterType::Peaking,
-                freq,
-                gain_db,
-                q: 1.41,
-                enabled: true,
-            })
+            Ok((freq, gain_db))
         })
         .collect()
 }
@@ -260,12 +271,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_graphic_eq() {
-        let content = "GraphicEQ: 20 0; 100 -2.5; 1000 1.0\n";
+    fn parse_graphic_eq_fits_to_bands() {
+        // A GraphicEQ target curve is fitted to a parametric bank, not turned
+        // into one band per point. (Accuracy is covered in `graphic` tests.)
+        let content = "GraphicEQ: 20 -3; 100 -2.5; 1000 0; 10000 1.0\n";
         let preset = parse_apo(content).unwrap();
-        assert_eq!(preset.bands.len(), 3);
-        assert!((preset.bands[1].freq - 100.0).abs() < 0.01);
-        assert!((preset.bands[1].gain_db - (-2.5)).abs() < 0.001);
+        assert!(!preset.bands.is_empty());
+        assert!(preset.bands.iter().all(|b| b.enabled));
+    }
+
+    #[test]
+    fn parse_graphic_eq_glued_last_pair() {
+        // AutoEq exports often glue the final pair: "19871-3.0" (no space).
+        // It must parse without error and produce a fitted band set.
+        let content = "GraphicEQ: 20 -8.7; 100 -5.0; 1000 -3.9; 19871-3.0\n";
+        let preset = parse_apo(content).unwrap();
+        assert!(!preset.bands.is_empty());
     }
 
     #[test]

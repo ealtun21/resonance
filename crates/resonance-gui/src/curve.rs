@@ -55,16 +55,23 @@ fn coeffs_for(b: &BandState, sr: f64) -> Option<BiquadCoeffs> {
     }
 }
 
-/// Sample the response at `n` log-spaced points from 20 Hz to 20 kHz.
-/// Returns `(log10(freq), gain_db)` pairs, with sub-sampling so narrow high-Q
-/// peaks are not skipped between points.
-pub fn curve_points(bands: &[BandState], sample_rate: f64, n: usize) -> Vec<(f64, f64)> {
-    let span = LOG_MAX - LOG_MIN;
+/// Sample the response at `n` log-spaced points over `[log_min, log_max]`
+/// (log10 Hz). Returns `(log10(freq), gain_db)` pairs, with sub-sampling so
+/// narrow high-Q peaks are not skipped between points. Used over a sub-range
+/// so the curve stays dense when the FR graph is zoomed in.
+pub fn curve_points_range(
+    bands: &[BandState],
+    sample_rate: f64,
+    n: usize,
+    log_min: f64,
+    log_max: f64,
+) -> Vec<(f64, f64)> {
+    let span = log_max - log_min;
     let step = span / (n.max(2) - 1) as f64;
     (0..n)
         .map(|i| {
             let t = i as f64 / (n - 1) as f64;
-            let log_freq = LOG_MIN + t * span;
+            let log_freq = log_min + t * span;
             let mut best = 0.0;
             let mut best_abs = -1.0;
             for s in [-0.5, -0.25, 0.0, 0.25, 0.5] {
@@ -85,20 +92,49 @@ pub fn clampf_log(freq: f64) -> f64 {
     freq.clamp(20.0, 20000.0).log10()
 }
 
-/// x-axis tick positions (log10 of freq) and labels.
-pub fn x_axis_ticks() -> Vec<(f64, &'static str)> {
-    vec![
-        (20f64.log10(), "20"),
-        (50f64.log10(), "50"),
-        (100f64.log10(), "100"),
-        (200f64.log10(), "200"),
-        (500f64.log10(), "500"),
-        (1000f64.log10(), "1k"),
-        (2000f64.log10(), "2k"),
-        (5000f64.log10(), "5k"),
-        (10000f64.log10(), "10k"),
-        (20000f64.log10(), "20k"),
+/// Named frequency regions for the FR graph background shading.
+/// `(start_hz, end_hz, label)` — continuous coverage across 20 Hz–20 kHz.
+pub fn freq_bands() -> [(f64, f64, &'static str); 7] {
+    [
+        (20.0, 80.0, "sub bass"),
+        (80.0, 300.0, "mid bass"),
+        (300.0, 1000.0, "lo-mid"),
+        (1000.0, 4000.0, "hi-mid"),
+        (4000.0, 6000.0, "presence"),
+        (6000.0, 10000.0, "mid treble"),
+        (10000.0, 20000.0, "air"),
     ]
+}
+
+/// x-axis ticks whose frequency falls within `[log_min, log_max]`. A richer
+/// candidate set keeps a zoomed window from going label-less.
+pub fn x_axis_ticks_range(log_min: f64, log_max: f64) -> Vec<(f64, &'static str)> {
+    const CANDIDATES: &[(f64, &str)] = &[
+        (20.0, "20"),
+        (30.0, "30"),
+        (50.0, "50"),
+        (80.0, "80"),
+        (100.0, "100"),
+        (150.0, "150"),
+        (200.0, "200"),
+        (300.0, "300"),
+        (500.0, "500"),
+        (800.0, "800"),
+        (1000.0, "1k"),
+        (1500.0, "1.5k"),
+        (2000.0, "2k"),
+        (3000.0, "3k"),
+        (5000.0, "5k"),
+        (8000.0, "8k"),
+        (10000.0, "10k"),
+        (15000.0, "15k"),
+        (20000.0, "20k"),
+    ];
+    CANDIDATES
+        .iter()
+        .map(|&(f, l)| (f.log10(), l))
+        .filter(|&(lf, _)| lf >= log_min - 1e-9 && lf <= log_max + 1e-9)
+        .collect()
 }
 
 fn biquad_mag_db(c: &BiquadCoeffs, freq: f64, sr: f64) -> f64 {
