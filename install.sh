@@ -1,24 +1,25 @@
 #!/usr/bin/env bash
 # Resonance installer.
 #
-# It prefers the system package manager when one can produce a tracked package
-# (currently Arch/pacman via the in-tree PKGBUILD — clean uninstall, automatic
-# dependency handling). Otherwise it falls back to prebuilt release binaries
-# (curl | bash) or a plain `cargo build` install (inside a checkout).
+# By default it installs the prebuilt release binaries (fast — no compile).
+# On Arch you can opt into a pacman-tracked build from source (clean uninstall,
+# automatic dependency handling) with PACMAN_BUILD=1. Inside a git checkout it
+# builds from source directly.
 #
 #   # 1. curl | bash  (no checkout)
 #   curl -fsSL https://raw.githubusercontent.com/ealtun21/resonance/master/install.sh | bash
-#       Arch:  download the tagged source and `makepkg -si` (pacman-tracked)
-#       else:  download the prebuilt binary tarball into PREFIX/bin
+#       default:        download the prebuilt binary tarball into PREFIX/bin
+#       PACMAN_BUILD=1: on Arch, download the tagged source and `makepkg -si`
 #
 #   # 2. inside a git checkout: builds from source
 #   ./install.sh            # Arch -> makepkg -si, else cargo build + install
 #
 # Env overrides:
-#   RESONANCE_VERSION=v0.2.0   pin a release tag (default: latest)
+#   RESONANCE_VERSION=v0.3.0   pin a release tag (default: latest)
 #   PREFIX=/usr/local          install prefix (default: /usr/local, or ~/.local if unprivileged)
 #   FROM_SOURCE=1              force source build even inside a checkout
-#   NO_PKG_MANAGER=1           skip the package-manager path; use binaries/cargo only
+#   PACMAN_BUILD=1             on Arch, build a pacman-tracked package via makepkg
+#                              instead of installing the prebuilt binaries
 set -euo pipefail
 
 REPO="ealtun21/resonance"
@@ -185,10 +186,11 @@ main() {
         return
     fi
 
-    # No checkout (curl | bash). Prefer a package-manager-tracked install first.
-    if [[ "${NO_PKG_MANAGER:-0}" != "1" && "${FROM_SOURCE:-0}" != "1" ]] \
+    # No checkout (curl | bash). Default to fast prebuilt binaries; only build a
+    # pacman-tracked package when explicitly requested with PACMAN_BUILD=1.
+    if [[ "${PACMAN_BUILD:-0}" == "1" && "${FROM_SOURCE:-0}" != "1" ]] \
         && command -v pacman >/dev/null 2>&1; then
-        info "Arch/pacman detected — trying a package-manager install"
+        info "PACMAN_BUILD=1 — building a pacman-tracked package via makepkg"
         if install_arch_pkg_remote; then return; fi
         info "Package-manager path unavailable; falling back to prebuilt binaries"
     fi
