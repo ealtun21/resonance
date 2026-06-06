@@ -19,11 +19,24 @@ REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 APP_OUT="${APP_OUT:-$REPO_DIR/Resonance.app}"
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 
-echo ">> building release binary"
-(cd "$REPO_DIR" && cargo build --release -p resonance-daemon)
+echo ">> building release binaries (daemon + GUI + TUI + CLI)"
+# All four binaries land in the bundle — the GUI is the user-facing
+# entry point, the CLI + TUI are symlinked into ~/.local/bin by
+# install.sh, and the daemon is what launchd spawns. Building them all
+# together is faster than -p per crate (single cargo run, shared deps).
+(cd "$REPO_DIR" && cargo build --release \
+    -p resonance-daemon \
+    -p resonance-gui \
+    -p resonance-tui \
+    -p resonance-cli)
 
 BIN="$REPO_DIR/target/release/resonanced"
-[[ -x "$BIN" ]] || { echo "missing $BIN — build failed?" >&2; exit 1; }
+GUI="$REPO_DIR/target/release/resonance-gui"
+for b in "$BIN" "$GUI" \
+    "$REPO_DIR/target/release/resonance" \
+    "$REPO_DIR/target/release/resonance-tui"; do
+    [[ -x "$b" ]] || { echo "missing $b — build failed?" >&2; exit 1; }
+done
 
 echo ">> assembling app bundle at $APP_OUT"
 rm -rf "$APP_OUT"
