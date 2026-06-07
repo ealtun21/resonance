@@ -72,7 +72,11 @@ fn process_alive(pid: u32) -> bool {
 #[cfg(windows)]
 fn process_alive(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // A still-running process reports exit code STILL_ACTIVE (259).
+    const STILL_ACTIVE: u32 = 259;
     if pid == 0 {
         return false;
     }
@@ -83,8 +87,15 @@ fn process_alive(pid: u32) -> bool {
         if handle.is_null() {
             return false;
         }
+        // OpenProcess STILL SUCCEEDS on a process that has been terminated but not
+        // yet reaped — so it can't distinguish "running" from "exiting". Without
+        // this check, restarting the daemon (taskkill old → spawn new) had the new
+        // instance see the dying old PID as alive and bail on the single-instance
+        // guard. Treat anything not STILL_ACTIVE as dead.
+        let mut code: u32 = 0;
+        let ok = GetExitCodeProcess(handle, &mut code) != 0;
         CloseHandle(handle);
-        true
+        ok && code == STILL_ACTIVE
     }
 }
 
