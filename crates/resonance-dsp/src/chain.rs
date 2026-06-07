@@ -89,6 +89,38 @@ impl ProcessorChain {
         self.dynamic_boost.reset();
         self.bass.reset();
     }
+
+    /// Rebind every sample-rate-dependent coefficient to a new output rate.
+    ///
+    /// A device/format change (e.g. switching outputs) renegotiates the rate,
+    /// which invalidates not just the biquad filters but the effects too (their
+    /// internal filters and reverb delays are rate-derived). Filters are updated
+    /// in place; effects are rebuilt at the new rate, carrying over intensity +
+    /// enabled (their sample history resets, which is unavoidable on a rate
+    /// change). No-op when the rate is unchanged.
+    pub fn rebind_sample_rate(&mut self, sample_rate: f64) {
+        if self.sample_rate == sample_rate {
+            return;
+        }
+        self.sample_rate = sample_rate;
+        for f in self.filters.iter_mut() {
+            let _ = f.update(f.filter_type, f.freq, f.gain_db, f.q, sample_rate);
+        }
+        let ch = self.channels;
+        self.fidelity = carry_settings(&self.fidelity, FidelityEffect::new(ch, sample_rate));
+        self.ambience = carry_settings(&self.ambience, AmbienceEffect::new(ch, sample_rate));
+        self.surround = carry_settings(&self.surround, SurroundEffect::new(sample_rate));
+        self.dynamic_boost =
+            carry_settings(&self.dynamic_boost, DynamicBoostEffect::new(sample_rate));
+        self.bass = carry_settings(&self.bass, BassBoostEffect::new(ch, sample_rate));
+    }
+}
+
+/// Copy intensity + enabled from an existing effect onto a freshly-built one.
+fn carry_settings<E: Effect>(old: &E, mut fresh: E) -> E {
+    fresh.set_intensity(old.intensity());
+    fresh.set_enabled(old.enabled());
+    fresh
 }
 
 fn db_to_linear(db: f64) -> f64 {
@@ -174,6 +206,41 @@ mod tests {
         let mut buf = input.clone();
         chain.process(&mut buf);
         assert_eq!(buf, input);
+    }
+
+    #[test]
+    fn rebind_sample_rate_updates_rate_and_preserves_effect_settings() {
+        use crate::filter::{ApoFilter, FilterType};
+        let mut chain = ProcessorChain::builder()
+            .sample_rate(48_000.0)
+            .add_filter(
+                ApoFilter::builder()
+                    .filter_type(FilterType::Peaking)
+                    .freq(1_000.0)
+                    .gain_db(6.0)
+                    .q(2.0)
+                    .channels(2)
+                    .sample_rate(48_000.0)
+                    .build()
+                    .unwrap(),
+            )
+            .build();
+        chain.set_effect_intensity(FxEffect::Bass, 0.7);
+        chain.set_effect_enabled(FxEffect::Bass, true);
+
+        chain.rebind_sample_rate(44_100.0);
+
+        assert_eq!(chain.sample_rate, 44_100.0);
+        // Effect intensity + enabled carried across the rate change.
+        assert!((chain.bass.intensity() - 0.7).abs() < 1e-9);
+        assert!(chain.bass.enabled());
+        // The filter still describes the same band at the new rate.
+        assert!((chain.filters[0].freq - 1_000.0).abs() < 1e-9);
+        assert!((chain.filters[0].gain_db - 6.0).abs() < 1e-9);
+
+        // No-op when unchanged.
+        chain.rebind_sample_rate(44_100.0);
+        assert_eq!(chain.sample_rate, 44_100.0);
     }
 
     #[test]

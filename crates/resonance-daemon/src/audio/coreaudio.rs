@@ -189,16 +189,13 @@ fn run_streams(
     };
 
     {
-        // Re-bind the DSP chain to the output device's sample rate so
-        // coefficients are correct for the rate we'll render at.
-        let mut s = shared.lock().unwrap();
-        if s.chain.sample_rate as u32 != sample_rate {
-            s.chain.sample_rate = sample_rate as f64;
-            let sr = s.chain.sample_rate;
-            for f in s.chain.filters.iter_mut() {
-                let _ = f.update(f.filter_type, f.freq, f.gain_db, f.q, sr);
-            }
-        }
+        // Re-bind the DSP chain to the output device's sample rate so the
+        // filter *and* effect coefficients are correct for the rate we render at.
+        shared
+            .lock()
+            .unwrap()
+            .chain
+            .rebind_sample_rate(sample_rate as f64);
     }
 
     // Report the active output device by name (the daemon uses this to map

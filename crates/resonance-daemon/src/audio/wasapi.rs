@@ -228,15 +228,12 @@ fn run_streams(
     };
 
     {
-        // Re-bind DSP coefficients to the render device's sample rate.
-        let mut s = shared.lock().unwrap();
-        if s.chain.sample_rate as u32 != sample_rate {
-            s.chain.sample_rate = sample_rate as f64;
-            let sr = s.chain.sample_rate;
-            for f in s.chain.filters.iter_mut() {
-                let _ = f.update(f.filter_type, f.freq, f.gain_db, f.q, sr);
-            }
-        }
+        // Re-bind filter *and* effect coefficients to the render device's rate.
+        shared
+            .lock()
+            .unwrap()
+            .chain
+            .rebind_sample_rate(sample_rate as f64);
     }
 
     if last_active_output.as_deref() != Some(render_name.as_str()) {
