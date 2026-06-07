@@ -151,11 +151,10 @@ pub fn restart() -> io::Result<()> {
     backend::restart()
 }
 
-/// Enable autostart and start now (installing the unit first if needed).
+/// Enable autostart and start now. Each backend's `enable` ensures the unit is
+/// installed itself (the macOS plist bootstrap is part of `enable`), so the
+/// facade does not pre-install — doing so double-bootstrapped launchd.
 pub fn enable() -> io::Result<()> {
-    if !is_installed() {
-        install()?;
-    }
     backend::enable()
 }
 

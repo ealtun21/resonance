@@ -126,6 +126,11 @@ pub fn restart() -> io::Result<()> {
 }
 
 pub fn enable() -> io::Result<()> {
+    // `systemctl enable` needs the unit file present; ensure it ourselves so
+    // the facade doesn't have to pre-install.
+    if !is_installed() {
+        install()?;
+    }
     check(systemctl(&["enable", "--now", UNIT_NAME])?, "enable")
 }
 
