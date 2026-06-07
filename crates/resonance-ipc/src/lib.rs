@@ -116,6 +116,18 @@ pub enum FxEffectId {
     Bass,
 }
 
+impl FxEffectId {
+    /// Every effect, in chain order. Adding a variant forces the array to be
+    /// updated, which propagates exhaustively to every `ALL` iteration.
+    pub const ALL: [FxEffectId; 5] = [
+        FxEffectId::Fidelity,
+        FxEffectId::Ambience,
+        FxEffectId::Surround,
+        FxEffectId::DynamicBoost,
+        FxEffectId::Bass,
+    ];
+}
+
 impl From<FxEffectId> for FxEffect {
     fn from(id: FxEffectId) -> Self {
         match id {
@@ -307,7 +319,7 @@ pub struct BandState {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EffectsState {
     pub fidelity_intensity: f64,
     pub fidelity_enabled: bool,
@@ -319,6 +331,45 @@ pub struct EffectsState {
     pub dynamic_boost_enabled: bool,
     pub bass_intensity: f64,
     pub bass_enabled: bool,
+}
+
+impl EffectsState {
+    /// `(intensity, enabled)` for one effect — the single place the flat fields
+    /// map to the effect enum, so iterating `FxEffectId::ALL` needs no unroll.
+    pub fn get(&self, id: FxEffectId) -> (f64, bool) {
+        match id {
+            FxEffectId::Fidelity => (self.fidelity_intensity, self.fidelity_enabled),
+            FxEffectId::Ambience => (self.ambience_intensity, self.ambience_enabled),
+            FxEffectId::Surround => (self.surround_intensity, self.surround_enabled),
+            FxEffectId::DynamicBoost => (self.dynamic_boost_intensity, self.dynamic_boost_enabled),
+            FxEffectId::Bass => (self.bass_intensity, self.bass_enabled),
+        }
+    }
+
+    pub fn set(&mut self, id: FxEffectId, intensity: f64, enabled: bool) {
+        match id {
+            FxEffectId::Fidelity => {
+                self.fidelity_intensity = intensity;
+                self.fidelity_enabled = enabled;
+            }
+            FxEffectId::Ambience => {
+                self.ambience_intensity = intensity;
+                self.ambience_enabled = enabled;
+            }
+            FxEffectId::Surround => {
+                self.surround_intensity = intensity;
+                self.surround_enabled = enabled;
+            }
+            FxEffectId::DynamicBoost => {
+                self.dynamic_boost_intensity = intensity;
+                self.dynamic_boost_enabled = enabled;
+            }
+            FxEffectId::Bass => {
+                self.bass_intensity = intensity;
+                self.bass_enabled = enabled;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

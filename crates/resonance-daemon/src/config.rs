@@ -10,7 +10,7 @@
 
 use resonance_dsp::chain::{FxEffect, ProcessorChain};
 use resonance_dsp::filter::{ApoFilter, FilterType};
-use resonance_ipc::{BandState, BandType, DaemonState, EffectsState};
+use resonance_ipc::{BandState, BandType, DaemonState, EffectsState, FxEffectId};
 use resonance_preset::model::Preset;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -103,17 +103,12 @@ impl Profile {
         let mut chain = builder.build();
         chain.enabled = self.enabled;
 
-        let e = &self.effects;
-        chain.set_effect_intensity(FxEffect::Fidelity, e.fidelity_intensity);
-        chain.set_effect_enabled(FxEffect::Fidelity, e.fidelity_enabled);
-        chain.set_effect_intensity(FxEffect::Ambience, e.ambience_intensity);
-        chain.set_effect_enabled(FxEffect::Ambience, e.ambience_enabled);
-        chain.set_effect_intensity(FxEffect::Surround, e.surround_intensity);
-        chain.set_effect_enabled(FxEffect::Surround, e.surround_enabled);
-        chain.set_effect_intensity(FxEffect::DynamicBoost, e.dynamic_boost_intensity);
-        chain.set_effect_enabled(FxEffect::DynamicBoost, e.dynamic_boost_enabled);
-        chain.set_effect_intensity(FxEffect::Bass, e.bass_intensity);
-        chain.set_effect_enabled(FxEffect::Bass, e.bass_enabled);
+        for id in FxEffectId::ALL {
+            let (intensity, enabled) = self.effects.get(id);
+            let fx = FxEffect::from(id);
+            chain.set_effect_intensity(fx, intensity);
+            chain.set_effect_enabled(fx, enabled);
+        }
 
         chain
     }

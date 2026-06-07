@@ -1,6 +1,6 @@
 use crate::meters::AtomicMeters;
-use resonance_dsp::{chain::FxEffect, chain::ProcessorChain, effects::Effect};
-use resonance_ipc::{BandState, BandType, DaemonState, EffectsState};
+use resonance_dsp::{chain::FxEffect, chain::ProcessorChain};
+use resonance_ipc::{BandState, BandType, DaemonState, EffectsState, FxEffectId};
 use rtrb::Producer;
 use std::sync::{Arc, Mutex};
 
@@ -183,23 +183,18 @@ impl SharedState {
             })
             .collect();
 
+        let mut effects = EffectsState::default();
+        for id in FxEffectId::ALL {
+            let (intensity, enabled) = chain.effect_params(FxEffect::from(id));
+            effects.set(id, intensity, enabled);
+        }
+
         DaemonState {
             enabled: chain.enabled,
             preamp_db: chain.preamp_db,
             eq_enabled: true,
             bands,
-            effects: EffectsState {
-                fidelity_intensity: chain.fidelity.intensity(),
-                fidelity_enabled: chain.fidelity.enabled(),
-                ambience_intensity: chain.ambience.intensity(),
-                ambience_enabled: chain.ambience.enabled(),
-                surround_intensity: chain.surround.intensity(),
-                surround_enabled: chain.surround.enabled(),
-                dynamic_boost_intensity: chain.dynamic_boost.intensity(),
-                dynamic_boost_enabled: chain.dynamic_boost.enabled(),
-                bass_intensity: chain.bass.intensity(),
-                bass_enabled: chain.bass.enabled(),
-            },
+            effects,
             current_preset: inner.current_preset.clone(),
             sample_rate: chain.sample_rate,
             channels: chain.channels,

@@ -12,6 +12,18 @@ pub enum FxEffect {
     Bass,
 }
 
+impl FxEffect {
+    /// Every effect, in chain order. Adding a variant forces this array to be
+    /// updated, propagating to every `ALL` iteration.
+    pub const ALL: [FxEffect; 5] = [
+        FxEffect::Fidelity,
+        FxEffect::Ambience,
+        FxEffect::Surround,
+        FxEffect::DynamicBoost,
+        FxEffect::Bass,
+    ];
+}
+
 #[derive(Debug)]
 pub struct ProcessorChain {
     pub channels: usize,
@@ -68,6 +80,21 @@ impl ProcessorChain {
             FxEffect::Surround => self.surround.set_intensity(value),
             FxEffect::DynamicBoost => self.dynamic_boost.set_intensity(value),
             FxEffect::Bass => self.bass.set_intensity(value),
+        }
+    }
+
+    /// `(intensity, enabled)` for one effect — the read counterpart of
+    /// `set_effect_intensity` / `set_effect_enabled`, so callers can iterate
+    /// `FxEffect::ALL` instead of unrolling all five effects by hand.
+    pub fn effect_params(&self, effect: FxEffect) -> (f64, bool) {
+        match effect {
+            FxEffect::Fidelity => (self.fidelity.intensity(), self.fidelity.enabled()),
+            FxEffect::Ambience => (self.ambience.intensity(), self.ambience.enabled()),
+            FxEffect::Surround => (self.surround.intensity(), self.surround.enabled()),
+            FxEffect::DynamicBoost => {
+                (self.dynamic_boost.intensity(), self.dynamic_boost.enabled())
+            }
+            FxEffect::Bass => (self.bass.intensity(), self.bass.enabled()),
         }
     }
 
