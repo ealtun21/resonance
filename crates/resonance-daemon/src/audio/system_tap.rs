@@ -96,7 +96,9 @@ impl SystemAudioTap {
         let self_pid = unsafe { libc::getpid() } as i32;
         if let Some(self_obj) = translate_pid_to_process_object(self_pid) {
             excludes.push(NSNumber::new_u32(self_obj));
-            info!("excluding self (pid={self_pid}, process_obj={self_obj}) from tap to prevent feedback loop");
+            info!(
+                "excluding self (pid={self_pid}, process_obj={self_obj}) from tap to prevent feedback loop"
+            );
         } else {
             warn!(
                 "could not translate self pid {self_pid} to AudioObjectID — \

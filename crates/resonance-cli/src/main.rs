@@ -5,13 +5,9 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use resonance_ipc::{
     Command, FxEffectId, Response,
-    transport::{read_response, write_command},
+    transport::{connect, read_response, write_command},
 };
-use std::{
-    io::{self, BufReader, BufWriter, IsTerminal, Write},
-    os::unix::net::UnixStream,
-    path::PathBuf,
-};
+use std::io::{self, BufReader, BufWriter, IsTerminal, Write};
 
 #[derive(Parser)]
 #[command(name = "resonance", about = "Control the Resonance EQ daemon", version)]
@@ -275,9 +271,7 @@ fn run_daemon(action: &DaemonAction) -> Result<()> {
 }
 
 fn send(cmd: Command) -> Result<Response> {
-    let path = socket_path();
-    let stream = UnixStream::connect(&path)
-        .map_err(|e| anyhow::anyhow!("cannot connect to daemon at {}: {e}", path.display()))?;
+    let stream = connect().map_err(|e| anyhow::anyhow!("cannot connect to daemon: {e}"))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = BufWriter::new(stream);
 
@@ -522,8 +516,4 @@ fn parse_effect(s: &str) -> Result<FxEffectId> {
         "bass" => Ok(FxEffectId::Bass),
         _ => bail!("unknown effect '{s}': use fidelity/ambience/surround/dynamic_boost/bass"),
     }
-}
-
-fn socket_path() -> PathBuf {
-    resonance_ipc::paths::default_socket_path()
 }

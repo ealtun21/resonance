@@ -15,6 +15,17 @@
 
 use std::path::PathBuf;
 
+#[cfg(windows)]
+fn home() -> PathBuf {
+    if let Ok(p) = std::env::var("USERPROFILE") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    PathBuf::from("C:\\")
+}
+
+#[cfg(not(windows))]
 fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
 }
@@ -25,11 +36,21 @@ fn data_home() -> PathBuf {
             return PathBuf::from(p);
         }
     }
+    #[cfg(windows)]
+    {
+        // Per-user, non-roaming app data: %LOCALAPPDATA%.
+        if let Ok(p) = std::env::var("LOCALAPPDATA") {
+            if !p.is_empty() {
+                return PathBuf::from(p);
+            }
+        }
+        home().join("AppData").join("Local")
+    }
     #[cfg(target_os = "macos")]
     {
         home().join("Library").join("Application Support")
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
     {
         home().join(".local").join("share")
     }
@@ -50,6 +71,16 @@ fn system_preset_dirs() -> Vec<PathBuf> {
             .map(|s| PathBuf::from(s).join("resonance").join("presets"))
             .collect();
     }
+    #[cfg(windows)]
+    {
+        // Machine-wide app data: %ProgramData%\resonance\presets.
+        if let Ok(p) = std::env::var("ProgramData") {
+            if !p.is_empty() {
+                return vec![PathBuf::from(p).join("resonance").join("presets")];
+            }
+        }
+        vec![PathBuf::from("C:\\ProgramData\\resonance\\presets")]
+    }
     #[cfg(target_os = "macos")]
     {
         vec![
@@ -57,7 +88,7 @@ fn system_preset_dirs() -> Vec<PathBuf> {
             PathBuf::from("/usr/local/share/resonance/presets"),
         ]
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
     {
         vec![
             PathBuf::from("/usr/local/share/resonance/presets"),
@@ -86,6 +117,10 @@ pub fn config_dir() -> PathBuf {
             return PathBuf::from(p).join("resonance");
         }
     }
+    #[cfg(windows)]
+    {
+        data_home().join("resonance")
+    }
     #[cfg(target_os = "macos")]
     {
         home()
@@ -93,7 +128,7 @@ pub fn config_dir() -> PathBuf {
             .join("Application Support")
             .join("resonance")
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
     {
         home().join(".config").join("resonance")
     }
@@ -115,7 +150,42 @@ pub fn runtime_dir() -> PathBuf {
             return PathBuf::from(p);
         }
     }
-    PathBuf::from("/tmp")
+    #[cfg(windows)]
+    {
+        for var in ["TEMP", "TMP"] {
+            if let Ok(p) = std::env::var(var) {
+                if !p.is_empty() {
+                    return PathBuf::from(p);
+                }
+            }
+        }
+        return data_home().join("resonance");
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/tmp")
+    }
+}
+
+/// Windows-only: the port file the daemon writes its loopback TCP port into.
+/// Clients read it to discover where to connect. Honours `$RESONANCE_SOCKET`
+/// (treated as a full path) for parity with the Unix socket override.
+#[cfg(windows)]
+pub fn port_file_path() -> PathBuf {
+    if let Ok(p) = std::env::var(crate::SOCKET_PATH_ENV) {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    runtime_dir().join("resonance.port")
+}
+
+/// Windows-only: read the daemon's loopback TCP port from the port file.
+#[cfg(windows)]
+pub fn read_port_file() -> Option<u16> {
+    std::fs::read_to_string(port_file_path())
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
 }
 
 /// Resolve the IPC Unix-socket path: respects `$RESONANCE_SOCKET` (any path),

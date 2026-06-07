@@ -10,3 +10,9 @@ target/
 
 # macOS app bundle (contrib/macos/build-app.sh output)
 /Resonance.app/
+
+# Windows installer build artifacts (generated in CI)
+/contrib/windows/vbcable/
+/contrib/windows/resonance.ico
+/contrib/windows/Output/
+/iconset/

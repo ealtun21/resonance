@@ -1,5 +1,9 @@
 //! `resonance-gui` — egui/eframe desktop client for the Resonance daemon.
 
+// On Windows, run as a GUI-subsystem process so no console window appears
+// behind the app. `--dump-iconset` (used by CI) still works — it writes files.
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 mod app;
 mod browser;
 mod curve;
@@ -72,38 +76,34 @@ fn main() -> eframe::Result<()> {
 /// the IPC reconnect loop polls the socket and switches into the main
 /// view as soon as it's reachable.
 fn ensure_daemon_running() {
-    let socket = resonance_ipc::paths::default_socket_path();
-    if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+    if resonance_ipc::transport::is_reachable() {
         return;
     }
 
     if resonance_ipc::service::systemd_available() {
         match resonance_ipc::service::start() {
             Ok(()) => {
-                // Service manager has taken ownership. The daemon's
-                // CoreAudio init can take 1–3 s on cold start; we don't
-                // block on it — the GUI's reconnect loop sees the socket
-                // as soon as it's bound.
+                // Service manager has taken ownership. The daemon's audio init
+                // can take 1–3 s on cold start; we don't block on it — the
+                // GUI's reconnect loop sees the daemon as soon as it's bound.
             }
             Err(e) => {
-                eprintln!(
-                    "GUI: service manager start failed ({e}); falling back to direct spawn"
-                );
-                spawn_daemon_detached(&socket);
+                eprintln!("GUI: service manager start failed ({e}); falling back to direct spawn");
+                spawn_daemon_detached();
             }
         }
         return;
     }
 
     // No service manager: spawn directly (cargo-run / container path).
-    spawn_daemon_detached(&socket);
+    spawn_daemon_detached();
 }
 
-/// Block (briefly) until the daemon binds its socket, or until `timeout`.
-fn wait_for_socket(socket: &std::path::Path, timeout: std::time::Duration) -> bool {
+/// Block (briefly) until the daemon is reachable, or until `timeout`.
+fn wait_for_daemon(timeout: std::time::Duration) -> bool {
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
-        if std::os::unix::net::UnixStream::connect(socket).is_ok() {
+        if resonance_ipc::transport::is_reachable() {
             return true;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -113,7 +113,7 @@ fn wait_for_socket(socket: &std::path::Path, timeout: std::time::Duration) -> bo
 
 /// Fallback when no service manager is available. Spawns the daemon as a
 /// detached child with logs going to the platform's log dir.
-fn spawn_daemon_detached(socket: &std::path::Path) {
+fn spawn_daemon_detached() {
     let Some(daemon_path) = locate_daemon() else {
         eprintln!(
             "GUI: could not locate resonanced binary near this executable; \
@@ -129,7 +129,13 @@ fn spawn_daemon_detached(socket: &std::path::Path) {
             let _ = std::fs::create_dir_all(&dir);
             dir.join("resonanced.log")
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        {
+            let dir = resonance_ipc::paths::config_dir();
+            let _ = std::fs::create_dir_all(&dir);
+            dir.join("resonanced.log")
+        }
+        #[cfg(all(not(target_os = "macos"), not(windows)))]
         {
             std::path::PathBuf::from("/tmp/resonanced.log")
         }
@@ -158,11 +164,8 @@ fn spawn_daemon_detached(socket: &std::path::Path) {
     }
     match cmd.spawn() {
         Ok(_child) => {
-            if !wait_for_socket(socket, std::time::Duration::from_secs(2)) {
-                eprintln!(
-                    "GUI: daemon spawned but socket {} not yet ready — GUI will retry",
-                    socket.display()
-                );
+            if !wait_for_daemon(std::time::Duration::from_secs(2)) {
+                eprintln!("GUI: daemon spawned but not reachable yet — GUI will retry");
             }
         }
         Err(e) => {
@@ -178,23 +181,30 @@ fn spawn_daemon_detached(socket: &std::path::Path) {
 ///   3. The literal name `resonanced`, letting `Command::spawn` fall back
 ///      to the shell's resolution.
 fn locate_daemon() -> Option<std::path::PathBuf> {
+    // Platform-correct binary name (Windows appends `.exe`).
+    const BIN: &str = if cfg!(windows) {
+        "resonanced.exe"
+    } else {
+        "resonanced"
+    };
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let cand = dir.join("resonanced");
+            let cand = dir.join(BIN);
             if cand.is_file() {
                 return Some(cand);
             }
         }
     }
-    if let Ok(path) = std::env::var("PATH") {
-        for d in path.split(':').filter(|s| !s.is_empty()) {
-            let cand = std::path::Path::new(d).join("resonanced");
+    // `split_paths` uses the platform's PATH separator (`:` Unix, `;` Windows).
+    if let Some(path) = std::env::var_os("PATH") {
+        for d in std::env::split_paths(&path) {
+            let cand = d.join(BIN);
             if cand.is_file() {
                 return Some(cand);
             }
         }
     }
-    Some(std::path::PathBuf::from("resonanced"))
+    Some(std::path::PathBuf::from(BIN))
 }
 
 /// Window/taskbar icon, rasterised from the shared brand drawing (matches

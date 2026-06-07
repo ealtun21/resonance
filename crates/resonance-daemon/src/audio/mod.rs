@@ -44,9 +44,18 @@ mod system_tap;
 #[cfg(target_os = "macos")]
 use coreaudio as backend;
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+mod wasapi;
+#[cfg(target_os = "windows")]
+pub(crate) mod win_devices;
+#[cfg(target_os = "windows")]
+use wasapi as backend;
+#[cfg(target_os = "windows")]
+pub use wasapi::measure_loopback;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 mod stub;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 use stub as backend;
 
 /// Spawn the audio backend on its own dedicated real-time thread.

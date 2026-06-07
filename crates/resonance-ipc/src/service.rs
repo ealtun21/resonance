@@ -16,9 +16,14 @@ use systemd as backend;
 #[cfg(target_os = "macos")]
 use crate::launchd as backend;
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+use windows as backend;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 mod stub;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 use stub as backend;
 
 use std::io;
@@ -47,23 +52,30 @@ pub fn unit_path() -> PathBuf {
 /// Resolve the `resonanced` binary: prefer a sibling of the current executable
 /// (covers a co-installed CLI/daemon pair), then `$PATH`, else the bare name.
 pub fn daemon_bin() -> PathBuf {
+    // Platform-correct binary name (Windows appends `.exe`).
+    const BIN: &str = if cfg!(windows) {
+        "resonanced.exe"
+    } else {
+        "resonanced"
+    };
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let cand = dir.join("resonanced");
+            let cand = dir.join(BIN);
             if cand.is_file() {
                 return cand;
             }
         }
     }
-    if let Ok(path) = std::env::var("PATH") {
-        for d in path.split(':').filter(|s| !s.is_empty()) {
-            let cand = std::path::Path::new(d).join("resonanced");
+    // `split_paths` uses the platform's PATH separator (`:` Unix, `;` Windows).
+    if let Some(path) = std::env::var_os("PATH") {
+        for d in std::env::split_paths(&path) {
+            let cand = d.join(BIN);
             if cand.is_file() {
                 return cand;
             }
         }
     }
-    PathBuf::from("resonanced")
+    PathBuf::from(BIN)
 }
 
 /// Whether the underlying service manager is reachable for this user.

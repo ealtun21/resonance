@@ -2,12 +2,10 @@ use anyhow::{Result, anyhow};
 use ratatui::layout::Rect;
 use resonance_ipc::{
     BandState, Command, DaemonState, EffectsState, FxEffectId, Response,
-    transport::{read_response, write_command},
+    transport::{ClientStream, connect, read_response, write_command},
 };
 use std::{
     io::{BufReader, BufWriter, Write},
-    os::unix::net::UnixStream,
-    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -1212,15 +1210,13 @@ pub fn fx_enabled(state: &DaemonState, idx: usize) -> bool {
 // ── Sync IPC client ────────────────────────────────────────────────────────
 
 struct IpcClient {
-    reader: BufReader<UnixStream>,
-    writer: BufWriter<UnixStream>,
+    reader: BufReader<ClientStream>,
+    writer: BufWriter<ClientStream>,
 }
 
 impl IpcClient {
     fn connect() -> Result<Self> {
-        let path = socket_path();
-        let stream =
-            UnixStream::connect(&path).map_err(|e| anyhow!("connect {}: {e}", path.display()))?;
+        let stream = connect().map_err(|e| anyhow!("connect to daemon: {e}"))?;
         stream.set_read_timeout(Some(Duration::from_millis(500)))?;
         let writer = BufWriter::new(stream.try_clone()?);
         let reader = BufReader::new(stream);
@@ -1256,8 +1252,4 @@ impl IpcClient {
         self.writer.flush()?;
         Ok(read_response(&mut self.reader)?)
     }
-}
-
-fn socket_path() -> PathBuf {
-    resonance_ipc::paths::default_socket_path()
 }

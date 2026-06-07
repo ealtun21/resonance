@@ -13,6 +13,7 @@ use eframe::egui;
 use resonance_ipc::{
     BandState, BandType, Command, DaemonState, EffectsState, FxEffectId, Response, service,
 };
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Consecutive edits within this window coalesce into one undo entry (a drag
@@ -139,10 +140,7 @@ enum ServiceAction {
     RefreshStatus,
     /// Run a lifecycle op (start/stop/restart/enable/disable). The static
     /// `label` is shown in the toolbar status when the result comes back.
-    Run {
-        label: &'static str,
-        f: ServiceFn,
-    },
+    Run { label: &'static str, f: ServiceFn },
 }
 
 /// Worker → UI message. Carries an updated Status snapshot (always) plus
@@ -171,10 +169,7 @@ fn spawn_service_worker(
                     }),
                 };
                 let status = service::status();
-                if tx
-                    .send(ServiceWorkerResult { status, feedback })
-                    .is_err()
-                {
+                if tx.send(ServiceWorkerResult { status, feedback }).is_err() {
                     break;
                 }
                 // Wake the UI so it consumes the result on the next frame
@@ -283,15 +278,15 @@ enum LowerTab {
 }
 
 pub struct GuiApp {
-    ipc: Option<IpcClient>,
+    /// Channel to the IPC worker thread — the UI thread never does IPC itself,
+    /// so a stopped/restarting daemon can't block or freeze the window.
+    cmd_tx: std::sync::mpsc::Sender<WorkerCmd>,
+    /// Latest snapshot the IPC worker published (copied into fields each frame).
+    shared: Arc<Mutex<GuiShared>>,
     state: Option<DaemonState>,
     profiles: Vec<String>,
     mappings: Vec<(String, String)>,
     status: String,
-    last_poll: Instant,
-    last_meta: Instant,
-    last_reconnect: Instant,
-    pending: Vec<Command>,
     needs_meta: bool,
     dialog: Dialog,
     /// Pending profile save-overwrite / delete awaiting a yes/no modal.
@@ -359,12 +354,162 @@ pub struct GuiApp {
     min_applied: Option<f32>,
 }
 
+/// Messages from the UI thread to the IPC worker.
+enum WorkerCmd {
+    Cmd(Command),
+    RefreshMeta,
+    Import(String),
+    Export(String),
+}
+
+/// Snapshot the IPC worker publishes for the UI thread to read each frame.
+#[derive(Default)]
+struct GuiShared {
+    state: Option<DaemonState>,
+    profiles: Vec<String>,
+    mappings: Vec<(String, String)>,
+    /// Transient feedback from worker-side actions (import/export/errors).
+    status: Option<String>,
+}
+
+fn worker_status(shared: &Arc<Mutex<GuiShared>>, msg: String) {
+    if let Ok(mut s) = shared.lock() {
+        s.status = Some(msg);
+    }
+}
+
+/// IPC worker thread. Owns the daemon connection and performs ALL IPC —
+/// connect, poll, commands, meta — so the egui UI thread never blocks. A
+/// stopped or restarting daemon therefore can't freeze the window: blocking
+/// `connect()`/reads happen here, off the UI thread.
+fn spawn_ipc_worker(
+    rx: std::sync::mpsc::Receiver<WorkerCmd>,
+    shared: Arc<Mutex<GuiShared>>,
+    ctx: egui::Context,
+) {
+    std::thread::Builder::new()
+        .name("resonance-ipc".into())
+        .spawn(move || {
+            let mut ipc: Option<IpcClient> = None;
+            let mut last_meta = Instant::now() - META_INTERVAL;
+            let mut refresh_meta_now = true;
+            loop {
+                if ipc.is_none() {
+                    match IpcClient::connect() {
+                        Ok(c) => {
+                            ipc = Some(c);
+                            refresh_meta_now = true;
+                        }
+                        Err(_) => {
+                            if let Ok(mut s) = shared.lock() {
+                                s.state = None;
+                            }
+                            ctx.request_repaint();
+                            std::thread::sleep(RECONNECT_INTERVAL);
+                            continue;
+                        }
+                    }
+                }
+
+                // Apply queued UI commands.
+                loop {
+                    let msg = match rx.try_recv() {
+                        Ok(m) => m,
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                    };
+                    let Some(c) = ipc.as_mut() else { break };
+                    match msg {
+                        WorkerCmd::Cmd(cmd) => {
+                            if c.send(cmd).is_err() {
+                                ipc = None;
+                                break;
+                            }
+                        }
+                        WorkerCmd::RefreshMeta => refresh_meta_now = true,
+                        WorkerCmd::Import(path) => {
+                            match c.send_recv(Command::ImportPreset { path, name: None }) {
+                                Ok(Response::Imported(name)) => {
+                                    let _ = c.send(Command::LoadProfile { name: name.clone() });
+                                    refresh_meta_now = true;
+                                    worker_status(&shared, format!("imported + loaded '{name}'"));
+                                }
+                                Ok(Response::Error(e)) => {
+                                    worker_status(&shared, format!("import failed: {e}"))
+                                }
+                                Ok(_) => worker_status(&shared, "import failed".into()),
+                                Err(_) => {
+                                    ipc = None;
+                                    break;
+                                }
+                            }
+                        }
+                        WorkerCmd::Export(path) => {
+                            match c.send_recv(Command::ExportProfile { path: path.clone() }) {
+                                Ok(Response::Ok) => {
+                                    worker_status(&shared, format!("exported → {path}"))
+                                }
+                                Ok(Response::Error(e)) => {
+                                    worker_status(&shared, format!("export failed: {e}"))
+                                }
+                                Ok(_) => worker_status(&shared, "export failed".into()),
+                                Err(_) => {
+                                    ipc = None;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Poll state.
+                if let Some(c) = ipc.as_mut() {
+                    match c.get_state() {
+                        Ok(st) => {
+                            if let Ok(mut s) = shared.lock() {
+                                s.state = Some(st);
+                            }
+                            ctx.request_repaint();
+                        }
+                        Err(_) => {
+                            ipc = None;
+                            if let Ok(mut s) = shared.lock() {
+                                s.state = None;
+                            }
+                            ctx.request_repaint();
+                        }
+                    }
+                }
+
+                // Meta (profiles + mappings) on a slow timer / on request.
+                if let Some(c) = ipc.as_mut()
+                    && (refresh_meta_now || last_meta.elapsed() >= META_INTERVAL)
+                {
+                    if let Ok(Response::PresetList(p)) = c.send_recv(Command::ListProfiles)
+                        && let Ok(mut s) = shared.lock()
+                    {
+                        s.profiles = p;
+                    }
+                    if let Ok(Response::Mappings(m)) = c.send_recv(Command::ListMappings)
+                        && let Ok(mut s) = shared.lock()
+                    {
+                        s.mappings = m;
+                    }
+                    last_meta = Instant::now();
+                    refresh_meta_now = false;
+                }
+
+                std::thread::sleep(STATE_INTERVAL);
+            }
+        })
+        .expect("spawn ipc worker");
+}
+
 impl GuiApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install_symbol_fonts(&cc.egui_ctx);
         let (service_tx, service_worker_rx) = std::sync::mpsc::channel::<ServiceAction>();
-        let (service_worker_tx, service_rx) =
-            std::sync::mpsc::channel::<ServiceWorkerResult>();
+        let (service_worker_tx, service_rx) = std::sync::mpsc::channel::<ServiceWorkerResult>();
         spawn_service_worker(service_worker_rx, service_worker_tx, cc.egui_ctx.clone());
         // Kick off an initial status fetch so the toolbar doesn't show
         // "stopped" for the first 1.5 s while the poll timer warms up.
@@ -382,16 +527,17 @@ impl GuiApp {
             .and_then(|s| s.get_string("titlebar"))
             .map(|s| TitlebarMode::from_label(&s))
             .unwrap_or(TitlebarMode::Auto);
-        let mut app = Self {
-            ipc: None,
+        let (cmd_tx, ipc_rx) = std::sync::mpsc::channel::<WorkerCmd>();
+        let shared = Arc::new(Mutex::new(GuiShared::default()));
+        spawn_ipc_worker(ipc_rx, shared.clone(), cc.egui_ctx.clone());
+
+        Self {
+            cmd_tx,
+            shared,
             state: None,
             profiles: Vec::new(),
             mappings: Vec::new(),
             status: String::new(),
-            last_poll: Instant::now(),
-            last_meta: Instant::now() - META_INTERVAL,
-            last_reconnect: Instant::now() - RECONNECT_INTERVAL,
-            pending: Vec::new(),
             needs_meta: false,
             dialog: Dialog::None,
             confirm: None,
@@ -426,9 +572,7 @@ impl GuiApp {
             lower_tab: LowerTab::default(),
             tb_required_w: 0.0,
             min_applied: None,
-        };
-        app.try_connect();
-        app
+        }
     }
 
     /// Switch theme: store it, refresh the cached palette, and push new visuals.
@@ -504,82 +648,37 @@ impl GuiApp {
 
     // ── Connection / polling ────────────────────────────────────────────────
 
-    fn try_connect(&mut self) {
-        match IpcClient::connect() {
-            Ok(c) => {
-                self.ipc = Some(c);
-                self.set_status("connected");
-                self.refresh_state();
-                self.refresh_meta();
-            }
-            Err(e) => {
-                self.set_status(format!("not connected: {e}"));
-                self.ipc = None;
-            }
-        }
-        self.last_reconnect = Instant::now();
-    }
-
-    /// Pull a fresh `DaemonState` snapshot (cheap; runs every frame).
-    fn refresh_state(&mut self) {
-        let Some(ipc) = self.ipc.as_mut() else {
-            return;
+    /// Copy the IPC worker's latest snapshot into our fields (called once per
+    /// frame). The UI thread never does IPC, so this never blocks.
+    fn pull_shared(&mut self) {
+        let (state, profiles, mappings, status) = {
+            let mut s = self.shared.lock().unwrap();
+            (
+                s.state.clone(),
+                s.profiles.clone(),
+                s.mappings.clone(),
+                s.status.take(),
+            )
         };
-        match ipc.get_state() {
-            Ok(s) => {
-                if s.meters.clip {
-                    self.clip_until = Some(Instant::now() + Duration::from_millis(250));
-                }
-                self.state = Some(s);
-                if self.status.starts_with("error") {
-                    self.status.clear();
-                }
-            }
-            Err(e) => {
-                self.set_status(format!("error: {e}"));
-                self.state = None;
-                self.ipc = None;
-            }
+        if let Some(st) = &state
+            && st.meters.clip
+        {
+            self.clip_until = Some(Instant::now() + Duration::from_millis(250));
         }
-    }
-
-    /// Pull profiles + output mappings (runs on a slow timer / on demand).
-    fn refresh_meta(&mut self) {
-        let Some(ipc) = self.ipc.as_mut() else {
-            return;
-        };
-        if let Ok(Response::PresetList(p)) = ipc.send_recv(Command::ListProfiles) {
-            self.profiles = p;
-        }
-        if let Ok(Response::Mappings(m)) = ipc.send_recv(Command::ListMappings) {
-            self.mappings = m;
-        }
-        self.last_meta = Instant::now();
-    }
-
-    fn dispatch(&mut self) {
-        if !self.pending.is_empty() {
-            let cmds = std::mem::take(&mut self.pending);
-            if let Some(ipc) = self.ipc.as_mut() {
-                for cmd in cmds {
-                    if let Err(e) = ipc.send(cmd) {
-                        self.status = format!("error: {e}");
-                        self.status_until = Some(Instant::now() + STATUS_TTL);
-                        self.ipc = None;
-                        break;
-                    }
-                }
-            }
-            self.refresh_state();
+        self.state = state;
+        self.profiles = profiles;
+        self.mappings = mappings;
+        if let Some(msg) = status {
+            self.set_status(msg);
         }
         if self.needs_meta {
             self.needs_meta = false;
-            self.refresh_meta();
+            let _ = self.cmd_tx.send(WorkerCmd::RefreshMeta);
         }
     }
 
     fn queue(&mut self, cmd: Command) {
-        self.pending.push(cmd);
+        let _ = self.cmd_tx.send(WorkerCmd::Cmd(cmd));
     }
 
     /// Set the toolbar status text with an auto-clear timer so transient action
@@ -593,22 +692,7 @@ impl GuiApp {
     /// profile — mirrors the TUI flow so presets are always captured, not just
     /// applied transiently.
     fn import_and_load(&mut self, path: String) {
-        let Some(ipc) = self.ipc.as_mut() else {
-            return;
-        };
-        match ipc.send_recv(Command::ImportPreset { path, name: None }) {
-            Ok(Response::Imported(name)) => {
-                self.queue(Command::LoadProfile { name: name.clone() });
-                self.set_status(format!("imported + loaded '{name}'"));
-                self.needs_meta = true;
-            }
-            Ok(Response::Error(e)) => self.set_status(format!("import failed: {e}")),
-            Ok(_) => self.set_status("import failed"),
-            Err(e) => {
-                self.set_status(format!("error: {e}"));
-                self.ipc = None;
-            }
-        }
+        let _ = self.cmd_tx.send(WorkerCmd::Import(path));
     }
 }
 
@@ -622,20 +706,8 @@ impl eframe::App for GuiApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // Reconnect / poll.
-        if self.ipc.is_none() {
-            if self.last_reconnect.elapsed() >= RECONNECT_INTERVAL {
-                self.try_connect();
-            }
-        } else {
-            if self.last_poll.elapsed() >= STATE_INTERVAL {
-                self.last_poll = Instant::now();
-                self.refresh_state();
-            }
-            if self.last_meta.elapsed() >= META_INTERVAL {
-                self.refresh_meta();
-            }
-        }
+        // Read the latest snapshot the IPC worker published (never blocks).
+        self.pull_shared();
 
         // Keyboard: Ctrl-Z undo, Ctrl-Y / Ctrl-Shift-Z redo.
         let (undo, redo) = ui.ctx().input(|i| {
@@ -843,8 +915,6 @@ impl eframe::App for GuiApp {
         self.export_dialog(&ctx);
         self.confirm_dialog(&ctx);
         self.help_dialog(&ctx);
-
-        self.dispatch();
 
         // Drive ~144 fps repaint so spectrum/curve stay smooth.
         ctx.request_repaint_after(FRAME_INTERVAL);
@@ -1557,9 +1627,13 @@ impl GuiApp {
                 if service::systemd_available() {
                     let busy = self.service_busy;
                     let btn = egui::Button::new(
-                        egui::RichText::new(if busy { "starting…" } else { "▶  Start daemon" })
-                            .size(18.0)
-                            .color(egui::Color32::WHITE),
+                        egui::RichText::new(if busy {
+                            "starting…"
+                        } else {
+                            "▶  Start daemon"
+                        })
+                        .size(18.0)
+                        .color(egui::Color32::WHITE),
                     )
                     .fill(self.palette.boost)
                     .min_size(egui::vec2(180.0, 40.0));
@@ -2726,19 +2800,7 @@ impl GuiApp {
     /// Write the current chain to `path` as a `.toml` profile (round-trips via
     /// the daemon so it captures the authoritative state).
     fn export_profile(&mut self, path: String) {
-        let Some(ipc) = self.ipc.as_mut() else {
-            self.set_status("not connected");
-            return;
-        };
-        match ipc.send_recv(Command::ExportProfile { path: path.clone() }) {
-            Ok(Response::Ok) => self.set_status(format!("exported → {path}")),
-            Ok(Response::Error(e)) => self.set_status(format!("export failed: {e}")),
-            Ok(_) => self.set_status("export failed"),
-            Err(e) => {
-                self.set_status(format!("error: {e}"));
-                self.ipc = None;
-            }
-        }
+        let _ = self.cmd_tx.send(WorkerCmd::Export(path));
     }
 
     /// Yes/no modal for overwriting or deleting a profile (destructive actions

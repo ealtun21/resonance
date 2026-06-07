@@ -5,6 +5,7 @@ members = [
     "crates/resonance-preset",
     "crates/resonance-ipc",
     "crates/resonance-daemon",
+    "crates/resonance-apo",
     "crates/resonance-cli",
     "crates/resonance-tui",
     "crates/resonance-gui",
@@ -21,6 +22,9 @@ rust-version = "1.85"
 # DSP
 biquad = "0.6"
 rustfft = "6"
+
+# Shared-memory control bridge (daemon → Windows APO)
+memmap2 = "0.9"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -87,3 +91,11 @@ lto = true
 panic = "abort"
 strip = true
 codegen-units = 1
+
+# The Windows APO is loaded into Microsoft's audiodg.exe; a panic there must not
+# abort the process. This profile keeps unwinding so the APO's catch_unwind
+# guards turn a panic into an error HRESULT instead of killing audio. Build the
+# APO DLL with `--profile apo`.
+[profile.apo]
+inherits = "release"
+panic = "unwind"

@@ -1,0 +1,20 @@
+[package]
+name = "resonance-apo"
+description = "DSP + control-bridge engine for the Windows APO (C ABI staticlib); shared state types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# `staticlib` is linked into the C++ APO DLL (resonance_apo.dll), which provides
+# the COM/aggregation boilerplate via the Windows SDK CBaseAudioProcessingObject.
+# `lib` lets the daemon depend on the cross-platform `state` module.
+[lib]
+name = "resonance_apo"
+crate-type = ["staticlib", "lib"]
+
+[dependencies]
+resonance-dsp = { path = "../resonance-dsp" }
+memmap2 = { workspace = true }
+rustfft = { workspace = true }

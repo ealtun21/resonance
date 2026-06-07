@@ -69,6 +69,13 @@ pub struct Inner {
     pub ab_slots: [Option<crate::config::Profile>; 2],
     /// Live meters written by the RT thread, read on snapshot.
     pub meters: Arc<AtomicMeters>,
+    /// Windows only: writes chain state to the shared file the APO reads. The
+    /// daemon does no audio on Windows — it drives the in-graph APO instead.
+    pub apo_writer: Option<resonance_apo::state::ApoStateWriter>,
+    /// Last time a client polled `GetState`; used on Windows to enable APO
+    /// telemetry (meters/spectrum) only while something is watching.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub last_poll: Option<std::time::Instant>,
 }
 
 #[derive(Clone)]
@@ -97,13 +104,67 @@ impl SharedState {
             route_tx,
             ab_slots: [None, None],
             meters,
+            apo_writer: None,
+            last_poll: None,
         })))
     }
 
+    /// Record that a client just polled state (drives Windows telemetry gating).
+    pub fn mark_polled(&self) {
+        self.0.lock().unwrap().last_poll = Some(std::time::Instant::now());
+    }
+
+    /// Windows telemetry pump: enable APO telemetry while a client is watching,
+    /// and copy the APO's meters/spectrum into `SharedState` for clients.
+    #[cfg(target_os = "windows")]
+    pub fn pump_telemetry(&self) {
+        let mut guard = self.0.lock().unwrap();
+        let inner = &mut *guard;
+        let watching = inner
+            .last_poll
+            .map(|t| t.elapsed() < std::time::Duration::from_millis(1500))
+            .unwrap_or(false);
+        let Some(w) = inner.apo_writer.as_ref() else {
+            return;
+        };
+        w.set_telemetry_enabled(watching);
+        if watching {
+            if let Some(t) = w.read_telemetry() {
+                let n = inner.spectrum.len().min(t.spectrum.len());
+                inner.spectrum[..n].copy_from_slice(&t.spectrum[..n]);
+                inner.meters.store(crate::meters::Sample {
+                    in_peak: t.in_peak,
+                    out_peak: t.out_peak,
+                    in_rms: t.in_rms,
+                    out_rms: t.out_rms,
+                    clip: t.out_peak >= 1.0,
+                    dsp_load: 0.0,
+                    dsp_frame_us: 0,
+                });
+            }
+        }
+    }
+
     pub fn send(&self, cmd: AudioCommand, shadow_update: impl FnOnce(&mut ProcessorChain)) {
-        let mut inner = self.0.lock().unwrap();
+        let mut guard = self.0.lock().unwrap();
+        let inner = &mut *guard;
         shadow_update(&mut inner.chain);
         let _ = inner.audio_tx.push(cmd);
+        // Mirror the new state to the Windows APO (no-op when no writer).
+        if let Some(w) = inner.apo_writer.as_mut() {
+            w.publish(&inner.chain);
+        }
+    }
+
+    /// Install the Windows APO state writer and publish the current chain once.
+    #[cfg(target_os = "windows")]
+    pub fn set_apo_writer(&self, writer: resonance_apo::state::ApoStateWriter) {
+        let mut guard = self.0.lock().unwrap();
+        let inner = &mut *guard;
+        inner.apo_writer = Some(writer);
+        if let Some(w) = inner.apo_writer.as_mut() {
+            w.publish(&inner.chain);
+        }
     }
 
     pub fn snapshot(&self) -> DaemonState {

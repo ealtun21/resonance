@@ -15,6 +15,7 @@ path = "src/main.rs"
 resonance-dsp = { path = "../resonance-dsp" }
 resonance-preset = { path = "../resonance-preset" }
 resonance-ipc = { path = "../resonance-ipc" }
+resonance-apo = { path = "../resonance-apo" }
 rtrb = { workspace = true }
 rustfft = { workspace = true }
 tokio = { workspace = true }
@@ -42,6 +43,27 @@ objc2-foundation = { workspace = true }
 objc2-core-audio = { workspace = true }
 objc2-core-foundation = { workspace = true }
 objc2-core-audio-types = { workspace = true }
+
+# ── Windows backend (WASAPI via cpal loopback) ───────────────────────────────
+[target.'cfg(target_os = "windows")'.dependencies]
+cpal = { workspace = true }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
+# Higher-level COM bindings for WASAPI device identity (friendly names / IDs),
+# which cpal does not expose. Used only to disambiguate same-named endpoints.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_UI_Shell_PropertiesSystem",
+] }
+# Needed in scope for the `#[windows::core::interface]` macro, which expands to
+# `::windows_core::` paths (used to declare the undocumented IPolicyConfig).
+windows-core = "0.62"
 
 # ── RPM packaging (cargo-generate-rpm) ───────────────────────────────────────
 # Build with `cargo build --release --all` first, then from the repo root:

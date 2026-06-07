@@ -1,3 +1,7 @@
+// On Windows, run as a GUI-subsystem process so launching the daemon never
+// flashes a console window (it's a background service driving the APO).
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 mod audio;
 mod config;
 mod ipc_server;
@@ -20,6 +24,21 @@ async fn main() -> Result<()> {
         .init();
 
     info!("resonanced starting");
+
+    // Measurement mode: `resonanced --measure-loopback <dev-substr> <out.raw> <secs>`
+    // loopback-captures an output endpoint to raw f32le for spectral analysis.
+    // Skips the pidfile/IPC so it can run alongside a live daemon.
+    #[cfg(target_os = "windows")]
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if let Some(p) = args.iter().position(|a| a == "--measure-loopback") {
+            let dev = args.get(p + 1).cloned().unwrap_or_default();
+            let out = args.get(p + 2).cloned().unwrap_or_default();
+            let secs = args.get(p + 3).and_then(|s| s.parse().ok()).unwrap_or(6);
+            audio::measure_loopback(&dev, &out, secs)?;
+            return Ok(());
+        }
+    }
 
     // Single-instance lock; bail if another live daemon holds the pidfile.
     if let Err(e) = shutdown::acquire_pidfile() {
@@ -107,7 +126,11 @@ async fn main() -> Result<()> {
         }
     });
 
-    // PipeWire filter node on dedicated RT thread
+    // Audio backend on a dedicated RT thread (Linux/PipeWire, macOS/CoreAudio).
+    // On Windows the daemon does no audio: the in-graph APO owns the DSP and the
+    // daemon is the control plane — it publishes chain state to the shared file
+    // the APO reads inside audiodg.exe.
+    #[cfg(not(target_os = "windows"))]
     let pw_handle = audio::spawn(
         cmd_rx,
         spectrum_tx,
@@ -118,9 +141,60 @@ async fn main() -> Result<()> {
         meters,
     )?;
 
+    #[cfg(target_os = "windows")]
+    {
+        // Only the (skipped) audio backend consumes these on Windows.
+        let _ = (
+            cmd_rx,
+            spectrum_tx,
+            initial_chain,
+            output_tx,
+            route_rx,
+            sinks_tx,
+            meters,
+        );
+        let path = resonance_apo::state::default_state_path();
+        match resonance_apo::state::ApoStateWriter::create(&path) {
+            Ok(writer) => {
+                shared.set_apo_writer(writer);
+                info!("APO control bridge ready at {}", path.display());
+            }
+            Err(e) => warn!("APO control bridge unavailable ({}): {e}", path.display()),
+        }
+        // Telemetry pump: mirror APO meters/spectrum into shared state for
+        // clients, but only while a client is polling (set in pump_telemetry).
+        let tele_state = shared.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(30));
+            loop {
+                tick.tick().await;
+                tele_state.pump_telemetry();
+            }
+        });
+
+        // Device list: enumerate render endpoints so clients can pick an output;
+        // also track the current system default. Runs on a dedicated thread —
+        // the COM calls block, and must never stall the async IPC runtime.
+        let dev_state = shared.clone();
+        std::thread::spawn(move || {
+            loop {
+                let endpoints = audio::win_devices::enumerate_render_endpoints();
+                let default = audio::win_devices::default_render_id();
+                {
+                    let mut inner = dev_state.0.lock().unwrap();
+                    inner.available_sinks = endpoints.iter().map(|(id, _)| id.clone()).collect();
+                    inner.sink_descriptions = endpoints;
+                    inner.active_output = default;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+        });
+    }
+
     // IPC server (blocks until shutdown)
     ipc_server::run(shared).await?;
 
+    #[cfg(not(target_os = "windows"))]
     pw_handle.join().ok();
 
     shutdown::cleanup();

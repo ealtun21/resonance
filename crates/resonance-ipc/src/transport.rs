@@ -58,3 +58,44 @@ pub fn write_response<W: Write>(writer: &mut W, resp: &Response) -> Result<(), T
 pub fn read_response<R: Read>(reader: &mut R) -> Result<Response, TransportError> {
     read_msg(reader)
 }
+
+// ── Cross-platform client transport ──────────────────────────────────────────
+//
+// Linux/macOS use a Unix domain socket (filesystem path, per-user perms).
+// Windows has no usable AF_UNIX in std/tokio, so we use a loopback TCP socket
+// on `127.0.0.1`; the daemon binds an ephemeral port and writes it to a port
+// file (see `paths::port_file_path`) that clients read here. Both ends are
+// blocking `Read + Write` streams, so the framing helpers above work unchanged.
+
+/// Blocking client stream type: `UnixStream` on Unix, `TcpStream` on Windows.
+#[cfg(unix)]
+pub type ClientStream = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+pub type ClientStream = std::net::TcpStream;
+
+/// Connect to the running daemon. On Unix this dials the Unix socket; on Windows
+/// it reads the daemon's port file and dials `127.0.0.1:<port>`.
+pub fn connect() -> io::Result<ClientStream> {
+    #[cfg(unix)]
+    {
+        std::os::unix::net::UnixStream::connect(crate::paths::default_socket_path())
+    }
+    #[cfg(windows)]
+    {
+        let port = crate::paths::read_port_file().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "daemon port file not found — is resonanced running?",
+            )
+        })?;
+        // Bounded connect so a stuck/restarting daemon can't hang the caller
+        // (the GUI dials this on its UI thread).
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(250))
+    }
+}
+
+/// Best-effort check whether the daemon is currently accepting connections.
+pub fn is_reachable() -> bool {
+    connect().is_ok()
+}

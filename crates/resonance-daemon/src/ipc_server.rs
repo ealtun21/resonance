@@ -9,10 +9,11 @@ use resonance_preset::{
     apo::{parse_apo, write_apo},
     fac::parse_fac,
 };
-use tokio::net::{UnixListener, UnixStream};
 use tracing::{error, info, warn};
 
+#[cfg(unix)]
 pub async fn run(state: SharedState) -> Result<()> {
+    use tokio::net::UnixListener;
     let sock_path = crate::shutdown::socket_path();
     let _ = tokio::fs::remove_file(&sock_path).await;
 
@@ -21,23 +22,57 @@ pub async fn run(state: SharedState) -> Result<()> {
 
     loop {
         match listener.accept().await {
-            Ok((stream, _)) => {
-                let state = state.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, state).await {
-                        warn!("client error: {e}");
-                    }
-                });
-            }
-            Err(e) => {
-                error!("accept error: {e}");
-            }
+            Ok((stream, _)) => spawn_client(stream, state.clone()),
+            Err(e) => error!("accept error: {e}"),
         }
     }
 }
 
-async fn handle_client(stream: UnixStream, state: SharedState) -> Result<()> {
-    let (reader, writer) = stream.into_split();
+#[cfg(windows)]
+pub async fn run(state: SharedState) -> Result<()> {
+    use tokio::net::TcpListener;
+    // Windows has no usable AF_UNIX in tokio; bind a loopback TCP socket on an
+    // ephemeral port and advertise it via the port file so clients can dial it.
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let port = listener.local_addr()?.port();
+    let port_file = resonance_ipc::paths::port_file_path();
+    if let Some(dir) = port_file.parent() {
+        let _ = tokio::fs::create_dir_all(dir).await;
+    }
+    tokio::fs::write(&port_file, port.to_string()).await?;
+    info!(
+        "IPC listening on 127.0.0.1:{port} (port file {})",
+        port_file.display()
+    );
+
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                let _ = stream.set_nodelay(true);
+                spawn_client(stream, state.clone());
+            }
+            Err(e) => error!("accept error: {e}"),
+        }
+    }
+}
+
+/// Spawn a task to service one client connection over any async stream.
+fn spawn_client<S>(stream: S, state: SharedState)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
+    tokio::spawn(async move {
+        if let Err(e) = handle_client(stream, state).await {
+            warn!("client error: {e}");
+        }
+    });
+}
+
+async fn handle_client<S>(stream: S, state: SharedState) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let (reader, writer) = tokio::io::split(stream);
     let mut reader = tokio::io::BufReader::new(reader);
     let mut writer = tokio::io::BufWriter::new(writer);
 
@@ -58,7 +93,10 @@ async fn handle_client(stream: UnixStream, state: SharedState) -> Result<()> {
 
 async fn dispatch(cmd: Command, state: &SharedState) -> Response {
     match cmd {
-        Command::GetState => Response::State(state.snapshot()),
+        Command::GetState => {
+            state.mark_polled();
+            Response::State(state.snapshot())
+        }
 
         Command::SetPower { enabled } => {
             state.send(AudioCommand::SetPower(enabled), |chain| {
@@ -325,8 +363,17 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
         }
 
         Command::SetOutputTarget { node_name } => {
-            let route_tx = state.0.lock().unwrap().route_tx.clone();
-            let _ = route_tx.send(node_name.clone());
+            // Windows: switch the system default playback device (the APO follows
+            // the engine's endpoint). Other platforms: route via the PW node.
+            #[cfg(target_os = "windows")]
+            {
+                crate::audio::win_devices::set_default_render_endpoint(&node_name);
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let route_tx = state.0.lock().unwrap().route_tx.clone();
+                let _ = route_tx.send(node_name.clone());
+            }
             state.0.lock().unwrap().preferred_output = Some(node_name);
             Response::Ok
         }
@@ -599,9 +646,10 @@ fn list_dir_presets(dir: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
-async fn read_command_async(
-    reader: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
-) -> Result<Command> {
+async fn read_command_async<R>(reader: &mut R) -> Result<Command>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
     use tokio::io::AsyncReadExt;
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf).await?;
@@ -611,10 +659,10 @@ async fn read_command_async(
     Ok(postcard::from_bytes(&buf)?)
 }
 
-async fn write_response_async(
-    writer: &mut tokio::io::BufWriter<tokio::net::unix::OwnedWriteHalf>,
-    resp: &Response,
-) -> Result<()> {
+async fn write_response_async<W>(writer: &mut W, resp: &Response) -> Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
     use tokio::io::AsyncWriteExt;
     let bytes = postcard::to_stdvec(resp)?;
     let len = (bytes.len() as u32).to_le_bytes();
