@@ -293,6 +293,9 @@ pub struct GuiApp {
     confirm: Option<Confirm>,
     selected_band: usize,
     drag_band: Option<usize>,
+    /// Optimistic (freq, gain) of the band being dragged, so its marker tracks
+    /// the cursor exactly instead of the IPC-lagged echoed state.
+    drag_value: Option<(f64, f64)>,
     /// True while the active curve drag edits Q (right button) vs freq+gain.
     drag_q: bool,
     profile_name: String,
@@ -546,6 +549,7 @@ impl GuiApp {
             confirm: None,
             selected_band: 0,
             drag_band: None,
+            drag_value: None,
             drag_q: false,
             profile_name: String::new(),
             rename: None,
@@ -1706,9 +1710,14 @@ impl GuiApp {
         // Ease the axis toward the target instead of snapping between stops, so
         // the curve + band markers glide as the range grows/shrinks (the GUI
         // repaints at a fixed cadence, so a per-frame factor is stable).
-        self.db_axis += (target_db - self.db_axis) * 0.20;
-        if (self.db_axis - target_db).abs() < 0.05 {
-            self.db_axis = target_db;
+        // Freeze the axis while dragging a band: animating it mid-drag creates a
+        // gain↔axis feedback loop that wobbles the node/curve. With the axis
+        // fixed, the dragged node maps exactly to the cursor.
+        if self.drag_band.is_none() {
+            self.db_axis += (target_db - self.db_axis) * 0.20;
+            if (self.db_axis - target_db).abs() < 0.05 {
+                self.db_axis = target_db;
+            }
         }
         let db = self.db_axis;
         let x_of =
@@ -1958,6 +1967,9 @@ impl GuiApp {
                         } else {
                             db_of(p.y).clamp(-GAIN_LIMIT, GAIN_LIMIT)
                         };
+                        // Remember the cursor-derived value so the node renders
+                        // there immediately (not at the IPC-lagged echo).
+                        self.drag_value = Some((freq, gain));
                         self.queue_edit(Command::SetBand {
                             index: i,
                             freq,
@@ -1971,6 +1983,7 @@ impl GuiApp {
         if response.drag_stopped_by(Primary) || response.drag_stopped_by(Secondary) {
             self.drag_band = None;
             self.drag_q = false;
+            self.drag_value = None;
         }
         // Double-left-click empty area → add a peaking band there.
         if response.double_clicked_by(Primary) {
@@ -1991,11 +2004,17 @@ impl GuiApp {
             if !b.enabled {
                 continue;
             }
+            // While this band is being dragged, render it at the cursor-derived
+            // value (not the IPC-lagged echo) so the node tracks the mouse.
+            let (bf, bg) = match self.drag_value {
+                Some(v) if self.drag_band == Some(i) => v,
+                _ => (b.freq, b.gain_db),
+            };
             // Clamp the node inside the plot so it can never draw off-screen
             // even if the response momentarily exceeds the axis.
             let center = egui::pos2(
-                x_of(curve::clampf_log(b.freq)).clamp(plot.left(), plot.right()),
-                y_of(b.gain_db).clamp(plot.top(), plot.bottom()),
+                x_of(curve::clampf_log(bf)).clamp(plot.left(), plot.right()),
+                y_of(bg).clamp(plot.top(), plot.bottom()),
             );
             let selected = i == self.selected_band;
             let locked = self.vlock == Some(i);
