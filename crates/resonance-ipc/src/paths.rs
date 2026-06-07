@@ -25,24 +25,29 @@ fn home() -> PathBuf {
     PathBuf::from("C:\\")
 }
 
+/// `$VAR` as a path, if it is set and non-empty. The empty-string guard matters:
+/// an exported-but-blank env var should fall through to the next candidate, not
+/// resolve to the current directory.
+fn env_dir(var: &str) -> Option<PathBuf> {
+    std::env::var_os(var)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
 #[cfg(not(windows))]
 fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
+    env_dir("HOME").unwrap_or_else(|| PathBuf::from("/tmp"))
 }
 
 fn data_home() -> PathBuf {
-    if let Ok(p) = std::env::var("XDG_DATA_HOME") {
-        if !p.is_empty() {
-            return PathBuf::from(p);
-        }
+    if let Some(p) = env_dir("XDG_DATA_HOME") {
+        return p;
     }
     #[cfg(windows)]
     {
         // Per-user, non-roaming app data: %LOCALAPPDATA%.
-        if let Ok(p) = std::env::var("LOCALAPPDATA") {
-            if !p.is_empty() {
-                return PathBuf::from(p);
-            }
+        if let Some(p) = env_dir("LOCALAPPDATA") {
+            return p;
         }
         home().join("AppData").join("Local")
     }
@@ -112,10 +117,8 @@ pub fn preset_search_dirs() -> Vec<PathBuf> {
 ///        `~/Library/Application Support/resonance` (Apple's per-user config
 ///        location — macOS has no separate "config" vs "data" split).
 pub fn config_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("XDG_CONFIG_HOME") {
-        if !p.is_empty() {
-            return PathBuf::from(p).join("resonance");
-        }
+    if let Some(p) = env_dir("XDG_CONFIG_HOME") {
+        return p.join("resonance");
     }
     #[cfg(windows)]
     {
@@ -140,23 +143,17 @@ pub fn config_dir() -> PathBuf {
 /// macOS: `$TMPDIR` (per-user temp dir, e.g. `/var/folders/.../T/`).
 /// Fallback: `/tmp` (shared, but it works).
 pub fn runtime_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("XDG_RUNTIME_DIR") {
-        if !p.is_empty() {
-            return PathBuf::from(p);
-        }
+    if let Some(p) = env_dir("XDG_RUNTIME_DIR") {
+        return p;
     }
-    if let Ok(p) = std::env::var("TMPDIR") {
-        if !p.is_empty() {
-            return PathBuf::from(p);
-        }
+    if let Some(p) = env_dir("TMPDIR") {
+        return p;
     }
     #[cfg(windows)]
     {
         for var in ["TEMP", "TMP"] {
-            if let Ok(p) = std::env::var(var) {
-                if !p.is_empty() {
-                    return PathBuf::from(p);
-                }
+            if let Some(p) = env_dir(var) {
+                return p;
             }
         }
         return data_home().join("resonance");
