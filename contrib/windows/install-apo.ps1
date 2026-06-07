@@ -85,44 +85,72 @@ $audioKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio'
 if (-not (Test-Path $audioKey)) { New-Item -Path $audioKey -Force | Out-Null }
 Set-ItemProperty -Path $audioKey -Name 'DisableProtectedAudioDG' -Value 1 -Type DWord
 
-# --- 4) attach to every active render endpoint ---
+# --- 4) attach to each render endpoint, ONE mode per endpoint ---
+# CRITICAL: do NOT write all five FX slots. The audio engine instantiates the
+# APO once per populated slot, so writing legacy (LFX ,1 / GFX ,2) AND modern
+# (SFX ,5 / MFX ,6 / EFX ,7) cascades the effect 2+ times and, on some endpoints
+# (e.g. a headphone jack), produces an invalid mix-graph the engine bypasses
+# entirely (audio plays, APO sees silence, no EQ). Mirror EqualizerAPO: pick a
+# single mode per endpoint - modern default is SFX(5)+EFX(7); a driver that only
+# ships legacy APOs gets LFX(1)+GFX(2); a combined/Bluetooth endpoint gets
+# SFX(5)+MFX(6) (EFX doesn't apply to combined streams). Slots not in the chosen
+# mode are DELETED (also cleans up the old all-five pollution from <=0.5.2).
 $renderSub = 'SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render'
 $render = "HKLM:\$renderSub"
-$fx   = '{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D}'   # PKEY_FX_*  ,1/,2 legacy LFX/GFX  ,5/,6/,7 SFX/MFX/EFX
-$mode = '{D3993A3F-99C2-4402-B5EC-A92A0367664B}'   # processing-mode list
-$defaultMode = '{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}'
-$dse  = '{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E}'   # DisableSystemEffects
+$fx   = '{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D}'   # PKEY_FX_*  ,1/,2 legacy  ,5/,6/,7 SFX/MFX/EFX
+$mode = '{D3993A3F-99C2-4402-B5EC-A92A0367664B}'   # per-slot processing-mode list
+$defaultMode = '{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}'   # DEFAULT processing mode
+$combinedName = '{b3f8fa53-0004-438e-9003-51a46e139bfc},41'   # combined-device flag
 New-Item -Force -Path $backupRoot | Out-Null
+$allSlots = '1','2','5','6','7'
 
 $attached = 0
 $verified = 0
 Get-ChildItem $render -EA SilentlyContinue | ForEach-Object {
   $g = $_.PSChildName
-  # Attach to every render endpoint (not just the active one) so switching the
-  # default playback device to any of them keeps the effect. Failures (e.g. a
-  # not-present endpoint with no FxProperties) are caught per-endpoint below.
   try {
     Grant-Key "$renderSub\$g"
     $fxp = "$render\$g\FxProperties"
     if (Test-Path $fxp) { Grant-Key "$renderSub\$g\FxProperties" } else { New-Item -Path $fxp -EA Stop | Out-Null }
 
-    # back up the original effect-slot values so uninstall can restore them
+    # back up the original slot values (all five) so uninstall can restore them
     $bk = "$backupRoot\$g"
     New-Item -Force -Path $bk | Out-Null
-    foreach ($slot in '1','2','5','6','7') {
+    foreach ($slot in $allSlots) {
       $name = "$fx,$slot"
       $orig = (Get-ItemProperty -Path $fxp -Name $name -EA SilentlyContinue).$name
       if ($null -ne $orig) { Set-ItemProperty -Path $bk -Name $name -Value $orig } else { Set-ItemProperty -Path $bk -Name $name -Value '<none>' }
-      Set-ItemProperty -Path $fxp -Name $name -Value $clsid
-      Set-ItemProperty -Path $fxp -Name "$mode,$slot" -Value $defaultMode
     }
-    New-ItemProperty -Force -Path $fxp -Name "$dse,5" -PropertyType DWord -Value 0 | Out-Null
+
+    # decide the mode from what the driver already provides (EqualizerAPO logic)
+    $cur = Get-ItemProperty -Path $fxp -EA SilentlyContinue
+    $hasLegacy = ($null -ne $cur."$fx,1") -or ($null -ne $cur."$fx,2")
+    $hasModern = ($null -ne $cur."$fx,5") -or ($null -ne $cur."$fx,6") -or ($null -ne $cur."$fx,7")
+    $combined = $null -ne (Get-ItemProperty -Path "$render\$g\Properties" -Name $combinedName -EA SilentlyContinue).$combinedName
+    if ($hasLegacy -and -not $hasModern) { $writeSlots = '1','2' }
+    elseif ($combined)                   { $writeSlots = '5','6' }
+    else                                 { $writeSlots = '5','7' }
+
+    foreach ($slot in $allSlots) {
+      $name = "$fx,$slot"
+      $mname = "$mode,$slot"
+      if ($writeSlots -contains $slot) {
+        Set-ItemProperty -Path $fxp -Name $name -Value $clsid
+        # processing-mode list is REG_MULTI_SZ (DEFAULT mode)
+        New-ItemProperty -Force -Path $fxp -Name $mname -PropertyType MultiString -Value @($defaultMode) | Out-Null
+      } else {
+        if ($null -ne (Get-ItemProperty -Path $fxp -Name $name -EA SilentlyContinue).$name) {
+          Remove-ItemProperty -Path $fxp -Name $name -EA SilentlyContinue
+        }
+        if ($null -ne (Get-ItemProperty -Path $fxp -Name $mname -EA SilentlyContinue).$mname) {
+          Remove-ItemProperty -Path $fxp -Name $mname -EA SilentlyContinue
+        }
+      }
+    }
     $attached++
-    # Read the slot back: on a vendor-protected (Realtek/Nahimic) FxProperties the
-    # writes can be silently ignored even though SetAccessControl didn't throw.
-    $rb = (Get-ItemProperty -Path $fxp -Name "$fx,5" -EA SilentlyContinue)."$fx,5"
-    if ($rb -eq $clsid) { $verified++; Write-Output "attached+verified $g" }
-    else { Write-Output "attached but READ-BACK MISMATCH $g (got '$rb') - endpoint may be vendor-locked" }
+    $rb = (Get-ItemProperty -Path $fxp -Name "$fx,$($writeSlots[0])" -EA SilentlyContinue)."$fx,$($writeSlots[0])"
+    if ($rb -eq $clsid) { $verified++; Write-Output "attached+verified $g mode=$($writeSlots -join '+')" }
+    else { Write-Output "attached but READ-BACK MISMATCH $g (mode=$($writeSlots -join '+') got '$rb') - endpoint may be vendor-locked" }
   } catch {
     Write-Output "attach FAILED $g : $($_.Exception.Message)"
   }
