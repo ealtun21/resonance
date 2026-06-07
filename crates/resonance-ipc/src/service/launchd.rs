@@ -39,7 +39,7 @@ pub fn unit_path() -> PathBuf {
 /// Render the LaunchAgent plist. `RunAtLoad=true` so the agent comes up at
 /// login (matches systemd's `WantedBy=default.target`).
 fn plist_text() -> String {
-    let exec = crate::service::daemon_bin();
+    let exec = super::daemon_bin();
     let log_dir = home().join("Library").join("Logs").join("resonance");
     let stdout_log = log_dir.join("resonanced.out.log");
     let stderr_log = log_dir.join("resonanced.err.log");

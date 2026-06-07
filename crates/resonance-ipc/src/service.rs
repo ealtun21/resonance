@@ -20,7 +20,9 @@ mod xdg_autostart;
 use linux as backend;
 
 #[cfg(target_os = "macos")]
-use crate::launchd as backend;
+mod launchd;
+#[cfg(target_os = "macos")]
+use launchd as backend;
 
 #[cfg(target_os = "windows")]
 mod windows;
