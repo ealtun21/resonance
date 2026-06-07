@@ -22,6 +22,9 @@ use std::process::Command;
 
 pub const UNIT_NAME: &str = "com.ealtun21.resonanced";
 
+pub const UNAVAILABLE_MESSAGE: &str =
+    "launchctl is not available — start the daemon by running `resonanced`";
+
 fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
 }

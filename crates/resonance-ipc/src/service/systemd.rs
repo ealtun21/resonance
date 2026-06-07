@@ -12,6 +12,9 @@ use std::process::Command;
 
 pub const UNIT_NAME: &str = "resonanced.service";
 
+pub const UNAVAILABLE_MESSAGE: &str =
+    "systemctl --user is not available — start the daemon by running `resonanced`";
+
 fn config_home() -> PathBuf {
     if let Ok(p) = std::env::var("XDG_CONFIG_HOME") {
         if !p.is_empty() {

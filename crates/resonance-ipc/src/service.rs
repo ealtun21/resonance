@@ -85,8 +85,14 @@ pub fn daemon_bin() -> PathBuf {
 }
 
 /// Whether the underlying service manager is reachable for this user.
-pub fn systemd_available() -> bool {
+pub fn manager_available() -> bool {
     backend::manager_available()
+}
+
+/// Backend-specific explanation shown when `manager_available()` is false, so a
+/// client never prints "systemctl" on macOS or Windows.
+pub fn manager_unavailable_message() -> &'static str {
+    backend::UNAVAILABLE_MESSAGE
 }
 
 /// True if the unit file has been written.

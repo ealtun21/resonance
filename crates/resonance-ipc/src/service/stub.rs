@@ -8,6 +8,9 @@ use std::path::PathBuf;
 
 pub const UNIT_NAME: &str = "resonanced";
 
+pub const UNAVAILABLE_MESSAGE: &str =
+    "no service manager on this platform — start the daemon by running `resonanced`";
+
 pub fn unit_path() -> PathBuf {
     PathBuf::from("/dev/null")
 }

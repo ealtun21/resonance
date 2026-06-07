@@ -80,7 +80,7 @@ fn ensure_daemon_running() {
         return;
     }
 
-    if resonance_ipc::service::systemd_available() {
+    if resonance_ipc::service::manager_available() {
         match resonance_ipc::service::start() {
             Ok(()) => {
                 // Service manager has taken ownership. The daemon's audio init

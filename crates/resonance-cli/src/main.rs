@@ -257,11 +257,8 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
 fn run_daemon(action: &DaemonAction) -> Result<()> {
     use resonance_ipc::service;
     let p = Paint::auto();
-    if !service::systemd_available() {
-        #[cfg(target_os = "macos")]
-        bail!("launchctl is not available; cannot manage the daemon service");
-        #[cfg(not(target_os = "macos"))]
-        bail!("systemctl --user is not available; cannot manage the daemon service");
+    if !service::manager_available() {
+        bail!("{}", service::manager_unavailable_message());
     }
     match action {
         DaemonAction::Start => service::start()?,

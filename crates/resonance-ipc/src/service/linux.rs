@@ -16,6 +16,10 @@ use std::path::PathBuf;
 /// Display name; the active sub-backend uses its own unit/desktop name.
 pub const UNIT_NAME: &str = "resonanced";
 
+// The fallback backend is always available, so this is only ever surfaced in
+// the (unreachable) case where even the file-based autostart can't be used.
+pub const UNAVAILABLE_MESSAGE: &str = systemd::UNAVAILABLE_MESSAGE;
+
 fn use_systemd() -> bool {
     systemd::manager_available()
 }

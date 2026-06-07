@@ -1351,7 +1351,7 @@ impl GuiApp {
     /// users never type a `systemctl` line. All ops dispatch to a worker
     /// thread so the UI never blocks on launchctl / systemctl latency.
     fn daemon_menu(&mut self, ui: &mut egui::Ui) {
-        if !service::systemd_available() {
+        if !service::manager_available() {
             return;
         }
         let st = self.daemon_status;
@@ -1650,7 +1650,7 @@ impl GuiApp {
                 ui.add_space(8.0);
                 ui.label(&self.status);
                 ui.add_space(16.0);
-                if service::systemd_available() {
+                if service::manager_available() {
                     let busy = self.service_busy;
                     let btn = egui::Button::new(
                         egui::RichText::new(if busy {
@@ -1689,7 +1689,7 @@ impl GuiApp {
                         });
                     }
                 } else {
-                    ui.label("systemctl --user unavailable — run `resonanced` manually.");
+                    ui.label(service::manager_unavailable_message());
                 }
             });
         });

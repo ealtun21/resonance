@@ -20,6 +20,9 @@ use std::process::Command;
 
 pub const UNIT_NAME: &str = "Resonance";
 
+pub const UNAVAILABLE_MESSAGE: &str =
+    "the autostart registry is not writable — start the daemon by running resonanced.exe";
+
 const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "Resonance";
 
