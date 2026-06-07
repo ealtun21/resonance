@@ -121,25 +121,7 @@ fn spawn_daemon_detached() {
         );
         return;
     };
-    let log_path = {
-        #[cfg(target_os = "macos")]
-        {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            let dir = std::path::PathBuf::from(home).join("Library/Logs/resonance");
-            let _ = std::fs::create_dir_all(&dir);
-            dir.join("resonanced.log")
-        }
-        #[cfg(windows)]
-        {
-            let dir = resonance_ipc::paths::config_dir();
-            let _ = std::fs::create_dir_all(&dir);
-            dir.join("resonanced.log")
-        }
-        #[cfg(all(not(target_os = "macos"), not(windows)))]
-        {
-            std::path::PathBuf::from("/tmp/resonanced.log")
-        }
-    };
+    let log_path = resonance_ipc::paths::daemon_log_path();
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

@@ -137,6 +137,22 @@ pub fn config_dir() -> PathBuf {
     }
 }
 
+/// Log file for a directly-spawned daemon (when no service manager is capturing
+/// its output). Creates the parent directory; the caller opens the file.
+///   macOS:   `~/Library/Logs/resonance/resonanced.log`
+///   Windows: `<config_dir>/resonanced.log`
+///   Linux:   `/tmp/resonanced.log`
+pub fn daemon_log_path() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    let dir = home().join("Library").join("Logs").join("resonance");
+    #[cfg(windows)]
+    let dir = config_dir();
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
+    let dir = PathBuf::from("/tmp");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("resonanced.log")
+}
+
 /// Per-user runtime directory for ephemeral state (socket, pidfile).
 ///
 /// Linux: `$XDG_RUNTIME_DIR` (per the XDG Base Dir spec).
