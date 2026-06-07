@@ -114,13 +114,9 @@ fn wait_for_daemon(timeout: std::time::Duration) -> bool {
 /// Fallback when no service manager is available. Spawns the daemon as a
 /// detached child with logs going to the platform's log dir.
 fn spawn_daemon_detached() {
-    let Some(daemon_path) = locate_daemon() else {
-        eprintln!(
-            "GUI: could not locate resonanced binary near this executable; \
-             start it manually with `resonanced` and relaunch"
-        );
-        return;
-    };
+    // Same resolution the service layer uses (sibling of this exe, then $PATH,
+    // then the bare name); a missing binary surfaces as a spawn error below.
+    let daemon_path = resonance_ipc::service::daemon_bin();
     let log_path = resonance_ipc::paths::daemon_log_path();
     let log = std::fs::OpenOptions::new()
         .create(true)
@@ -154,39 +150,6 @@ fn spawn_daemon_detached() {
             eprintln!("GUI: failed to spawn {}: {e}", daemon_path.display());
         }
     }
-}
-
-/// Find the `resonanced` binary. Searches, in order:
-///   1. Same directory as the GUI executable (covers bundle + `cargo run`
-///      from `target/release` or `target/debug`).
-///   2. `$PATH` lookup.
-///   3. The literal name `resonanced`, letting `Command::spawn` fall back
-///      to the shell's resolution.
-fn locate_daemon() -> Option<std::path::PathBuf> {
-    // Platform-correct binary name (Windows appends `.exe`).
-    const BIN: &str = if cfg!(windows) {
-        "resonanced.exe"
-    } else {
-        "resonanced"
-    };
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let cand = dir.join(BIN);
-            if cand.is_file() {
-                return Some(cand);
-            }
-        }
-    }
-    // `split_paths` uses the platform's PATH separator (`:` Unix, `;` Windows).
-    if let Some(path) = std::env::var_os("PATH") {
-        for d in std::env::split_paths(&path) {
-            let cand = d.join(BIN);
-            if cand.is_file() {
-                return Some(cand);
-            }
-        }
-    }
-    Some(std::path::PathBuf::from(BIN))
 }
 
 /// Window/taskbar icon, rasterised from the shared brand drawing (matches
