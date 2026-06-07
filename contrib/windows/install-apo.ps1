@@ -66,7 +66,7 @@ $cat = "HKLM:\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects\$clsid"
 New-Item -Force -Path $cat | Out-Null
 Set-ItemProperty -Path $cat -Name 'FriendlyName' -Value 'Resonance APO'
 Set-ItemProperty -Path $cat -Name 'Copyright'    -Value 'Resonance'
-foreach ($kv in @{MajorVersion=0;MinorVersion=4;MinInputConnections=1;MaxInputConnections=1;MinOutputConnections=1;MaxOutputConnections=1;MaxInstances=4294967295;Flags=15;NumAPOInterfaces=1}.GetEnumerator()) {
+foreach ($kv in @{MajorVersion=0;MinorVersion=5;MinInputConnections=1;MaxInputConnections=1;MinOutputConnections=1;MaxOutputConnections=1;MaxInstances=4294967295;Flags=15;NumAPOInterfaces=1}.GetEnumerator()) {
   New-ItemProperty -Force -Path $cat -Name $kv.Key -PropertyType DWord -Value $kv.Value | Out-Null
 }
 Set-ItemProperty -Path $cat -Name 'APOInterface0' -Value '{FD7F2B29-24D0-4B5C-B177-592C39F9CA10}'

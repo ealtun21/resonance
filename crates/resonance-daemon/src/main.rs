@@ -27,7 +27,11 @@ fn init_logging() {
     #[cfg(windows)]
     let to_file = {
         let path = resonance_ipc::paths::daemon_log_path();
-        match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
             Ok(file) => {
                 tracing_subscriber::fmt()
                     .with_env_filter(filter())
