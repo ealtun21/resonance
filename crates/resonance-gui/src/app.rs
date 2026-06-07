@@ -831,16 +831,17 @@ impl eframe::App for GuiApp {
                 });
 
             // The three lower sections share the band between FR and spectrum.
-            // Columns only while the EQ bands table actually fits next to the
-            // (resizable) side panels — measured, not a hardcoded threshold:
-            // `bands_w` is the table's natural width captured last frame, and
-            // `eff_w`/`dev_w` are the side panels' real widths. The moment the
-            // table would be squished, collapse into the tabbed pane instead.
-            use egui::containers::panel::PanelState;
-            // Natural width of the EQ bands table. `centered` stores it as a
-            // per-frame *temp* value (0 on a fresh launch), which made the first
-            // frame always pick the tabbed fallback. Persist it across runs and
-            // seed a default so the column/tabbed decision is right immediately.
+            // The side panels (Effects, Devices/Profiles) are *fixed* at their
+            // content width and not manually resizable; EQ bands (central) takes
+            // all the remaining width. We stay in this 3-column layout only while
+            // the bands table fits at its natural width — the instant it would be
+            // clipped we collapse into the tabbed pane. Re-evaluated every frame,
+            // so it reflows live as the window is resized.
+            //
+            // `bands_w` is the table's natural width. `centered` stores it as a
+            // per-frame *temp* value (0 on a fresh launch); persist it so the
+            // column/tabbed decision is correct immediately, with a seeded
+            // default for the very first frame.
             let bands_persist = egui::Id::new("bands_natural_w");
             let bands_temp = ui
                 .ctx()
@@ -852,34 +853,22 @@ impl eframe::App for GuiApp {
                 .filter(|w| *w > 1.0)
                 .or_else(|| ui.ctx().data_mut(|d| d.get_persisted::<f32>(bands_persist)))
                 .unwrap_or(DEFAULT_BANDS_W);
-            let eff_w = ui
-                .ctx()
-                .data_mut(|d| d.get_persisted::<PanelState>(egui::Id::new("effects")))
-                .map(|s| s.rect.width())
-                .unwrap_or(EFFECTS_W);
-            let dev_w = ui
-                .ctx()
-                .data_mut(|d| d.get_persisted::<PanelState>(egui::Id::new("side")))
-                .map(|s| s.rect.width())
-                .unwrap_or(DEVICES_W);
             // +36 covers the two panel separators and scroll inner margins.
-            let cols_fit = bands_w > 1.0 && ui.available_width() >= eff_w + dev_w + bands_w + 36.0;
+            let cols_fit = ui.available_width() >= EFFECTS_W + DEVICES_W + bands_w + 36.0;
             if cols_fit {
-                // Side panels are sized to their content; EQ bands (central) takes
-                // the rest so it never gets squished below its 8-column table.
+                // Fixed-width side panels (no manual resize); EQ bands central
+                // takes the rest so it never squishes below its 8-column table.
                 egui::Panel::left("effects")
-                    .resizable(true)
-                    .default_size(EFFECTS_W)
-                    .min_size(170.0)
+                    .resizable(false)
+                    .exact_size(EFFECTS_W)
                     .show_inside(ui, |ui| {
                         if let Some(s) = &state {
                             padded_scroll(ui, "effects_scroll", |ui| self.effects_section(ui, s));
                         }
                     });
                 egui::Panel::right("side")
-                    .resizable(true)
-                    .default_size(DEVICES_W)
-                    .min_size(150.0)
+                    .resizable(false)
+                    .exact_size(DEVICES_W)
                     .show_inside(ui, |ui| {
                         padded_scroll(ui, "side", |ui| self.devices_profiles(ui));
                     });
