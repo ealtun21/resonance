@@ -912,8 +912,102 @@ impl eframe::App for GuiApp {
         self.confirm_dialog(&ctx);
         self.help_dialog(&ctx);
 
+        // With native decorations off, the OS resize borders are gone — add our
+        // own edge/corner grips so the window can still be resized.
+        if csd {
+            self.csd_resize_grips(&ctx);
+        }
+
         // Drive ~144 fps repaint so spectrum/curve stay smooth.
         ctx.request_repaint_after(FRAME_INTERVAL);
+    }
+}
+
+impl GuiApp {
+    /// Invisible resize grips around the window border (custom-titlebar mode):
+    /// a drag on an edge/corner asks the backend to resize, replacing the native
+    /// resize borders that `Decorations(false)` removes.
+    fn csd_resize_grips(&self, ctx: &egui::Context) {
+        use egui::{CursorIcon as Cur, ResizeDirection as Dir, Sense, ViewportCommand};
+        // No resizing while maximized.
+        if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
+            return;
+        }
+        let r = ctx.content_rect();
+        let b = 6.0; // grip thickness (px)
+        let p = egui::pos2;
+        let grips: [(&str, egui::Rect, Dir, Cur); 8] = [
+            (
+                "n",
+                egui::Rect::from_min_max(p(r.left() + b, r.top()), p(r.right() - b, r.top() + b)),
+                Dir::North,
+                Cur::ResizeNorth,
+            ),
+            (
+                "s",
+                egui::Rect::from_min_max(
+                    p(r.left() + b, r.bottom() - b),
+                    p(r.right() - b, r.bottom()),
+                ),
+                Dir::South,
+                Cur::ResizeSouth,
+            ),
+            (
+                "w",
+                egui::Rect::from_min_max(p(r.left(), r.top() + b), p(r.left() + b, r.bottom() - b)),
+                Dir::West,
+                Cur::ResizeWest,
+            ),
+            (
+                "e",
+                egui::Rect::from_min_max(
+                    p(r.right() - b, r.top() + b),
+                    p(r.right(), r.bottom() - b),
+                ),
+                Dir::East,
+                Cur::ResizeEast,
+            ),
+            (
+                "nw",
+                egui::Rect::from_min_max(r.left_top(), p(r.left() + b, r.top() + b)),
+                Dir::NorthWest,
+                Cur::ResizeNorthWest,
+            ),
+            (
+                "ne",
+                egui::Rect::from_min_max(p(r.right() - b, r.top()), p(r.right(), r.top() + b)),
+                Dir::NorthEast,
+                Cur::ResizeNorthEast,
+            ),
+            (
+                "sw",
+                egui::Rect::from_min_max(p(r.left(), r.bottom() - b), p(r.left() + b, r.bottom())),
+                Dir::SouthWest,
+                Cur::ResizeSouthWest,
+            ),
+            (
+                "se",
+                egui::Rect::from_min_max(p(r.right() - b, r.bottom() - b), r.right_bottom()),
+                Dir::SouthEast,
+                Cur::ResizeSouthEast,
+            ),
+        ];
+        for (name, rect, dir, cursor) in grips {
+            egui::Area::new(egui::Id::new(("csd_grip", name)))
+                .order(egui::Order::Foreground)
+                .fixed_pos(rect.min)
+                .interactable(true)
+                .show(ctx, |ui| {
+                    let resp = ui.allocate_rect(rect, Sense::drag());
+                    if resp.hovered() {
+                        ui.ctx().set_cursor_icon(cursor);
+                    }
+                    if resp.drag_started() {
+                        ui.ctx()
+                            .send_viewport_cmd(ViewportCommand::BeginResize(dir));
+                    }
+                });
+        }
     }
 }
 
