@@ -468,8 +468,6 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
             crate::shutdown::cleanup();
             std::process::exit(0);
         }
-
-        _ => Response::Error("unhandled command".to_string()),
     }
 }
 
@@ -666,8 +664,11 @@ where
     use tokio::io::AsyncReadExt;
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf).await?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-    let mut buf = vec![0u8; len];
+    let len = u32::from_le_bytes(len_buf);
+    if len > resonance_ipc::transport::MAX_MSG_LEN {
+        anyhow::bail!("message too large: {len} bytes");
+    }
+    let mut buf = vec![0u8; len as usize];
     reader.read_exact(&mut buf).await?;
     Ok(postcard::from_bytes(&buf)?)
 }

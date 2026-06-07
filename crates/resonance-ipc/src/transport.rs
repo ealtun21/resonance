@@ -11,7 +11,10 @@ pub enum TransportError {
     Encode(#[from] postcard::Error),
 }
 
-const MAX_MSG_LEN: u32 = 4 * 1024 * 1024;
+/// Upper bound on a single framed message. Guards both the blocking reader here
+/// and the daemon's async reader against a hostile/garbled length prefix turning
+/// into a multi-gigabyte allocation.
+pub const MAX_MSG_LEN: u32 = 4 * 1024 * 1024;
 
 /// Write a length-prefixed postcard message to a stream.
 pub fn write_msg<W: Write, T: serde::Serialize>(

@@ -325,7 +325,6 @@ fn print_response(resp: Response) -> Result<()> {
             eprintln!("{} {e}", p.red("error:"));
             std::process::exit(1);
         }
-        Response::StateChanged(_) => {}
     }
     Ok(())
 }

@@ -1243,7 +1243,6 @@ impl IpcClient {
             | Response::Imported(_)
             | Response::Mappings(_) => Ok(()),
             Response::Error(e) => Err(anyhow!("{e}")),
-            Response::StateChanged(_) => Ok(()),
         }
     }
 

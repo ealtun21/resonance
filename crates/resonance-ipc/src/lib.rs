@@ -98,8 +98,6 @@ pub enum Command {
     /// Stop pinning an output and follow the OS default output device instead
     /// (auto-switch when the default changes, e.g. plugging headphones).
     FollowSystemOutput,
-    /// Subscribe to state-change events (TUI stream)
-    Subscribe,
     /// Stop the daemon
     Shutdown,
 }
@@ -225,6 +223,10 @@ impl From<BandType> for FilterType {
     }
 }
 
+// `State(DaemonState)` is large and the by-far most common reply; boxing it
+// would add an allocation to the hot path for no real memory win (a Response is
+// short-lived and never held in bulk).
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Response {
     Ok,
@@ -235,8 +237,6 @@ pub enum Response {
     /// List of output→profile mappings (output node.name, profile name)
     Mappings(Vec<(String, String)>),
     Error(String),
-    /// Pushed by daemon for Subscribe clients
-    StateChanged(DaemonState),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
