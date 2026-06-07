@@ -301,6 +301,9 @@ pub struct GuiApp {
     /// Smoothed spectrum bar heights + last animation tick.
     spectrum_display: Vec<f32>,
     last_anim: Instant,
+    /// Animated FR dB-axis half-range — eased toward the target so the axis
+    /// grows/shrinks smoothly instead of snapping between stops (no flicker).
+    db_axis: f64,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
     /// Start of the current edit burst (for undo coalescing).
@@ -548,6 +551,7 @@ impl GuiApp {
             rename: None,
             spectrum_display: Vec::new(),
             last_anim: Instant::now(),
+            db_axis: curve::DB_RANGE,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_edit: None,
@@ -1698,7 +1702,15 @@ impl GuiApp {
             .map(|&(_, g)| g.abs())
             .chain(state.bands.iter().map(|b| b.gain_db.abs()))
             .fold(0.0_f64, f64::max);
-        let (db, db_step) = curve::display_range(peak + 5.0);
+        let (target_db, db_step) = curve::display_range(peak + 5.0);
+        // Ease the axis toward the target instead of snapping between stops, so
+        // the curve + band markers glide as the range grows/shrinks (the GUI
+        // repaints at a fixed cadence, so a per-frame factor is stable).
+        self.db_axis += (target_db - self.db_axis) * 0.20;
+        if (self.db_axis - target_db).abs() < 0.05 {
+            self.db_axis = target_db;
+        }
+        let db = self.db_axis;
         let x_of =
             |logf: f64| -> f32 { plot.left() + ((logf - vlo) / (vhi - vlo)) as f32 * plot.width() };
         let y_of = |gain: f64| -> f32 {
