@@ -217,39 +217,16 @@ fn fmt_freq(hz: f64) -> String {
 /// Cheap preview for an EqualizerAPO `GraphicEQ:` target line — point count and
 /// range, without running the (expensive) curve-fit that import performs.
 fn graphic_eq_preview(content: &str) -> Option<Vec<String>> {
-    let line = content
-        .lines()
-        .map(str::trim)
-        .find(|l| l.starts_with("GraphicEQ:"))?;
-    let rest = line.strip_prefix("GraphicEQ:").unwrap_or("").trim();
-    let mut n = 0usize;
-    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
-    let (mut min_g, mut max_g) = (f64::INFINITY, f64::NEG_INFINITY);
-    for pair in rest.split(';').filter(|p| !p.trim().is_empty()) {
-        let mut it = pair.split_whitespace();
-        let Some(first) = it.next() else { continue };
-        let (fs, gs) = match it.next() {
-            Some(g) => (first, g),
-            None => match first.find('-') {
-                Some(i) => (&first[..i], &first[i..]),
-                None => continue,
-            },
-        };
-        if let (Ok(f), Ok(g)) = (fs.parse::<f64>(), gs.parse::<f64>()) {
-            n += 1;
-            lo = lo.min(f);
-            hi = hi.max(f);
-            min_g = min_g.min(g);
-            max_g = max_g.max(g);
-        }
-    }
-    if n == 0 {
-        return None;
-    }
+    let s = resonance_preset::graphic::graphic_eq_summary(content)?;
     Some(vec![
         "⮞ GraphicEQ target curve".to_string(),
-        format!("{n} points  {}–{}", fmt_freq(lo), fmt_freq(hi)),
-        format!("gain {min_g:+.1} … {max_g:+.1} dB"),
+        format!(
+            "{} points  {}–{}",
+            s.points,
+            fmt_freq(s.min_hz),
+            fmt_freq(s.max_hz)
+        ),
+        format!("gain {:+.1} … {:+.1} dB", s.min_gain, s.max_gain),
         String::new(),
         "Fitted to parametric bands".to_string(),
         "(shelves + peaks) on import.".to_string(),

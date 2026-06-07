@@ -63,6 +63,57 @@ struct Filt {
     q: f64,
 }
 
+/// Lightweight summary of an EqualizerAPO `GraphicEQ:` target line: point count
+/// plus frequency and gain spans. For previews — it does NOT run the (expensive)
+/// curve fit that [`fit_graphic_eq`] / import performs.
+#[derive(Debug, Clone, Copy)]
+pub struct GraphicEqSummary {
+    pub points: usize,
+    pub min_hz: f64,
+    pub max_hz: f64,
+    pub min_gain: f64,
+    pub max_gain: f64,
+}
+
+/// Parse the first `GraphicEQ:` line in `content` into a [`GraphicEqSummary`].
+/// `None` if there is no such line or it has no valid `freq gain` points.
+/// Accepts both `"freq gain"` and the space-less `"freq-gain"` point forms.
+pub fn graphic_eq_summary(content: &str) -> Option<GraphicEqSummary> {
+    let line = content
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("GraphicEQ:"))?;
+    let rest = line.strip_prefix("GraphicEQ:").unwrap_or("").trim();
+    let mut points = 0usize;
+    let (mut min_hz, mut max_hz) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut min_gain, mut max_gain) = (f64::INFINITY, f64::NEG_INFINITY);
+    for pair in rest.split(';').filter(|p| !p.trim().is_empty()) {
+        let mut it = pair.split_whitespace();
+        let Some(first) = it.next() else { continue };
+        let (fs, gs) = match it.next() {
+            Some(g) => (first, g),
+            None => match first.find('-') {
+                Some(i) => (&first[..i], &first[i..]),
+                None => continue,
+            },
+        };
+        if let (Ok(f), Ok(g)) = (fs.parse::<f64>(), gs.parse::<f64>()) {
+            points += 1;
+            min_hz = min_hz.min(f);
+            max_hz = max_hz.max(f);
+            min_gain = min_gain.min(g);
+            max_gain = max_gain.max(g);
+        }
+    }
+    (points > 0).then_some(GraphicEqSummary {
+        points,
+        min_hz,
+        max_hz,
+        min_gain,
+        max_gain,
+    })
+}
+
 /// Fit `points` (frequency Hz, target gain dB) to a parametric bank.
 ///
 /// Returns `(preamp_db, bands)`: the broadband level lands in `preamp_db`, the
