@@ -45,6 +45,12 @@ Pin a version with `RESONANCE_VERSION=v0.3.0` or change the target with
 `PREFIX=~/.local`. The binaries are dynamic — see
 [runtime requirements](#prebuilt-release-binaries).
 
+**Steam Deck / immutable distros (SteamOS, Silverblue).** The installer
+detects a read-only rootfs and installs into `~/.local` automatically — no
+`steamos-readonly disable` (which is reverted on the next OS update). The
+daemon, its socket, config, and the autostart entry all live under `$HOME`, so
+nothing touches the immutable `/usr`. Run it from Desktop Mode.
+
 ### Arch Linux (AUR-style, from source)
 
 The repo ships a `PKGBUILD`. Run the same script **inside a checkout** and it
@@ -62,6 +68,15 @@ makepkg -si
 
 On non-Arch checkouts `./install.sh` falls back to `cargo build --release` +
 install into the prefix. Force a source build with `FROM_SOURCE=1`.
+
+**Run at login (any init system).** The IPC clients install a per-user
+autostart entry the same way on every distro — `resonance daemon enable` (and
+the Start / Autostart toggles in the TUI/GUI). On systemd it writes a
+`--user` unit; where `systemctl --user` is absent (OpenRC, runit, SysV, or a
+bare session) it falls back to a freedesktop `autostart/resonanced.desktop`
+plus direct process control, so the daemon still autostarts and the same
+`enable / disable / start / stop / restart` commands work. No `systemctl` or
+init script to edit by hand.
 
 ### Prebuilt release binaries
 
