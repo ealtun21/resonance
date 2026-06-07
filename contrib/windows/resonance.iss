@@ -50,7 +50,15 @@ Source: "uninstall-apo.ps1";                       DestDir: "{app}"; Flags: igno
 Name: "{group}\Resonance";        Filename: "{app}\{#AppExe}"; IconFilename: "{app}\resonance.ico"
 Name: "{group}\Uninstall Resonance"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\Resonance";  Filename: "{app}\{#AppExe}"; IconFilename: "{app}\resonance.ico"; Tasks: desktopicon
-Name: "{userstartup}\Resonance";  Filename: "{app}\{#AppExe}"; IconFilename: "{app}\resonance.ico"; Tasks: autostart
+
+[Registry]
+; Autostart runs ONLY the daemon (GUI-subsystem, no console window) via the same
+; HKCU Run value name ("Resonance") that resonance_ipc::service manages — so
+; toggling autostart from the GUI/TUI modifies exactly what the installer set.
+; uninsdeletevalue removes it on uninstall.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
+    ValueType: string; ValueName: "Resonance"; ValueData: """{app}\resonanced.exe"""; \
+    Tasks: autostart; Flags: uninsdeletevalue
 
 [Run]
 ; Register the APO, attach it to the active playback device(s), and restart the

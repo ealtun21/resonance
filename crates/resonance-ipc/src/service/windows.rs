@@ -110,7 +110,9 @@ pub fn restart() -> io::Result<()> {
 }
 
 pub fn enable() -> io::Result<()> {
-    let exe = daemon_exe();
+    // Quote the path: a spaced "C:\Program Files\..." Run value must be quoted
+    // to launch correctly at logon. Matches what the installer writes.
+    let exe = format!("\"{}\"", daemon_exe());
     let out = Command::new("reg")
         .args([
             "add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ", "/d", &exe, "/f",
