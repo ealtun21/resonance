@@ -188,13 +188,16 @@ impl BiquadCoeffs {
 }
 
 fn validate(freq: f64, q: f64, sample_rate: f64) -> Result<(), FilterError> {
-    if sample_rate <= 0.0 {
+    // Reject non-finite first: NaN/Inf pass every `<= 0` / `>=` comparison below
+    // (NaN compares false to everything) and would poison the biquad
+    // coefficients. Reachable from an untrusted APO `.txt` (`parse_db` etc.).
+    if !sample_rate.is_finite() || sample_rate <= 0.0 {
         return Err(FilterError::InvalidSampleRate(sample_rate));
     }
-    if freq <= 0.0 || freq >= sample_rate / 2.0 {
+    if !freq.is_finite() || freq <= 0.0 || freq >= sample_rate / 2.0 {
         return Err(FilterError::InvalidFrequency(freq));
     }
-    if q <= 0.0 {
+    if !q.is_finite() || q <= 0.0 {
         return Err(FilterError::InvalidQ(q));
     }
     Ok(())
@@ -319,15 +322,27 @@ impl ApoFilterBuilder {
         let filter_type = self.filter_type.unwrap_or(FilterType::Peaking);
         let freq = self.freq.unwrap_or(1000.0);
         let sr = self.sample_rate.unwrap_or(48000.0);
-        let q = if self.q <= 0.0 { 0.707 } else { self.q };
+        // Non-finite Q/gain (e.g. "nan" in a hostile APO `.txt`) → sane defaults
+        // so the band loads flat instead of poisoning the coefficients. freq/sr
+        // are still hard-validated in `validate`.
+        let q = if !self.q.is_finite() || self.q <= 0.0 {
+            0.707
+        } else {
+            self.q
+        };
+        let gain_db = if self.gain_db.is_finite() {
+            self.gain_db
+        } else {
+            0.0
+        };
         let channels = if self.channels == 0 { 2 } else { self.channels };
 
-        let coeffs = coeffs_for(filter_type, freq, self.gain_db, q, sr)?;
+        let coeffs = coeffs_for(filter_type, freq, gain_db, q, sr)?;
 
         Ok(ApoFilter {
             filter_type,
             freq,
-            gain_db: self.gain_db,
+            gain_db,
             q,
             enabled: self.enabled,
             biquad: BiquadFilter::new(coeffs, channels),
@@ -410,6 +425,41 @@ mod tests {
             .sample_rate(SR)
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn rejects_non_finite_freq_and_q() {
+        // NaN/Inf must not slip through the `<= 0` / `>=` checks and poison coeffs.
+        for bad in [f64::NAN, f64::INFINITY] {
+            assert!(
+                ApoFilter::builder()
+                    .filter_type(FilterType::Peaking)
+                    .freq(bad)
+                    .gain_db(3.0)
+                    .q(1.0)
+                    .channels(1)
+                    .sample_rate(SR)
+                    .build()
+                    .is_err(),
+                "freq={bad} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn non_finite_gain_loads_flat() {
+        // A non-finite gain defaults to 0 dB so the band loads (flat) instead of
+        // producing NaN coefficients.
+        let f = ApoFilter::builder()
+            .filter_type(FilterType::Peaking)
+            .freq(1000.0)
+            .gain_db(f64::NAN)
+            .q(1.0)
+            .channels(1)
+            .sample_rate(SR)
+            .build()
+            .expect("should build with defaulted gain");
+        assert_eq!(f.gain_db, 0.0);
     }
 
     // ── BiquadCoeffs direct ─────────────────────────────────────────────────

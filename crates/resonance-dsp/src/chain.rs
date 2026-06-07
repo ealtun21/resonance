@@ -131,7 +131,13 @@ impl ProcessorChain {
         }
         self.sample_rate = sample_rate;
         for f in self.filters.iter_mut() {
-            let _ = f.update(f.filter_type, f.freq, f.gain_db, f.q, sample_rate);
+            // A band whose freq is at/above the new Nyquist (e.g. a 20 kHz band
+            // after 48k→32k) can't be realized — `update` fails and would leave
+            // the OLD-rate coefficients live against the new rate. Disable it
+            // instead of silently keeping a wrong filter.
+            if f.update(f.filter_type, f.freq, f.gain_db, f.q, sample_rate).is_err() {
+                f.enabled = false;
+            }
         }
         let ch = self.channels;
         self.fidelity = carry_settings(&self.fidelity, FidelityEffect::new(ch, sample_rate));
