@@ -48,6 +48,8 @@ struct Shared {
     /// worker reads for the FFT. AtomicU32 holds f32 bits.
     ring: [AtomicU32; RING],
     ring_pos: AtomicUsize,
+    /// APOProcess call counter, for throttled diagnostic logging.
+    proc_calls: AtomicU64,
 }
 
 /// Opaque handle returned to the C++ shell.
@@ -246,6 +248,7 @@ pub extern "C" fn resonance_apo_create() -> *mut ApoEngine {
             out_rms: AtomicU32::new(0),
             ring: core::array::from_fn(|_| AtomicU32::new(0)),
             ring_pos: AtomicUsize::new(0),
+            proc_calls: AtomicU64::new(0),
         });
         let weak = Arc::downgrade(&shared);
         std::thread::spawn(move || worker_loop(weak));
@@ -332,6 +335,22 @@ pub extern "C" fn resonance_apo_process(
             let (ip, ir) = peak_rms_f32(&samples[..n]);
             eng.shared.in_peak.store(ip.to_bits(), Ordering::Relaxed);
             eng.shared.in_rms.store(ir.to_bits(), Ordering::Relaxed);
+        }
+
+        // Diagnostic (throttled ~1/sec at 48k): does THIS APO instance actually
+        // receive real audio, and is the chain live? On endpoints where the APO
+        // sits on a silent/bypassed connection, in_rms stays ~0 forever while
+        // audio still plays — that distinguishes "APO not in the signal path"
+        // from "APO in path but chain flat".
+        let calls = eng.shared.proc_calls.fetch_add(1, Ordering::Relaxed);
+        if calls % 100 == 0 {
+            let (ipk, irms) = peak_rms_f32(&samples[..n]);
+            crate::log::line(&format!(
+                "process #{calls}: in_peak={ipk:.4} in_rms={irms:.4} frames={frames} ch={ch} enabled={} preamp={:.1} filters={}",
+                l.chain.enabled,
+                l.chain.preamp_db,
+                l.chain.filters.len(),
+            ));
         }
 
         for (d, s) in l.scratch[..n].iter_mut().zip(samples.iter()) {
