@@ -1,13 +1,9 @@
-use anyhow::{Result, anyhow};
 use ratatui::layout::Rect;
 use resonance_ipc::{
     BandState, Command, DaemonState, EffectsState, FxEffectId, Response,
-    transport::{ClientStream, connect, read_response, write_command},
+    transport::SyncClient as IpcClient,
 };
-use std::{
-    io::{BufReader, BufWriter, Write},
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 /// Spectrum envelope time constants: bars snap up, glide down.
 const SPECTRUM_ATTACK_TAU: f32 = 0.020;
@@ -209,7 +205,9 @@ impl App {
     }
 
     pub fn connect(&mut self) {
-        match IpcClient::connect() {
+        // The TUI polls less aggressively than the GUI, so a slightly longer
+        // (read+write) timeout than the GUI's is fine.
+        match IpcClient::connect_with_timeout(Duration::from_millis(500)) {
             Ok(c) => {
                 self.ipc = Some(c);
                 self.status = "connected".into();
@@ -1182,50 +1180,4 @@ pub fn fx_intensity(state: &DaemonState, idx: usize) -> f64 {
 
 pub fn fx_enabled(state: &DaemonState, idx: usize) -> bool {
     state.effects.get(fx_effect_at(idx)).1
-}
-
-// ── Sync IPC client ────────────────────────────────────────────────────────
-
-struct IpcClient {
-    reader: BufReader<ClientStream>,
-    writer: BufWriter<ClientStream>,
-}
-
-impl IpcClient {
-    fn connect() -> Result<Self> {
-        let stream = connect().map_err(|e| anyhow!("connect to daemon: {e}"))?;
-        stream.set_read_timeout(Some(Duration::from_millis(500)))?;
-        let writer = BufWriter::new(stream.try_clone()?);
-        let reader = BufReader::new(stream);
-        Ok(Self { reader, writer })
-    }
-
-    fn get_state(&mut self) -> Result<DaemonState> {
-        write_command(&mut self.writer, &Command::GetState)?;
-        self.writer.flush()?;
-        match read_response(&mut self.reader)? {
-            Response::State(s) => Ok(s),
-            Response::Error(e) => Err(anyhow!("{e}")),
-            _ => Err(anyhow!("unexpected response")),
-        }
-    }
-
-    fn send(&mut self, cmd: Command) -> Result<()> {
-        write_command(&mut self.writer, &cmd)?;
-        self.writer.flush()?;
-        match read_response(&mut self.reader)? {
-            Response::Ok
-            | Response::State(_)
-            | Response::PresetList(_)
-            | Response::Imported(_)
-            | Response::Mappings(_) => Ok(()),
-            Response::Error(e) => Err(anyhow!("{e}")),
-        }
-    }
-
-    fn send_recv(&mut self, cmd: Command) -> Result<Response> {
-        write_command(&mut self.writer, &cmd)?;
-        self.writer.flush()?;
-        Ok(read_response(&mut self.reader)?)
-    }
 }

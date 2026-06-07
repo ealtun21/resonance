@@ -393,7 +393,7 @@ fn spawn_ipc_worker(
             let mut refresh_meta_now = true;
             loop {
                 if ipc.is_none() {
-                    match IpcClient::connect() {
+                    match crate::ipc::connect() {
                         Ok(c) => {
                             ipc = Some(c);
                             refresh_meta_now = true;

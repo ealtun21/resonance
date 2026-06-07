@@ -3,11 +3,8 @@ mod autoeq;
 use anyhow::{Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
-use resonance_ipc::{
-    Command, FxEffectId, Response,
-    transport::{connect, read_response, write_command},
-};
-use std::io::{self, BufReader, BufWriter, IsTerminal, Write};
+use resonance_ipc::{Command, FxEffectId, Response, transport::SyncClient};
+use std::io::{self, IsTerminal};
 
 #[derive(Parser)]
 #[command(name = "resonance", about = "Control the Resonance EQ daemon", version)]
@@ -285,13 +282,11 @@ fn run_daemon(action: &DaemonAction) -> Result<()> {
 }
 
 fn send(cmd: Command) -> Result<Response> {
-    let stream = connect().map_err(|e| anyhow::anyhow!("cannot connect to daemon: {e}"))?;
-    let mut reader = BufReader::new(stream.try_clone()?);
-    let mut writer = BufWriter::new(stream);
-
-    write_command(&mut writer, &cmd)?;
-    writer.flush()?;
-    Ok(read_response(&mut reader)?)
+    // No timeout: a CLI command may legitimately wait on slower daemon work
+    // (preset import, AutoEq download-and-apply).
+    let mut client =
+        SyncClient::connect().map_err(|e| anyhow::anyhow!("cannot connect to daemon: {e}"))?;
+    Ok(client.send_recv(cmd)?)
 }
 
 fn print_response(resp: Response) -> Result<()> {
