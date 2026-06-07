@@ -17,11 +17,47 @@ use rtrb::RingBuffer;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
+/// Set up tracing. Defaults to `info` when `RUST_LOG` is unset so an
+/// autostarted daemon still logs. On Windows the process is GUI-subsystem (no
+/// console), so logs also go to a file — otherwise a crash/restart loop leaves
+/// no trace at all. A panic hook routes panics into the same log.
+fn init_logging() {
+    let filter = || EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    #[cfg(windows)]
+    let to_file = {
+        let path = resonance_ipc::paths::daemon_log_path();
+        match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(file) => {
+                tracing_subscriber::fmt()
+                    .with_env_filter(filter())
+                    .with_ansi(false)
+                    .with_writer(move || file.try_clone().expect("clone daemon log file"))
+                    .init();
+                true
+            }
+            Err(_) => false,
+        }
+    };
+    #[cfg(not(windows))]
+    let to_file = false;
+
+    if !to_file {
+        tracing_subscriber::fmt().with_env_filter(filter()).init();
+    }
+
+    // Route panics into the log too (the default hook writes to stderr, which is
+    // discarded under the Windows GUI subsystem).
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!("panic: {info}");
+        prev(info);
+    }));
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    init_logging();
 
     info!("resonanced starting");
 
