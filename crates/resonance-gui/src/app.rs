@@ -1699,7 +1699,19 @@ impl GuiApp {
         // big boosts/cuts stay on-screen with margin instead of clipping.
         let (vlo, vhi) = self.view_log;
         let zoomed = vlo > curve::LOG_MIN + 1e-6 || vhi < curve::LOG_MAX - 1e-6;
-        let pts = curve::curve_points_range(&state.bands, state.sample_rate, 240, vlo, vhi);
+        // Draw the curve from an optimistic copy: while dragging, the daemon's
+        // echoed `state` only refreshes at the worker's ~30 Hz poll, so the line
+        // would visibly lag the node (which uses the immediate `drag_value`).
+        // Patch the dragged band's live freq/gain in so the line and node move
+        // together at the display's frame rate.
+        let mut bands = state.bands.clone();
+        if let (Some(i), Some((f, g))) = (self.drag_band, self.drag_value) {
+            if let Some(b) = bands.get_mut(i) {
+                b.freq = f;
+                b.gain_db = g;
+            }
+        }
+        let pts = curve::curve_points_range(&bands, state.sample_rate, 240, vlo, vhi);
         // Axis target = loudest point + 5 dB headroom. While dragging a band we
         // must NOT let that band's *own* gain drive the axis: the dragged gain is
         // read from the cursor *through* the axis (`db_of` below), so feeding it
@@ -1711,14 +1723,13 @@ impl GuiApp {
             Some(di) => {
                 // Other bands only — the summed `pts` curve includes the dragged
                 // band, so it can't be used here without reintroducing feedback.
-                let others = state
-                    .bands
+                let others = bands
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| *i != di)
                     .map(|(_, b)| b.gain_db.abs())
                     .fold(0.0_f64, f64::max);
-                let dragged = state.bands.get(di).map(|b| b.gain_db.abs()).unwrap_or(0.0);
+                let dragged = bands.get(di).map(|b| b.gain_db.abs()).unwrap_or(0.0);
                 // Only let the dragged band grow the axis when it's pushing past
                 // ~85% of the current range (near/over the top edge).
                 let dragged = if dragged > 0.85 * self.db_axis {
@@ -1731,7 +1742,7 @@ impl GuiApp {
             None => pts
                 .iter()
                 .map(|&(_, g)| g.abs())
-                .chain(state.bands.iter().map(|b| b.gain_db.abs()))
+                .chain(bands.iter().map(|b| b.gain_db.abs()))
                 .fold(0.0_f64, f64::max),
         };
         let (target_db, db_step) = curve::display_range(peak + 5.0);
