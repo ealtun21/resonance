@@ -58,13 +58,17 @@ jobs:
           # tarball. We can't know it until the tarball is built, so generate the
           # final PKGBUILD here and ship it as a release asset; install.sh pulls
           # it from the release (not the tag tree), keeping the two in lockstep.
-          name="resonance-${GITHUB_REF_NAME#v}-x86_64-linux"
+          ver="${GITHUB_REF_NAME#v}"
+          name="resonance-${ver}-x86_64-linux"
           sha="$(awk '{print $1}' "dist/$name.tar.gz.sha256")"
           cp contrib/aur-bin/PKGBUILD dist/PKGBUILD
+          # pkgver must match this release tag (it drives the download URL); the
+          # in-repo PKGBUILD is just a template, the tag is the source of truth.
+          sed -i "s/^pkgver=.*/pkgver=$ver/" dist/PKGBUILD
           # Replace the first quoted 64-hex (sha256sums[0] = the tarball) only.
           sed -i "0,/'[0-9a-f]\{64\}'/s//'$sha'/" dist/PKGBUILD
-          echo "stamped tarball sha256 $sha into dist/PKGBUILD"
-          grep -n "$sha" dist/PKGBUILD
+          echo "stamped pkgver $ver + tarball sha256 $sha into dist/PKGBUILD"
+          grep -nE "^pkgver=|$sha" dist/PKGBUILD
 
       - name: Build RPM
         run: |

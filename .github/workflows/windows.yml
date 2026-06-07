@@ -57,7 +57,11 @@ jobs:
         shell: pwsh
         run: |
           choco install innosetup -y --no-progress
-          $ver = "0.4.0"
+          # Single source of truth: the workspace version from cargo metadata.
+          $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $ver = ($meta.packages | Where-Object { $_.name -eq 'resonance-daemon' }).version
+          if (-not $ver) { throw "could not read version from cargo metadata" }
+          Write-Host "installer version $ver (from Cargo.toml)"
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$ver" contrib\windows\resonance.iss
 
       - name: Upload installer artifact

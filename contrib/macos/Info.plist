@@ -9,10 +9,12 @@
     <string>Resonance EQ</string>
     <key>CFBundleIdentifier</key>
     <string>com.ealtun21.resonance</string>
+    <!-- Both version strings are injected by build-app.sh from the workspace
+         Cargo.toml so there is a single source of truth. -->
     <key>CFBundleVersion</key>
-    <string>0.4.0</string>
+    <string>__VERSION__</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.4.0</string>
+    <string>__VERSION__</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <!-- Main executable is the GUI; it auto-spawns the daemon (also

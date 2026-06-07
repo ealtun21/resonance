@@ -43,7 +43,13 @@ rm -rf "$APP_OUT"
 mkdir -p "$APP_OUT/Contents/MacOS"
 mkdir -p "$APP_OUT/Contents/Resources"
 
-cp "$REPO_DIR/contrib/macos/Info.plist" "$APP_OUT/Contents/Info.plist"
+# Single source of truth for the version: the workspace Cargo.toml. Inject it
+# into the bundle's Info.plist so a release only bumps one file.
+VERSION="$(grep -m1 '^version = ' "$REPO_DIR/Cargo.toml" | sed -E 's/.*"(.*)".*/\1/')"
+[[ -n "$VERSION" ]] || { echo "could not read version from Cargo.toml" >&2; exit 1; }
+echo ">> bundle version $VERSION (from Cargo.toml)"
+sed "s/__VERSION__/$VERSION/g" "$REPO_DIR/contrib/macos/Info.plist" \
+    > "$APP_OUT/Contents/Info.plist"
 # Copy (don't symlink) so the bundle is self-contained even if the workspace
 # is moved or rebuilt.
 cp "$BIN" "$APP_OUT/Contents/MacOS/resonanced"
