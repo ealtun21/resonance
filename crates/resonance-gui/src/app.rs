@@ -65,8 +65,8 @@ const TB_FULL_H: f32 = TB_ROW_H * 2.0;
 /// Default / fallback widths of the Effects & Devices side panels (used as
 /// `default_size` and when no resized width is stored yet). The tab-vs-columns
 /// decision is measured at runtime, not derived from these.
-const EFFECTS_W: f32 = 280.0;
-const DEVICES_W: f32 = 340.0;
+const EFFECTS_W: f32 = 300.0;
+const DEVICES_W: f32 = 420.0;
 /// Fallback natural width of the EQ bands table before it's been measured —
 /// keeps the first frame in column layout at the default window size.
 const DEFAULT_BANDS_W: f32 = 500.0;
@@ -299,6 +299,11 @@ pub struct GuiApp {
     /// Animated FR dB-axis half-range — eased toward the target so the axis
     /// grows/shrinks smoothly instead of snapping between stops (no flicker).
     db_axis: f64,
+    /// Hysteretic target half-range (the chosen ± dB stop) + its grid step. Held
+    /// across frames with a deadband so the stop choice doesn't chatter at a
+    /// boundary; `db_axis` eases toward `db_target`.
+    db_target: f64,
+    db_step: f64,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
     /// Start of the current edit burst (for undo coalescing).
@@ -548,6 +553,8 @@ impl GuiApp {
             spectrum_display: Vec::new(),
             last_anim: Instant::now(),
             db_axis: curve::DB_RANGE,
+            db_target: curve::DB_RANGE,
+            db_step: 6.0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_edit: None,
@@ -851,17 +858,17 @@ impl eframe::App for GuiApp {
             if cols_fit {
                 // Fixed-width side panels (no manual resize); EQ bands central
                 // takes the rest so it never squishes below its 8-column table.
-                egui::Panel::left("effects")
+                egui::Panel::left("fx_pane")
                     .resizable(false)
-                    .exact_size(EFFECTS_W)
+                    .default_size(EFFECTS_W)
                     .show_inside(ui, |ui| {
                         if let Some(s) = &state {
                             padded_scroll(ui, "effects_scroll", |ui| self.effects_section(ui, s));
                         }
                     });
-                egui::Panel::right("side")
+                egui::Panel::right("dev_pane")
                     .resizable(false)
-                    .exact_size(DEVICES_W)
+                    .default_size(DEVICES_W)
                     .show_inside(ui, |ui| {
                         padded_scroll(ui, "side", |ui| self.devices_profiles(ui));
                     });
@@ -1397,7 +1404,7 @@ impl GuiApp {
     /// their defaults next frame.
     fn reset_layout(&mut self, ctx: &egui::Context) {
         use egui::containers::panel::PanelState;
-        for id in ["fr", "spectrum", "effects", "side"] {
+        for id in ["fr", "spectrum", "fx_pane", "dev_pane"] {
             ctx.data_mut(|d| d.remove::<PanelState>(egui::Id::new(id)));
         }
         self.set_status("layout reset");
@@ -1712,51 +1719,32 @@ impl GuiApp {
             }
         }
         let pts = curve::curve_points_range(&bands, state.sample_rate, 240, vlo, vhi);
-        // Axis target = loudest point + 5 dB headroom. While dragging a band we
-        // must NOT let that band's *own* gain drive the axis: the dragged gain is
-        // read from the cursor *through* the axis (`db_of` below), so feeding it
-        // back would run the axis away and wobble the curve. So during a drag we
-        // size the axis from the other bands only, and let the dragged band's gain
-        // count only once it nears the top edge (so you can still boost past the
-        // current range — the graph then zooms out under a pinned node).
-        let peak = match self.drag_band {
-            Some(di) => {
-                // Other bands only — the summed `pts` curve includes the dragged
-                // band, so it can't be used here without reintroducing feedback.
-                let others = bands
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| *i != di)
-                    .map(|(_, b)| b.gain_db.abs())
-                    .fold(0.0_f64, f64::max);
-                let dragged = bands.get(di).map(|b| b.gain_db.abs()).unwrap_or(0.0);
-                // Only let the dragged band grow the axis when it's pushing past
-                // ~85% of the current range (near/over the top edge).
-                let dragged = if dragged > 0.85 * self.db_axis {
-                    dragged
-                } else {
-                    0.0
-                };
-                others.max(dragged)
-            }
-            None => pts
-                .iter()
-                .map(|&(_, g)| g.abs())
-                .chain(bands.iter().map(|b| b.gain_db.abs()))
-                .fold(0.0_f64, f64::max),
-        };
-        let (target_db, db_step) = curve::display_range(peak + 5.0);
-        // Ease the axis toward the target instead of snapping between stops, so
-        // the curve + markers glide as the range changes. During a drag the axis
-        // only grows (never shrinks) so it can't oscillate while the dragged gain
-        // is derived from it — the node then stays glued to the cursor (`db_of`
-        // and `y_of` share the same `db`, so they're exact inverses each frame).
-        let eased = self.db_axis + (target_db - self.db_axis) * 0.20;
-        self.db_axis = if self.drag_band.is_some() {
-            eased.max(self.db_axis)
-        } else {
-            eased
-        };
+        // Loudest point the axis must show (any band gain or curve peak) + 5 dB
+        // headroom. Includes the dragged band, so the axis expands live as you
+        // drag a node up and contracts as you bring it down.
+        let peak = pts
+            .iter()
+            .map(|&(_, g)| g.abs())
+            .chain(bands.iter().map(|b| b.gain_db.abs()))
+            .fold(0.0_f64, f64::max);
+        let needed = peak + 5.0;
+        // Pick the ± dB stop with HYSTERESIS so it doesn't chatter (jiggle) when
+        // `needed` sits right on a stop boundary: grow once it exceeds 98% of the
+        // current stop, shrink only once it drops below 65%. The wide deadband
+        // also breaks the gain↔axis feedback — dragging the node up to ~mid-graph
+        // settles on a stop instead of running away (only slamming the node to
+        // the very top edge takes it to the max stop, which is what you'd want).
+        if needed > self.db_target * 0.98 || needed < self.db_target * 0.65 {
+            let (t, s) = curve::display_range(needed);
+            self.db_target = t;
+            self.db_step = s;
+        }
+        let target_db = self.db_target;
+        let db_step = self.db_step;
+        // Ease the axis toward the chosen stop so the curve + markers glide
+        // instead of snapping. Same easing whether or not a drag is active, so
+        // expand and contract feel identical.
+        self.db_axis += (target_db - self.db_axis) * 0.20;
         if (self.db_axis - target_db).abs() < 0.05 {
             self.db_axis = target_db;
         }
