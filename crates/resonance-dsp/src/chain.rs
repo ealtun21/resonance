@@ -135,7 +135,9 @@ impl ProcessorChain {
             // after 48k→32k) can't be realized — `update` fails and would leave
             // the OLD-rate coefficients live against the new rate. Disable it
             // instead of silently keeping a wrong filter.
-            if f.update(f.filter_type, f.freq, f.gain_db, f.q, sample_rate).is_err() {
+            if f.update(f.filter_type, f.freq, f.gain_db, f.q, sample_rate)
+                .is_err()
+            {
                 f.enabled = false;
             }
         }

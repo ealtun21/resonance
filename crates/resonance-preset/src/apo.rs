@@ -245,7 +245,9 @@ fn parse_graphic_eq(s: &str, ln: usize) -> Result<Vec<(f64, f64)>, ApoError> {
 
 fn parse_db(s: &str, ln: usize) -> Result<f64, ApoError> {
     let val = s.trim_end_matches("dB").trim();
-    let db = val.parse::<f64>().map_err(|_| err(ln, "invalid dB value"))?;
+    let db = val
+        .parse::<f64>()
+        .map_err(|_| err(ln, "invalid dB value"))?;
     // Rust's f64 parse accepts "nan"/"inf"; reject them so a hostile preset
     // can't feed NaN/Inf into preamp or band gain.
     if !db.is_finite() {

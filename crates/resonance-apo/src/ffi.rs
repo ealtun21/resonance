@@ -88,6 +88,7 @@ fn worker_loop(weak: Weak<Shared>) {
         .collect();
     let mut envelope = [0.0f32; TELEMETRY_BINS];
     let mut scratch = vec![Complex::new(0.0f32, 0.0); FFT_SIZE];
+    let mut logged_open_err = false;
 
     loop {
         std::thread::sleep(Duration::from_millis(25));
@@ -98,7 +99,24 @@ fn worker_loop(weak: Weak<Shared>) {
             return;
         }
         if file.is_none() {
-            file = SharedFile::open(&path).ok();
+            match SharedFile::open(&path) {
+                Ok(f) => {
+                    crate::log::line(&format!("state file opened: {}", path.display()));
+                    file = Some(f);
+                }
+                Err(e) => {
+                    // Log once: an ACCESS_DENIED here (audiodg as LocalService vs a
+                    // user-created state file without inherited write ACL) means the
+                    // APO runs but never reads the chain — no EQ, no spectrum.
+                    if !logged_open_err {
+                        logged_open_err = true;
+                        crate::log::line(&format!(
+                            "state file open FAILED: {} ({e})",
+                            path.display()
+                        ));
+                    }
+                }
+            }
         }
         let Some(f) = file.as_ref() else {
             continue;

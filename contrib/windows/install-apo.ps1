@@ -11,12 +11,21 @@ param(
 $ErrorActionPreference = 'Continue'
 
 # Transcript so the (run-hidden) installer's APO registration + per-endpoint
-# attach results are captured — the only way to diagnose attach failures on
+# attach results are captured - the only way to diagnose attach failures on
 # machines we can't reach (real audio drivers, Win editions, AV, etc.).
 $logDir = Join-Path $env:ProgramData 'Resonance'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 try { Start-Transcript -Path (Join-Path $logDir 'apo-install.log') -Force | Out-Null } catch {}
 Write-Output "install-apo: DllPath=$DllPath exists=$(Test-Path $DllPath) OS=$([Environment]::OSVersion.Version)"
+
+# The daemon (logged-in user) creates %ProgramData%\Resonance\apo_state.bin; the
+# APO inside audiodg.exe must also open it READ-WRITE (seqlock + telemetry). When
+# audiodg runs as the restricted LocalService token it would get ACCESS_DENIED on
+# the user-created file, the APO falls back to flat passthrough, and there's no
+# EQ/spectrum. Grant the dir (with inheritance) to LocalService + NetworkService
+# + Users so the daemon-created file inherits write access for audiodg.
+& icacls.exe "$logDir" /grant '*S-1-5-19:(OI)(CI)F' '*S-1-5-20:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)M' 2>&1 | Out-Null
+Write-Output "granted ACLs on $logDir (icacls exit $LASTEXITCODE)"
 
 $clsid = '{7C3D2A1E-9B6F-4E2A-8D5C-1F0A3B4C5D6E}'
 $backupRoot = 'HKLM:\SOFTWARE\Resonance\ApoBackup'
@@ -85,6 +94,8 @@ $defaultMode = '{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}'
 $dse  = '{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E}'   # DisableSystemEffects
 New-Item -Force -Path $backupRoot | Out-Null
 
+$attached = 0
+$verified = 0
 Get-ChildItem $render -EA SilentlyContinue | ForEach-Object {
   $g = $_.PSChildName
   # Attach to every render endpoint (not just the active one) so switching the
@@ -106,13 +117,22 @@ Get-ChildItem $render -EA SilentlyContinue | ForEach-Object {
       Set-ItemProperty -Path $fxp -Name "$mode,$slot" -Value $defaultMode
     }
     New-ItemProperty -Force -Path $fxp -Name "$dse,5" -PropertyType DWord -Value 0 | Out-Null
-    Write-Output "attached $g"
+    $attached++
+    # Read the slot back: on a vendor-protected (Realtek/Nahimic) FxProperties the
+    # writes can be silently ignored even though SetAccessControl didn't throw.
+    $rb = (Get-ItemProperty -Path $fxp -Name "$fx,5" -EA SilentlyContinue)."$fx,5"
+    if ($rb -eq $clsid) { $verified++; Write-Output "attached+verified $g" }
+    else { Write-Output "attached but READ-BACK MISMATCH $g (got '$rb') - endpoint may be vendor-locked" }
   } catch {
-    Write-Output "attach failed $g : $($_.Exception.Message)"
+    Write-Output "attach FAILED $g : $($_.Exception.Message)"
   }
+}
+Write-Output "attach summary: attached=$attached verified=$verified"
+if ($verified -eq 0) {
+  Write-Output 'ERROR: APO did not verify on ANY render endpoint - EQ will not work. The default playback device may be vendor-locked or protected.'
 }
 
 # --- 5) restart the audio engine so audiodg reloads APO registrations ---
 Restart-Service audiosrv -Force -EA SilentlyContinue
-Write-Output 'Resonance APO installed.'
+Write-Output 'Resonance APO install finished.'
 try { Stop-Transcript | Out-Null } catch {}

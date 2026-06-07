@@ -16,10 +16,30 @@ use windows::Win32::Media::Audio::{
     DEVICE_STATE_ACTIVE, IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX,
     WAVEFORMATEXTENSIBLE, eAll, eConsole, eRender,
 };
+use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, STGM_READ,
 };
+use windows::Win32::System::Variant::VT_LPWSTR;
 use windows::core::{GUID, HRESULT, PCWSTR};
+
+/// Read a friendly-name PROPVARIANT as an owned String, guarding the union: only
+/// `VT_LPWSTR` with a non-null pointer is a valid wide string. A driver/endpoint
+/// returning a different variant or null would otherwise be a wild pointer deref
+/// — a structured access violation that `catch_unwind` can't catch. Returns ""
+/// in that case.
+///
+/// SAFETY: caller passes a PROPVARIANT obtained from `IPropertyStore::GetValue`.
+unsafe fn propvariant_str(prop: &PROPVARIANT) -> String {
+    let v = &prop.Anonymous.Anonymous;
+    if v.vt == VT_LPWSTR {
+        let p = v.Anonymous.pwszVal;
+        if !p.is_null() {
+            return p.to_string().unwrap_or_default();
+        }
+    }
+    String::new()
+}
 
 /// Friendly names of all active render endpoints, in `IMMDeviceEnumerator`
 /// order — the same order cpal's `output_devices()` yields, so index `i` here
@@ -46,11 +66,7 @@ fn enumerate() -> windows::core::Result<Vec<String>> {
                 let dev = coll.Item(i)?;
                 let store = dev.OpenPropertyStore(STGM_READ)?;
                 let prop = store.GetValue(&PKEY_Device_FriendlyName)?;
-                // The friendly name is a VT_LPWSTR; read the wide string out of
-                // the PROPVARIANT union directly. The PROPVARIANT owns the
-                // buffer and frees it on drop, so we copy into an owned String.
-                let pwstr = prop.Anonymous.Anonymous.Anonymous.pwszVal;
-                Ok(pwstr.to_string().unwrap_or_default())
+                Ok(propvariant_str(&prop))
             })()
             .unwrap_or_default();
             names.push(name);
@@ -142,13 +158,7 @@ fn enumerate_with_ids() -> windows::core::Result<Vec<(String, String)>> {
                 CoTaskMemFree(Some(id.0 as *const _));
                 let store = dev.OpenPropertyStore(STGM_READ)?;
                 let prop = store.GetValue(&PKEY_Device_FriendlyName)?;
-                let name = prop
-                    .Anonymous
-                    .Anonymous
-                    .Anonymous
-                    .pwszVal
-                    .to_string()
-                    .unwrap_or_default();
+                let name = propvariant_str(&prop);
                 Ok((id_s, name))
             })();
             if let Ok(e) = entry
@@ -245,14 +255,7 @@ fn rate_by_name(name: &str) -> windows::core::Result<Option<u32>> {
             let dev = coll.Item(i)?;
             let store = dev.OpenPropertyStore(STGM_READ)?;
             let prop = store.GetValue(&PKEY_Device_FriendlyName)?;
-            let friendly = prop
-                .Anonymous
-                .Anonymous
-                .Anonymous
-                .pwszVal
-                .to_string()
-                .unwrap_or_default()
-                .to_lowercase();
+            let friendly = propvariant_str(&prop).to_lowercase();
             if !friendly.contains(&want) {
                 continue;
             }
@@ -283,14 +286,7 @@ fn set_rates_where(target_rate: u32, want: impl Fn(&str) -> bool) -> windows::co
             let dev = coll.Item(i)?;
             let store = dev.OpenPropertyStore(STGM_READ)?;
             let prop = store.GetValue(&PKEY_Device_FriendlyName)?;
-            let name = prop
-                .Anonymous
-                .Anonymous
-                .Anonymous
-                .pwszVal
-                .to_string()
-                .unwrap_or_default()
-                .to_lowercase();
+            let name = propvariant_str(&prop).to_lowercase();
             if !want(&name) {
                 continue;
             }
