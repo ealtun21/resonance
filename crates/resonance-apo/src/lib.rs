@@ -12,5 +12,10 @@
 
 pub mod state;
 
+// The C-ABI engine + its logging are only ever linked by the Windows C++ APO
+// shell; on other platforms the daemon links `state` alone, so don't compile
+// the FFI/log modules as dead code there.
+#[cfg(target_os = "windows")]
 mod ffi;
+#[cfg(target_os = "windows")]
 mod log;
