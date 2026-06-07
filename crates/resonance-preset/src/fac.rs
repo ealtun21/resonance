@@ -41,6 +41,14 @@ pub fn parse_fac(content: &str) -> Result<Preset, FacError> {
     // Line 5: total number of elements ("1: Total number of elements")
     let (ln, total_elements_line) = next(ln)?;
     let total_elements = parse_prefixed_int(total_elements_line, ln)?;
+    // Bound before `* 7` (i32 overflow) and the skip loop — a hostile/garbled
+    // count must not be able to spin or overflow.
+    if !(0..=100_000).contains(&total_elements) {
+        return Err(FacError::ParseError {
+            line: ln,
+            msg: format!("implausible element count {total_elements}"),
+        });
+    }
 
     // Lines 6–11: Main 0–5 (Fidelity, Surround, unused, Ambience, DynamicBoost, BassBoost)
     let mut main = [0i32; 6];
@@ -85,7 +93,16 @@ pub fn parse_fac(content: &str) -> Result<Preset, FacError> {
     // EQ section
     let (next_ln, num_bands_line) = next(ln)?;
     ln = next_ln;
-    let num_bands = parse_prefixed_int(num_bands_line, ln)? as usize;
+    let num_bands = parse_prefixed_int(num_bands_line, ln)?;
+    // Bound before `as usize` + Vec::with_capacity: a negative count becomes a
+    // huge usize and aborts the process on allocation.
+    if !(0..=1024).contains(&num_bands) {
+        return Err(FacError::ParseError {
+            line: ln,
+            msg: format!("implausible band count {num_bands}"),
+        });
+    }
+    let num_bands = num_bands as usize;
 
     let (next_ln, eq_on_line) = next(ln)?;
     ln = next_ln;

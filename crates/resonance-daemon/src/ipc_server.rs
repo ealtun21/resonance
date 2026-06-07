@@ -106,7 +106,14 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
         }
 
         Command::SetPreamp { db } => {
-            state.send(AudioCommand::SetPreamp(db), |chain| {
+            // Reject non-finite (NaN/Inf reaches here from a hostile `Preamp: nan`
+            // in an APO `.txt`): db_to_linear(NaN) = NaN → silences/poisons the
+            // whole output. Clamp to a sane dB range.
+            if !db.is_finite() {
+                return Response::Error("preamp must be a finite number".to_string());
+            }
+            let db = db.clamp(-60.0, 24.0);
+            state.send(AudioCommand::SetPreamp(db), move |chain| {
                 chain.preamp_db = db;
             });
             Response::Ok
