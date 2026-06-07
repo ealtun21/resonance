@@ -11,6 +11,12 @@ result back. It loads FxSound `.fac` presets and EqualizerAPO `.txt` configs.
 - **macOS / CoreAudio** — default input device → DSP → default output device
   (no kernel extension or virtual driver required). Acts as a real-time audio
   effect chain on whatever device you select as your input.
+- **Windows / WASAPI** — an in-graph **Audio Processing Object (APO)** that the
+  Windows audio engine loads on your playback device and runs the DSP in place.
+  The daemon is the control plane (no audio); it pushes EQ/effect changes to the
+  APO and reads back meters/spectrum. No virtual cable, no kernel driver — the
+  installer attaches the APO and sets `DisableProtectedAudioDG` so the unsigned
+  APO loads (DRM/protected-audio apps may mute while it's active).
 
 [![CI](https://github.com/ealtun21/resonance/actions/workflows/ci.yml/badge.svg)](https://github.com/ealtun21/resonance/actions/workflows/ci.yml)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
@@ -222,11 +228,17 @@ resonance/
     ├── resonance-preset/   .fac + APO .txt parsers → Preset model
     ├── resonance-ipc/      serde protocol + length-prefixed postcard transport
     │                       + platform-aware paths + service control
-    │                       (systemd on Linux, launchd on macOS)
-    ├── resonance-daemon/   audio node + tokio Unix-socket IPC server.
+    │                       (systemd on Linux, launchd on macOS, Run key on
+    │                       Windows)
+    ├── resonance-daemon/   audio node + tokio IPC server (Unix socket on
+    │                       Unix, loopback TCP on Windows).
     │                       Audio backend dispatches by target_os:
     │                         linux → src/audio/pipewire.rs (PipeWire)
     │                         macos → src/audio/coreaudio.rs (cpal/CoreAudio)
+    │                         windows → control plane only; the APO runs the DSP
+    ├── resonance-apo/      Windows APO: Rust DSP engine (C-ABI staticlib) +
+    │                       C++ CBaseAudioProcessingObject shell (COM), plus the
+    │                       memory-mapped daemon⇄APO control/telemetry bridge
     ├── resonance-cli/      CLI client  (resonance)
     ├── resonance-tui/      ratatui TUI client (resonance-tui)
     └── resonance-gui/      egui/eframe desktop client (resonance-gui)
@@ -242,6 +254,11 @@ Signal flow:
   ProcessorChain → default output device. The tap is `MutedWhenTapped`
   so the original audio path is suppressed while we own routing; the
   user hears only the DSP-processed signal.
+- **Windows**: apps → audio engine (`audiodg.exe`) → Resonance APO running the
+  same ProcessorChain in-graph on the render endpoint → device. The daemon
+  publishes EQ/effect changes to the APO over a memory-mapped file (seqlock)
+  and reads meters + spectrum back the same way; the APO is COM-aggregated via
+  a thin C++ `CBaseAudioProcessingObject` shell that links the Rust engine.
 
 ## Development
 
