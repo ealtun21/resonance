@@ -7,10 +7,11 @@
 //! the practical equivalent of the systemd/launchd *user* service.
 //!
 //! Mapping to the cross-platform `service` API:
-//!   - install   → write a marker file (so `service::is_installed()` is true).
+//!   - install   → nothing to do (no unit file; autostart is the Run key).
 //!   - enable    → add the Run key (autostart at logon) and start now.
 //!   - disable   → remove the Run key and stop the daemon.
 //!   - start/stop/restart → spawn / kill `resonanced.exe`.
+//!   - is_installed → the daemon binary is resolvable (it's what the installer ships).
 //!   - is_active  → a `resonanced.exe` process is running.
 //!   - is_enabled → the Run key value is present.
 
@@ -26,18 +27,21 @@ pub const UNAVAILABLE_MESSAGE: &str =
 const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "Resonance";
 
-fn config_dir() -> PathBuf {
-    crate::paths::config_dir()
-}
-
-/// Install marker — its presence is what `service::is_installed()` checks.
+/// Informational only (Windows has no unit file — autostart lives in the
+/// HKCU Run key). Returned for display/parity with the other backends.
 pub fn unit_path() -> PathBuf {
-    config_dir().join("resonanced-autostart.txt")
+    PathBuf::from(format!(r"{RUN_KEY}\{RUN_VALUE}"))
 }
 
 /// The Run key is always available (no manager to probe).
 pub fn manager_available() -> bool {
     true
+}
+
+/// No unit file to write: the daemon binary is the install (shipped by the
+/// installer), and autostart is a separate `enable` (the Run key).
+pub fn is_installed() -> bool {
+    super::daemon_bin().is_file()
 }
 
 /// The daemon is up if a `resonanced.exe` process exists.
@@ -66,22 +70,14 @@ fn daemon_exe() -> String {
     super::daemon_bin().display().to_string()
 }
 
+/// Nothing to install: there is no unit file, and the daemon binary is placed
+/// by the installer. Autostart is configured separately via `enable`.
 pub fn install() -> io::Result<()> {
-    let path = unit_path();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(&path, format!("{}\n", daemon_exe()))?;
     Ok(())
 }
 
 pub fn uninstall() -> io::Result<()> {
-    let _ = disable();
-    let path = unit_path();
-    if path.exists() {
-        std::fs::remove_file(&path)?;
-    }
-    Ok(())
+    disable()
 }
 
 /// Spawn the daemon detached (no console window, survives the launching process).

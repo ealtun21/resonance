@@ -79,6 +79,10 @@ fn running_pid() -> Option<u32> {
     process_alive(pid).then_some(pid)
 }
 
+pub fn is_installed() -> bool {
+    unit_path().is_file()
+}
+
 pub fn is_active() -> bool {
     running_pid().is_some()
 }

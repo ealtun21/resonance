@@ -19,6 +19,9 @@ pub fn manager_available() -> bool {
     false
 }
 
+pub fn is_installed() -> bool {
+    false
+}
 pub fn is_active() -> bool {
     false
 }

@@ -95,9 +95,10 @@ pub fn manager_unavailable_message() -> &'static str {
     backend::UNAVAILABLE_MESSAGE
 }
 
-/// True if the unit file has been written.
+/// True if the service is installed (unit/plist on disk, or the autostart
+/// mechanism present on platforms without a unit file).
 pub fn is_installed() -> bool {
-    unit_path().is_file()
+    backend::is_installed()
 }
 
 /// True if the service is currently running.

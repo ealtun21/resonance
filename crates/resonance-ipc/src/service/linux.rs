@@ -38,6 +38,14 @@ pub fn manager_available() -> bool {
     true
 }
 
+pub fn is_installed() -> bool {
+    if use_systemd() {
+        systemd::is_installed()
+    } else {
+        xdg_autostart::is_installed()
+    }
+}
+
 pub fn is_active() -> bool {
     if use_systemd() {
         systemd::is_active()

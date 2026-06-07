@@ -124,6 +124,10 @@ pub fn manager_available() -> bool {
 
 /// `launchctl print` exits 0 when the service exists in the domain. Pair with
 /// PID inspection to distinguish "loaded" from "loaded and running".
+pub fn is_installed() -> bool {
+    unit_path().is_file()
+}
+
 pub fn is_active() -> bool {
     let Ok(out) = launchctl(&["print", &service_target()]) else {
         return false;

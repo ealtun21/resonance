@@ -79,6 +79,10 @@ fn check(out: std::process::Output, what: &str) -> io::Result<()> {
     }
 }
 
+pub fn is_installed() -> bool {
+    unit_path().is_file()
+}
+
 pub fn is_active() -> bool {
     systemctl(&["is-active", "--quiet", UNIT_NAME])
         .map(|o| o.status.success())
