@@ -47,8 +47,24 @@ script_dir() {
     cd "$(dirname "$src")" >/dev/null 2>&1 && pwd
 }
 
+# True if the filesystem carrying /usr is read-only (immutable distros:
+# SteamOS, Fedora Silverblue, etc.). There /usr cannot be written even with
+# sudo, and disabling the lock is reverted on the next OS update — so a home
+# install is the only thing that survives.
+rootfs_readonly() {
+    if command -v steamos-readonly >/dev/null 2>&1; then
+        steamos-readonly status 2>/dev/null | grep -qiw enabled && return 0
+    fi
+    # Field 4 of /proc/mounts is the comma-separated option list.
+    awk '$2=="/" || $2=="/usr" { print $4 }' /proc/mounts 2>/dev/null \
+        | grep -qw ro && return 0
+    return 1
+}
+
 pick_prefix() {
     if [[ -n "${PREFIX:-}" ]]; then echo "$PREFIX"; return; fi
+    # On an immutable rootfs, install into the always-writable home prefix.
+    if rootfs_readonly; then echo "$HOME/.local"; return; fi
     if [[ $EUID -eq 0 || -w /usr/local/bin ]] || command -v sudo >/dev/null 2>&1; then
         echo /usr/local
     else
@@ -73,8 +89,12 @@ install_desktop() {
     is_macos && return 0
     [[ -f "$contrib/$APPID.desktop" ]] || return 0
     info "Installing desktop entry + icon for the application menu"
-    $sudo install -Dm644 "$contrib/$APPID.desktop" \
-        "$prefix/share/applications/$APPID.desktop"
+    local desktop="$prefix/share/applications/$APPID.desktop"
+    $sudo install -Dm644 "$contrib/$APPID.desktop" "$desktop"
+    # Pin Exec to the absolute binary path: a home-prefix install ($HOME/.local
+    # on an immutable rootfs) often isn't on the desktop session's PATH, so a
+    # bare `resonance-gui` would fail to launch from the application menu.
+    $sudo sed -i "s|^Exec=.*|Exec=$prefix/bin/resonance-gui|" "$desktop"
     [[ -f "$contrib/$APPID.svg" ]] && $sudo install -Dm644 "$contrib/$APPID.svg" \
         "$prefix/share/icons/hicolor/scalable/apps/$APPID.svg"
     [[ -f "$contrib/$APPID.metainfo.xml" ]] && $sudo install -Dm644 \
