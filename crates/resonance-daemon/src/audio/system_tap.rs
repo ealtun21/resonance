@@ -550,7 +550,7 @@ fn build_aggregate_dict(
 // System Settings.
 
 use objc2_core_foundation::CFString as TccCFString;
-use std::os::raw::{c_char, c_int};
+use std::os::raw::c_int;
 
 type TccPreflightFn = unsafe extern "C" fn(*const TccCFString, *const c_void) -> c_int;
 
@@ -563,14 +563,13 @@ type TccPreflightFn = unsafe extern "C" fn(*const TccCFString, *const c_void) ->
 /// preflight is purely diagnostic.
 fn request_audio_capture_permission() {
     unsafe {
-        let lib_path =
-            b"/System/Library/PrivateFrameworks/TCC.framework/TCC\0".as_ptr() as *const c_char;
+        let lib_path = c"/System/Library/PrivateFrameworks/TCC.framework/TCC".as_ptr();
         let handle = libc::dlopen(lib_path, libc::RTLD_LAZY | libc::RTLD_GLOBAL);
         if handle.is_null() {
             warn!("TCC.framework dlopen failed — cannot probe audio-capture status");
             return;
         }
-        let pre = libc::dlsym(handle, b"TCCAccessPreflight\0".as_ptr() as *const c_char);
+        let pre = libc::dlsym(handle, c"TCCAccessPreflight".as_ptr());
         if pre.is_null() {
             warn!("TCCAccessPreflight symbol not found");
             return;
