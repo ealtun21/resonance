@@ -19,6 +19,20 @@ use std::io;
 use std::path::PathBuf;
 use std::process::Command;
 
+/// `Command` for a console program (`reg`, `taskkill`) that does NOT pop a
+/// console window. The GUI/daemon are `#![windows_subsystem = "windows"]`, so a
+/// console-subsystem child with no creation flags makes Windows allocate a fresh
+/// console window that flashes open/closed — the reported "cmd windows flashing
+/// under the resonance-gui icon" was the status poll spawning `tasklist`/`reg`
+/// here every ~1.5 s.
+fn hidden(program: &str) -> Command {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut c = Command::new(program);
+    c.creation_flags(CREATE_NO_WINDOW);
+    c
+}
+
 pub const UNIT_NAME: &str = "Resonance";
 
 pub const UNAVAILABLE_MESSAGE: &str =
@@ -44,22 +58,16 @@ pub fn is_installed() -> bool {
     super::daemon_bin().is_file()
 }
 
-/// The daemon is up if a `resonanced.exe` process exists.
+/// The daemon is up if it's accepting IPC connections. Uses the loopback
+/// liveness probe (no subprocess) rather than `tasklist` — accurate (a bound
+/// port is what actually matters) and never pops a console window.
 pub fn is_active() -> bool {
-    let Ok(out) = Command::new("tasklist")
-        .args(["/fi", "imagename eq resonanced.exe", "/nh"])
-        .output()
-    else {
-        return false;
-    };
-    String::from_utf8_lossy(&out.stdout)
-        .to_lowercase()
-        .contains("resonanced.exe")
+    crate::transport::is_reachable()
 }
 
 /// Enabled = the Run key value exists.
 pub fn is_enabled() -> bool {
-    Command::new("reg")
+    hidden("reg")
         .args(["query", RUN_KEY, "/v", RUN_VALUE])
         .output()
         .map(|o| o.status.success())
@@ -97,7 +105,7 @@ pub fn start() -> io::Result<()> {
 }
 
 pub fn stop() -> io::Result<()> {
-    let _ = Command::new("taskkill")
+    let _ = hidden("taskkill")
         .args(["/im", "resonanced.exe", "/f"])
         .output();
     Ok(())
@@ -112,7 +120,7 @@ pub fn enable() -> io::Result<()> {
     // Quote the path: a spaced "C:\Program Files\..." Run value must be quoted
     // to launch correctly at logon. Matches what the installer writes.
     let exe = format!("\"{}\"", daemon_exe());
-    let out = Command::new("reg")
+    let out = hidden("reg")
         .args([
             "add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ", "/d", &exe, "/f",
         ])
@@ -128,7 +136,7 @@ pub fn enable() -> io::Result<()> {
 }
 
 pub fn disable() -> io::Result<()> {
-    let _ = Command::new("reg")
+    let _ = hidden("reg")
         .args(["delete", RUN_KEY, "/v", RUN_VALUE, "/f"])
         .output();
     stop()
