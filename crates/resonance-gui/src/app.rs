@@ -65,8 +65,8 @@ const TB_FULL_H: f32 = TB_ROW_H * 2.0;
 /// Default / fallback widths of the Effects & Devices side panels (used as
 /// `default_size` and when no resized width is stored yet). The tab-vs-columns
 /// decision is measured at runtime, not derived from these.
-const EFFECTS_W: f32 = 250.0;
-const DEVICES_W: f32 = 260.0;
+const EFFECTS_W: f32 = 280.0;
+const DEVICES_W: f32 = 340.0;
 /// Fallback natural width of the EQ bands table before it's been measured —
 /// keeps the first frame in column layout at the default window size.
 const DEFAULT_BANDS_W: f32 = 500.0;
@@ -288,12 +288,6 @@ pub struct GuiApp {
     /// Optimistic (freq, gain) of the band being dragged, so its marker tracks
     /// the cursor exactly instead of the IPC-lagged echoed state.
     drag_value: Option<(f64, f64)>,
-    /// Drag-start anchor `(cursor_y, band_gain, dB-per-pixel)` captured when a
-    /// gain drag begins. Gain is then a fixed-scale screen-space delta from this
-    /// anchor, decoupled from the live (animating) dB axis — so the axis can
-    /// rescale *during* the drag without the gain↔axis feedback loop that made
-    /// the curve jiggle (which is why the axis used to freeze mid-drag).
-    drag_anchor: Option<(f32, f64, f64)>,
     /// True while the active curve drag edits Q (right button) vs freq+gain.
     drag_q: bool,
     profile_name: String,
@@ -548,7 +542,6 @@ impl GuiApp {
             selected_band: 0,
             drag_band: None,
             drag_value: None,
-            drag_anchor: None,
             drag_q: false,
             profile_name: String::new(),
             rename: None,
@@ -1707,18 +1700,52 @@ impl GuiApp {
         let (vlo, vhi) = self.view_log;
         let zoomed = vlo > curve::LOG_MIN + 1e-6 || vhi < curve::LOG_MAX - 1e-6;
         let pts = curve::curve_points_range(&state.bands, state.sample_rate, 240, vlo, vhi);
-        let peak = pts
-            .iter()
-            .map(|&(_, g)| g.abs())
-            .chain(state.bands.iter().map(|b| b.gain_db.abs()))
-            .fold(0.0_f64, f64::max);
+        // Axis target = loudest point + 5 dB headroom. While dragging a band we
+        // must NOT let that band's *own* gain drive the axis: the dragged gain is
+        // read from the cursor *through* the axis (`db_of` below), so feeding it
+        // back would run the axis away and wobble the curve. So during a drag we
+        // size the axis from the other bands only, and let the dragged band's gain
+        // count only once it nears the top edge (so you can still boost past the
+        // current range — the graph then zooms out under a pinned node).
+        let peak = match self.drag_band {
+            Some(di) => {
+                // Other bands only — the summed `pts` curve includes the dragged
+                // band, so it can't be used here without reintroducing feedback.
+                let others = state
+                    .bands
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != di)
+                    .map(|(_, b)| b.gain_db.abs())
+                    .fold(0.0_f64, f64::max);
+                let dragged = state.bands.get(di).map(|b| b.gain_db.abs()).unwrap_or(0.0);
+                // Only let the dragged band grow the axis when it's pushing past
+                // ~85% of the current range (near/over the top edge).
+                let dragged = if dragged > 0.85 * self.db_axis {
+                    dragged
+                } else {
+                    0.0
+                };
+                others.max(dragged)
+            }
+            None => pts
+                .iter()
+                .map(|&(_, g)| g.abs())
+                .chain(state.bands.iter().map(|b| b.gain_db.abs()))
+                .fold(0.0_f64, f64::max),
+        };
         let (target_db, db_step) = curve::display_range(peak + 5.0);
         // Ease the axis toward the target instead of snapping between stops, so
-        // the curve + band markers glide as the range grows/shrinks. This now
-        // runs *during* a drag too: the dragged gain comes from a fixed-scale
-        // screen delta (see `drag_anchor`), not from the live axis, so there's
-        // no gain↔axis feedback to wobble the curve.
-        self.db_axis += (target_db - self.db_axis) * 0.20;
+        // the curve + markers glide as the range changes. During a drag the axis
+        // only grows (never shrinks) so it can't oscillate while the dragged gain
+        // is derived from it — the node then stays glued to the cursor (`db_of`
+        // and `y_of` share the same `db`, so they're exact inverses each frame).
+        let eased = self.db_axis + (target_db - self.db_axis) * 0.20;
+        self.db_axis = if self.drag_band.is_some() {
+            eased.max(self.db_axis)
+        } else {
+            eased
+        };
         if (self.db_axis - target_db).abs() < 0.05 {
             self.db_axis = target_db;
         }
@@ -1936,11 +1963,6 @@ impl GuiApp {
                     // Right button always tunes Q — the vertical lock pins only
                     // frequency, never Q.
                     self.drag_q = started_secondary;
-                    // Anchor gain to a fixed screen scale for the drag's life, so
-                    // the axis can animate without feeding back into the gain.
-                    let db_per_px = (2.0 * db) / plot.height().max(1.0) as f64;
-                    let g0 = state.bands.get(i).map(|b| b.gain_db).unwrap_or(0.0);
-                    self.drag_anchor = Some((p.y, g0, db_per_px));
                 }
             }
         }
@@ -1973,12 +1995,12 @@ impl GuiApp {
                         };
                         let gain = if gain_locked {
                             b.gain_db
-                        } else if let Some((y0, g0, db_per_px)) = self.drag_anchor {
-                            // Fixed-scale screen delta: dragging up by N px adds
-                            // N·(dB/px-at-start) dB, independent of the now-
-                            // animating axis. No feedback ⇒ no jiggle.
-                            (g0 + (y0 - p.y) as f64 * db_per_px).clamp(-GAIN_LIMIT, GAIN_LIMIT)
                         } else {
+                            // Map the cursor through the current axis. Because the
+                            // node is rendered with the same `db` (y_of ∘ db_of =
+                            // identity), it stays exactly under the cursor; the
+                            // axis growth is decoupled (see the peak calc above),
+                            // so there's no feedback wobble.
                             db_of(p.y).clamp(-GAIN_LIMIT, GAIN_LIMIT)
                         };
                         // Remember the cursor-derived value so the node renders
@@ -1998,7 +2020,6 @@ impl GuiApp {
             self.drag_band = None;
             self.drag_q = false;
             self.drag_value = None;
-            self.drag_anchor = None;
         }
 
         // Drive continuous frames (not just on input events) while dragging a
