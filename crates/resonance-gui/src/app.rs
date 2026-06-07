@@ -75,14 +75,6 @@ const DEFAULT_BANDS_W: f32 = 500.0;
 const SPECTRUM_ATTACK_TAU: f32 = 0.020;
 const SPECTRUM_DECAY_TAU: f32 = 0.20;
 
-const EFFECTS: [(FxEffectId, &str); 5] = [
-    (FxEffectId::Fidelity, "Fidelity"),
-    (FxEffectId::Ambience, "Ambience"),
-    (FxEffectId::Surround, "Surround"),
-    (FxEffectId::DynamicBoost, "Dynamic Boost"),
-    (FxEffectId::Bass, "Bass"),
-];
-
 /// Editable per-band limits. Generous so extreme cuts/boosts and very narrow
 /// notches are possible; the daemon/DSP impose no limit of their own.
 const GAIN_LIMIT: f64 = 40.0;
@@ -2216,10 +2208,10 @@ impl GuiApp {
                 .num_columns(3)
                 .spacing([12.0, 6.0])
                 .show(ui, |ui| {
-                    for (id, name) in EFFECTS {
-                        let (mut intensity, mut on) = effect_values(state, id);
-                        let bipolar = matches!(id, FxEffectId::Surround | FxEffectId::Bass);
-                        let min = if bipolar { -1.0 } else { 0.0 };
+                    for id in FxEffectId::ALL {
+                        let name = id.label();
+                        let (mut intensity, mut on) = state.effects.get(id);
+                        let min = id.min();
 
                         if ui.checkbox(&mut on, "").changed() {
                             self.queue_edit(Command::SetEffectEnabled {
@@ -3209,16 +3201,5 @@ fn gain_bar(ui: &mut egui::Ui, db: f64, pal: &Palette) {
             )
         };
         painter.rect_filled(bar, 1.0, gain_color(db, pal));
-    }
-}
-
-fn effect_values(state: &DaemonState, id: FxEffectId) -> (f64, bool) {
-    let e = &state.effects;
-    match id {
-        FxEffectId::Fidelity => (e.fidelity_intensity, e.fidelity_enabled),
-        FxEffectId::Ambience => (e.ambience_intensity, e.ambience_enabled),
-        FxEffectId::Surround => (e.surround_intensity, e.surround_enabled),
-        FxEffectId::DynamicBoost => (e.dynamic_boost_intensity, e.dynamic_boost_enabled),
-        FxEffectId::Bass => (e.bass_intensity, e.bass_enabled),
     }
 }

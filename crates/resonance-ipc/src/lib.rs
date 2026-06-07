@@ -126,6 +126,30 @@ impl FxEffectId {
         FxEffectId::DynamicBoost,
         FxEffectId::Bass,
     ];
+
+    /// Full display name. (The TUI keeps its own narrower labels for the effects
+    /// column; everything else should use this.)
+    pub fn label(self) -> &'static str {
+        match self {
+            FxEffectId::Fidelity => "Fidelity",
+            FxEffectId::Ambience => "Ambience",
+            FxEffectId::Surround => "Surround",
+            FxEffectId::DynamicBoost => "Dynamic Boost",
+            FxEffectId::Bass => "Bass",
+        }
+    }
+
+    /// Bipolar effects (Surround, Bass) accept negative intensity (narrow / cut)
+    /// down to −1; the rest are 0..1. This was duplicated — and had drifted —
+    /// across the TUI (index `2|4`) and GUI (`matches!`) before.
+    pub fn is_bipolar(self) -> bool {
+        matches!(self, FxEffectId::Surround | FxEffectId::Bass)
+    }
+
+    /// Minimum intensity: −1 for bipolar effects, 0 otherwise.
+    pub fn min(self) -> f64 {
+        if self.is_bipolar() { -1.0 } else { 0.0 }
+    }
 }
 
 impl From<FxEffectId> for FxEffect {

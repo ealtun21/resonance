@@ -1163,48 +1163,25 @@ impl App {
 
 // ── FxSound effect helpers ─────────────────────────────────────────────────
 
-const EFFECT_ORDER: [FxEffectId; 5] = [
-    FxEffectId::Fidelity,
-    FxEffectId::Ambience,
-    FxEffectId::Surround,
-    FxEffectId::DynamicBoost,
-    FxEffectId::Bass,
-];
-
+/// Narrow labels for the TUI effects column (kept local: "Dyn Boost" fits where
+/// the shared `FxEffectId::label()` "Dynamic Boost" would not).
 pub const EFFECT_NAMES: [&str; 5] = ["Fidelity", "Ambience", "Surround", "Dyn Boost", "Bass"];
 
 pub fn fx_effect_at(idx: usize) -> FxEffectId {
-    EFFECT_ORDER[idx.min(4)]
+    FxEffectId::ALL[idx.min(4)]
 }
 
 /// Minimum intensity for an effect: Surround and Bass are bipolar (−1), others 0.
 pub fn fx_min(idx: usize) -> f64 {
-    match idx {
-        2 | 4 => -1.0, // Surround, Bass
-        _ => 0.0,
-    }
+    fx_effect_at(idx).min()
 }
 
 pub fn fx_intensity(state: &DaemonState, idx: usize) -> f64 {
-    let e = &state.effects;
-    match idx {
-        0 => e.fidelity_intensity,
-        1 => e.ambience_intensity,
-        2 => e.surround_intensity,
-        3 => e.dynamic_boost_intensity,
-        _ => e.bass_intensity,
-    }
+    state.effects.get(fx_effect_at(idx)).0
 }
 
 pub fn fx_enabled(state: &DaemonState, idx: usize) -> bool {
-    let e = &state.effects;
-    match idx {
-        0 => e.fidelity_enabled,
-        1 => e.ambience_enabled,
-        2 => e.surround_enabled,
-        3 => e.dynamic_boost_enabled,
-        _ => e.bass_enabled,
-    }
+    state.effects.get(fx_effect_at(idx)).1
 }
 
 // ── Sync IPC client ────────────────────────────────────────────────────────
