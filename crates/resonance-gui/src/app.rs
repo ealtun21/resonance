@@ -288,6 +288,12 @@ pub struct GuiApp {
     /// Optimistic (freq, gain) of the band being dragged, so its marker tracks
     /// the cursor exactly instead of the IPC-lagged echoed state.
     drag_value: Option<(f64, f64)>,
+    /// Drag-start anchor `(cursor_y, band_gain, dB-per-pixel)` captured when a
+    /// gain drag begins. Gain is then a fixed-scale screen-space delta from this
+    /// anchor, decoupled from the live (animating) dB axis — so the axis can
+    /// rescale *during* the drag without the gain↔axis feedback loop that made
+    /// the curve jiggle (which is why the axis used to freeze mid-drag).
+    drag_anchor: Option<(f32, f64, f64)>,
     /// True while the active curve drag edits Q (right button) vs freq+gain.
     drag_q: bool,
     profile_name: String,
@@ -542,6 +548,7 @@ impl GuiApp {
             selected_band: 0,
             drag_band: None,
             drag_value: None,
+            drag_anchor: None,
             drag_q: false,
             profile_name: String::new(),
             rename: None,
@@ -1718,18 +1725,16 @@ impl GuiApp {
             .fold(0.0_f64, f64::max);
         let (target_db, db_step) = curve::display_range(peak + 5.0);
         // Ease the axis toward the target instead of snapping between stops, so
-        // the curve + band markers glide as the range grows/shrinks (the GUI
-        // repaints at a fixed cadence, so a per-frame factor is stable).
-        // Freeze the axis while dragging a band: animating it mid-drag creates a
-        // gain↔axis feedback loop that wobbles the node/curve. With the axis
-        // fixed, the dragged node maps exactly to the cursor.
-        if self.drag_band.is_none() {
-            self.db_axis += (target_db - self.db_axis) * 0.20;
-            if (self.db_axis - target_db).abs() < 0.05 {
-                self.db_axis = target_db;
-            }
+        // the curve + band markers glide as the range grows/shrinks. This now
+        // runs *during* a drag too: the dragged gain comes from a fixed-scale
+        // screen delta (see `drag_anchor`), not from the live axis, so there's
+        // no gain↔axis feedback to wobble the curve.
+        self.db_axis += (target_db - self.db_axis) * 0.20;
+        if (self.db_axis - target_db).abs() < 0.05 {
+            self.db_axis = target_db;
         }
         let db = self.db_axis;
+        let axis_animating = (self.db_axis - target_db).abs() > 1e-3;
         let x_of =
             |logf: f64| -> f32 { plot.left() + ((logf - vlo) / (vhi - vlo)) as f32 * plot.width() };
         let y_of = |gain: f64| -> f32 {
@@ -1942,6 +1947,11 @@ impl GuiApp {
                     // Right button always tunes Q — the vertical lock pins only
                     // frequency, never Q.
                     self.drag_q = started_secondary;
+                    // Anchor gain to a fixed screen scale for the drag's life, so
+                    // the axis can animate without feeding back into the gain.
+                    let db_per_px = (2.0 * db) / plot.height().max(1.0) as f64;
+                    let g0 = state.bands.get(i).map(|b| b.gain_db).unwrap_or(0.0);
+                    self.drag_anchor = Some((p.y, g0, db_per_px));
                 }
             }
         }
@@ -1974,6 +1984,11 @@ impl GuiApp {
                         };
                         let gain = if gain_locked {
                             b.gain_db
+                        } else if let Some((y0, g0, db_per_px)) = self.drag_anchor {
+                            // Fixed-scale screen delta: dragging up by N px adds
+                            // N·(dB/px-at-start) dB, independent of the now-
+                            // animating axis. No feedback ⇒ no jiggle.
+                            (g0 + (y0 - p.y) as f64 * db_per_px).clamp(-GAIN_LIMIT, GAIN_LIMIT)
                         } else {
                             db_of(p.y).clamp(-GAIN_LIMIT, GAIN_LIMIT)
                         };
@@ -1994,6 +2009,14 @@ impl GuiApp {
             self.drag_band = None;
             self.drag_q = false;
             self.drag_value = None;
+            self.drag_anchor = None;
+        }
+
+        // Drive continuous frames (not just on input events) while dragging a
+        // node or while the dB axis is still easing, so motion is smooth at the
+        // display's refresh rate rather than the OS pointer-event cadence.
+        if self.drag_band.is_some() || axis_animating {
+            ui.ctx().request_repaint();
         }
         // Double-left-click empty area → add a peaking band there.
         if response.double_clicked_by(Primary) {
