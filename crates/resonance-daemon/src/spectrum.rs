@@ -61,7 +61,12 @@ pub async fn run(mut rx: rtrb::Consumer<f32>, state: SharedState) {
 
         fft.process(&mut fft_buf);
 
-        let sr = 48000.0f64;
+        // Use the live chain rate so bins are labelled correctly at 44.1k etc.
+        // (was hardcoded 48k → ~9% bin-frequency error on a 44.1k device).
+        let sr = {
+            let r = state.0.lock().unwrap().chain.sample_rate;
+            if r.is_finite() && r > 0.0 { r } else { 48000.0 }
+        };
         let hz_per_bin = sr / FFT_SIZE as f64;
         let norm = 2.0 / FFT_SIZE as f32;
 
