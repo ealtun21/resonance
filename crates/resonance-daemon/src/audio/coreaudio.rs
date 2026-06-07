@@ -54,16 +54,16 @@ const RING_CAPACITY_SAMPLES: usize = 32_768;
 /// unbounded backlog when the output device runs faster than input briefly.
 const DRAIN_SLACK_FRAMES: usize = 4096;
 
-#[allow(clippy::too_many_arguments)]
-pub fn spawn(
-    cmd_rx: rtrb::Consumer<AudioCommand>,
-    spectrum_tx: rtrb::Producer<f32>,
-    initial_chain: ProcessorChain,
-    output_tx: tokio::sync::mpsc::UnboundedSender<String>,
-    route_rx: std_mpsc::Receiver<String>,
-    sinks_tx: tokio::sync::mpsc::UnboundedSender<Vec<(String, String)>>,
-    meters: Arc<AtomicMeters>,
-) -> Result<JoinHandle<()>> {
+pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
+    let super::BackendCtx {
+        cmd_rx,
+        spectrum_tx,
+        initial_chain,
+        output_tx,
+        route_rx,
+        sinks_tx,
+        meters,
+    } = ctx;
     // Shared chain + RT state lives in an Arc<Mutex<…>>. The output callback
     // locks for the duration of each block — bounded, brief, never contended
     // against another high-priority thread. Reconnect rebuilds the streams but

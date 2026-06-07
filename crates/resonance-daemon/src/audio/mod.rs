@@ -58,28 +58,32 @@ mod stub;
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 use stub as backend;
 
+/// Everything a backend's [`spawn`] needs: the IPC↔RT channels, the initial
+/// chain, and the shared meter handle. Bundled into one named type so the
+/// backend contract is a single edit point instead of seven positional
+/// arguments duplicated across every platform's `spawn`.
+pub struct BackendCtx {
+    /// IPC → RT: chain-mutating commands.
+    pub cmd_rx: rtrb::Consumer<AudioCommand>,
+    /// RT → IPC: post-DSP mono samples for the spectrum view.
+    pub spectrum_tx: rtrb::Producer<f32>,
+    /// The chain the backend starts with.
+    pub initial_chain: ProcessorChain,
+    /// RT → IPC: the fed output device's name, on change.
+    pub output_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    /// IPC → RT: a preferred-output route hint (empty string = follow default).
+    pub route_rx: std::sync::mpsc::Receiver<String>,
+    /// RT → IPC: the live list of available sinks (node name, description).
+    pub sinks_tx: tokio::sync::mpsc::UnboundedSender<Vec<(String, String)>>,
+    /// Shared peak/RMS/clip meters published from the RT thread.
+    pub meters: Arc<AtomicMeters>,
+}
+
 /// Spawn the audio backend on its own dedicated real-time thread.
 ///
 /// Returns a `JoinHandle` so the daemon's `main` can wait on shutdown.
-#[allow(clippy::too_many_arguments)]
-pub fn spawn(
-    cmd_rx: rtrb::Consumer<AudioCommand>,
-    spectrum_tx: rtrb::Producer<f32>,
-    initial_chain: ProcessorChain,
-    output_tx: tokio::sync::mpsc::UnboundedSender<String>,
-    route_rx: std::sync::mpsc::Receiver<String>,
-    sinks_tx: tokio::sync::mpsc::UnboundedSender<Vec<(String, String)>>,
-    meters: Arc<AtomicMeters>,
-) -> Result<JoinHandle<()>> {
-    backend::spawn(
-        cmd_rx,
-        spectrum_tx,
-        initial_chain,
-        output_tx,
-        route_rx,
-        sinks_tx,
-        meters,
-    )
+pub fn spawn(ctx: BackendCtx) -> Result<JoinHandle<()>> {
+    backend::spawn(ctx)
 }
 
 // ── Shared RT helpers ────────────────────────────────────────────────────────

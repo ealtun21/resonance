@@ -131,7 +131,7 @@ async fn main() -> Result<()> {
     // daemon is the control plane — it publishes chain state to the shared file
     // the APO reads inside audiodg.exe.
     #[cfg(not(target_os = "windows"))]
-    let pw_handle = audio::spawn(
+    let pw_handle = audio::spawn(audio::BackendCtx {
         cmd_rx,
         spectrum_tx,
         initial_chain,
@@ -139,7 +139,7 @@ async fn main() -> Result<()> {
         route_rx,
         sinks_tx,
         meters,
-    )?;
+    })?;
 
     #[cfg(target_os = "windows")]
     {

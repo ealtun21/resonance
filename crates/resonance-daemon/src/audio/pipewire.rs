@@ -93,16 +93,16 @@ unsafe impl Send for FilterData {}
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
-pub fn spawn(
-    cmd_rx: rtrb::Consumer<AudioCommand>,
-    spectrum_tx: rtrb::Producer<f32>,
-    initial_chain: ProcessorChain,
-    output_tx: tokio::sync::mpsc::UnboundedSender<String>,
-    route_rx: std::sync::mpsc::Receiver<String>,
-    sinks_tx: tokio::sync::mpsc::UnboundedSender<Vec<(String, String)>>,
-    meters: Arc<AtomicMeters>,
-) -> Result<JoinHandle<()>> {
+pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
+    let super::BackendCtx {
+        cmd_rx,
+        spectrum_tx,
+        initial_chain,
+        output_tx,
+        route_rx,
+        sinks_tx,
+        meters,
+    } = ctx;
     // FilterData and GraphState persist across reconnects — the audio chain (EQ
     // state) and the daemon-facing channels must survive a PipeWire restart,
     // since they're paired with producers/receivers the daemon already holds.
