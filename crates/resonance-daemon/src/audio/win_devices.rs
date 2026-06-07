@@ -211,13 +211,15 @@ pub fn set_endpoint_rate(name_contains: &str, target_rate: u32) {
     let _ = set_rates_where(target_rate, |n| n.contains(&want));
 }
 
-/// Whether a (lowercased) friendly name is one of our virtual-cable endpoints —
-/// either VB-CABLE's own names or our renamed "Resonance EQ" device.
-fn is_cable_name(n: &str) -> bool {
-    n.contains("cable")
-        || n.contains("vb-audio")
-        || n.contains("voicemeeter")
-        || n.contains("resonance eq")
+/// Friendly-name substrings that identify a virtual-cable / loopback render
+/// endpoint we can safely loopback-capture: VB-CABLE's own names, Voicemeeter,
+/// or our renamed "Resonance EQ" device. ("vb-cable" is subsumed by "cable".)
+/// Compared against an already-lowercased name.
+pub const CABLE_HINTS: &[&str] = &["cable", "vb-audio", "voicemeeter", "resonance eq"];
+
+/// Whether a (lowercased) friendly name is one of our virtual-cable endpoints.
+pub fn is_cable_name(n: &str) -> bool {
+    CABLE_HINTS.iter().any(|h| n.contains(h))
 }
 
 /// Current shared-mode sample rate of the endpoint whose friendly name contains

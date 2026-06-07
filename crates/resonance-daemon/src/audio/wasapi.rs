@@ -69,18 +69,6 @@ const FILL_EMA_ALPHA: f64 = 0.02;
 /// continuously interpolate, which would lowpass/colour the signal.
 const SLIP_HYSTERESIS_FRAMES: f64 = 512.0;
 
-/// Substring of a VB-Audio virtual cable's *render* endpoint name. When such a
-/// device is the default playback target, apps mix into it and we can
-/// loopback-capture it without double-audio. Matched case-insensitively.
-const VB_CABLE_HINTS: &[&str] = &[
-    "cable",
-    "vb-audio",
-    "vb-cable",
-    "voicemeeter",
-    // Our own renamed playback endpoint (see win_devices::rename_cable_render).
-    "resonance eq",
-];
-
 pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
     let super::BackendCtx {
         cmd_rx,
@@ -618,8 +606,7 @@ fn build_output_stream(
 /// Whether a friendly device name belongs to a virtual cable (which must never
 /// be a render target while we're capturing it — that would feed back).
 fn is_cable(name: &str) -> bool {
-    let n = name.to_lowercase();
-    VB_CABLE_HINTS.iter().any(|h| n.contains(h))
+    super::win_devices::is_cable_name(&name.to_lowercase())
 }
 
 /// Enumerate render endpoints as `(cpal Device, friendly name)`, aligned by
@@ -702,7 +689,7 @@ fn pick_capture_device(host: &Host) -> Result<(Device, bool)> {
     // recording of whatever apps render into the cable, no loopback feedback.
     if let Some(d) = inputs.iter().find(|d| {
         let n = device_name(d).to_lowercase();
-        VB_CABLE_HINTS.iter().any(|h| n.contains(h))
+        super::win_devices::is_cable_name(&n)
     }) {
         info!("WASAPI: capturing virtual cable '{}'", device_name(d));
         return Ok((d.clone(), false));
@@ -711,7 +698,7 @@ fn pick_capture_device(host: &Host) -> Result<(Device, bool)> {
     // Otherwise loopback the cable's render endpoint if present.
     if let Some(d) = outputs.iter().find(|d| {
         let n = device_name(d).to_lowercase();
-        VB_CABLE_HINTS.iter().any(|h| n.contains(h))
+        super::win_devices::is_cable_name(&n)
     }) {
         info!(
             "WASAPI: loopback-capturing virtual cable '{}'",
