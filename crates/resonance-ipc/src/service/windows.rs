@@ -104,15 +104,40 @@ pub fn start() -> io::Result<()> {
     spawn_daemon()
 }
 
+/// Whether any `resonanced.exe` process exists (image-name match). Only used by
+/// `stop()`'s exit-wait — not on a hot path — so a `tasklist` spawn is fine.
+fn resonanced_running() -> bool {
+    hidden("tasklist")
+        .args(["/fi", "imagename eq resonanced.exe", "/nh"])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .to_lowercase()
+                .contains("resonanced.exe")
+        })
+        .unwrap_or(false)
+}
+
 pub fn stop() -> io::Result<()> {
     let _ = hidden("taskkill")
         .args(["/im", "resonanced.exe", "/f"])
         .output();
+    // Wait for the process to actually exit. taskkill returns before the kernel
+    // has fully reaped it; without this wait a following start() spawns a new
+    // daemon whose single-instance pidfile check still sees the dying PID as
+    // "alive" (OpenProcess succeeds on an exiting process) and bails — so a
+    // Restart would stop the daemon and never bring it back. Poll up to ~2.5 s.
+    for _ in 0..50 {
+        if !resonanced_running() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     Ok(())
 }
 
 pub fn restart() -> io::Result<()> {
-    let _ = stop();
+    stop()?;
     start()
 }
 
