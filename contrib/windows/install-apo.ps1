@@ -1,0 +1,109 @@
+# Install the Resonance Audio Processing Object (APO) into the Windows audio
+# engine. No driver, no virtual cable: a user-mode COM DLL that audiodg.exe
+# loads as a system-effect APO on the active render endpoints.
+#
+# Run elevated (the Inno Setup [Run] section does this). Parameters:
+#   -DllPath   full path to resonance_apo.dll (installed under {app})
+[CmdletBinding()]
+param(
+  [Parameter(Mandatory = $true)] [string] $DllPath
+)
+$ErrorActionPreference = 'Continue'
+
+$clsid = '{7C3D2A1E-9B6F-4E2A-8D5C-1F0A3B4C5D6E}'
+$backupRoot = 'HKLM:\SOFTWARE\Resonance\ApoBackup'
+
+# --- privileges needed to take ownership of SYSTEM-owned MMDevices keys ---
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class Priv {
+  [StructLayout(LayoutKind.Sequential)] public struct LUID { public uint Lo; public int Hi; }
+  [StructLayout(LayoutKind.Sequential)] public struct LAA { public LUID Luid; public uint Attr; }
+  [StructLayout(LayoutKind.Sequential)] public struct TP { public uint Count; public LAA Priv; }
+  [DllImport("advapi32.dll", SetLastError=true)] public static extern bool OpenProcessToken(IntPtr h, uint a, out IntPtr t);
+  [DllImport("advapi32.dll", SetLastError=true)] public static extern bool LookupPrivilegeValue(string s, string n, out LUID l);
+  [DllImport("advapi32.dll", SetLastError=true)] public static extern bool AdjustTokenPrivileges(IntPtr t, bool d, ref TP n, uint len, IntPtr p, IntPtr r);
+  [DllImport("kernel32.dll")] public static extern IntPtr GetCurrentProcess();
+  public static void Enable(string name){ IntPtr tok; OpenProcessToken(GetCurrentProcess(),0x28,out tok); LUID l; LookupPrivilegeValue(null,name,out l); TP tp; tp.Count=1; tp.Priv.Luid=l; tp.Priv.Attr=2; AdjustTokenPrivileges(tok,false,ref tp,0,IntPtr.Zero,IntPtr.Zero); }
+}
+"@
+[Priv]::Enable('SeTakeOwnershipPrivilege'); [Priv]::Enable('SeRestorePrivilege'); [Priv]::Enable('SeBackupPrivilege')
+$admins = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
+
+function Grant-Key([string]$sub) {
+  if (-not (Test-Path "HKLM:\$sub")) { return }
+  $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($sub,
+        [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+        [System.Security.AccessControl.RegistryRights]::TakeOwnership)
+  $a = $k.GetAccessControl([System.Security.AccessControl.AccessControlSections]::None)
+  $a.SetOwner($admins); $k.SetAccessControl($a); $k.Close()
+  $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($sub,
+        [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+        [System.Security.AccessControl.RegistryRights]::ChangePermissions)
+  $a = $k.GetAccessControl()
+  $rule = New-Object System.Security.AccessControl.RegistryAccessRule($admins,'FullControl','ContainerInherit','None','Allow')
+  $a.AddAccessRule($rule); $k.SetAccessControl($a); $k.Close()
+}
+
+# --- 1) COM in-proc server ---
+$base = "HKLM:\SOFTWARE\Classes\CLSID\$clsid"
+New-Item -Force -Path "$base\InprocServer32" | Out-Null
+Set-ItemProperty -Path $base -Name '(default)' -Value 'Resonance Audio Processing Object'
+Set-ItemProperty -Path "$base\InprocServer32" -Name '(default)' -Value $DllPath
+Set-ItemProperty -Path "$base\InprocServer32" -Name 'ThreadingModel' -Value 'Both'
+
+# --- 2) APO catalog (audiodg ignores FxProperties CLSIDs not registered here) ---
+$cat = "HKLM:\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects\$clsid"
+New-Item -Force -Path $cat | Out-Null
+Set-ItemProperty -Path $cat -Name 'FriendlyName' -Value 'Resonance APO'
+Set-ItemProperty -Path $cat -Name 'Copyright'    -Value 'Resonance'
+foreach ($kv in @{MajorVersion=0;MinorVersion=4;MinInputConnections=1;MaxInputConnections=1;MinOutputConnections=1;MaxOutputConnections=1;MaxInstances=4294967295;Flags=15;NumAPOInterfaces=1}.GetEnumerator()) {
+  New-ItemProperty -Force -Path $cat -Name $kv.Key -PropertyType DWord -Value $kv.Value | Out-Null
+}
+Set-ItemProperty -Path $cat -Name 'APOInterface0' -Value '{FD7F2B29-24D0-4B5C-B177-592C39F9CA10}'
+
+# --- 3) disable APO signature check so the unsigned APO loads in audiodg ---
+$audioKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio'
+if (-not (Test-Path $audioKey)) { New-Item -Path $audioKey -Force | Out-Null }
+Set-ItemProperty -Path $audioKey -Name 'DisableProtectedAudioDG' -Value 1 -Type DWord
+
+# --- 4) attach to every active render endpoint ---
+$renderSub = 'SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render'
+$render = "HKLM:\$renderSub"
+$fx   = '{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D}'   # PKEY_FX_*  ,1/,2 legacy LFX/GFX  ,5/,6/,7 SFX/MFX/EFX
+$mode = '{D3993A3F-99C2-4402-B5EC-A92A0367664B}'   # processing-mode list
+$defaultMode = '{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}'
+$dse  = '{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E}'   # DisableSystemEffects
+New-Item -Force -Path $backupRoot | Out-Null
+
+Get-ChildItem $render -EA SilentlyContinue | ForEach-Object {
+  $g = $_.PSChildName
+  # Attach to every render endpoint (not just the active one) so switching the
+  # default playback device to any of them keeps the effect. Failures (e.g. a
+  # not-present endpoint with no FxProperties) are caught per-endpoint below.
+  try {
+    Grant-Key "$renderSub\$g"
+    $fxp = "$render\$g\FxProperties"
+    if (Test-Path $fxp) { Grant-Key "$renderSub\$g\FxProperties" } else { New-Item -Path $fxp -EA Stop | Out-Null }
+
+    # back up the original effect-slot values so uninstall can restore them
+    $bk = "$backupRoot\$g"
+    New-Item -Force -Path $bk | Out-Null
+    foreach ($slot in '1','2','5','6','7') {
+      $name = "$fx,$slot"
+      $orig = (Get-ItemProperty -Path $fxp -Name $name -EA SilentlyContinue).$name
+      if ($null -ne $orig) { Set-ItemProperty -Path $bk -Name $name -Value $orig } else { Set-ItemProperty -Path $bk -Name $name -Value '<none>' }
+      Set-ItemProperty -Path $fxp -Name $name -Value $clsid
+      Set-ItemProperty -Path $fxp -Name "$mode,$slot" -Value $defaultMode
+    }
+    New-ItemProperty -Force -Path $fxp -Name "$dse,5" -PropertyType DWord -Value 0 | Out-Null
+    Write-Output "attached $g"
+  } catch {
+    Write-Output "attach failed $g : $($_.Exception.Message)"
+  }
+}
+
+# --- 5) restart the audio engine so audiodg reloads APO registrations ---
+Restart-Service audiosrv -Force -EA SilentlyContinue
+Write-Output 'Resonance APO installed.'
