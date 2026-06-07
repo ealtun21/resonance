@@ -226,6 +226,18 @@ impl SharedState {
             *s = shadow;
         });
     }
+
+    /// Read the live `(channels, sample_rate)` and rebuild both the RT and the
+    /// shadow chain from the same builder, then swap them in. `build` is invoked
+    /// twice — the RT thread and the GetState shadow each need their own
+    /// instance — so it must produce an identical chain on each call.
+    pub fn rebuild_chain(&self, build: impl Fn(usize, f64) -> ProcessorChain) {
+        let (channels, sample_rate) = {
+            let inner = self.0.lock().unwrap();
+            (inner.chain.channels, inner.chain.sample_rate)
+        };
+        self.replace_chain(build(channels, sample_rate), build(channels, sample_rate));
+    }
 }
 
 #[cfg(test)]

@@ -397,28 +397,18 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
             bands,
             effects,
         } => {
-            let (sr, channels) = {
-                let inner = state.0.lock().unwrap();
-                (inner.chain.sample_rate, inner.chain.channels)
-            };
             let profile = Profile {
                 preamp_db,
                 enabled,
                 effects,
                 bands,
             };
-            let chain_rt = profile.clone().into_chain(channels, sr);
-            let chain_shadow = profile.into_chain(channels, sr);
-            state.replace_chain(chain_rt, chain_shadow);
+            state.rebuild_chain(|ch, sr| profile.clone().into_chain(ch, sr));
             Response::Ok
         }
 
         Command::Reset => {
-            let (sr, channels) = {
-                let inner = state.0.lock().unwrap();
-                (inner.chain.sample_rate, inner.chain.channels)
-            };
-            state.replace_chain(flat_chain(channels, sr), flat_chain(channels, sr));
+            state.rebuild_chain(flat_chain);
             state.0.lock().unwrap().current_preset = None;
             Response::Ok
         }
@@ -450,13 +440,7 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
             let stored = state.0.lock().unwrap().ab_slots[slot_index(slot)].clone();
             match stored {
                 Some(profile) => {
-                    let (sr, channels) = {
-                        let inner = state.0.lock().unwrap();
-                        (inner.chain.sample_rate, inner.chain.channels)
-                    };
-                    let chain_rt = profile.clone().into_chain(channels, sr);
-                    let chain_shadow = profile.into_chain(channels, sr);
-                    state.replace_chain(chain_rt, chain_shadow);
+                    state.rebuild_chain(|ch, sr| profile.clone().into_chain(ch, sr));
                     Response::Ok
                 }
                 None => Response::Error("slot is empty — store it first".to_string()),
@@ -595,26 +579,13 @@ fn import_preset(path: String, name: Option<String>) -> Response {
 
 /// Build the DSP chain from an already-parsed preset and swap it in.
 fn apply_preset(preset: resonance_preset::model::Preset, state: &SharedState) {
-    let (sr, channels) = {
-        let inner = state.0.lock().unwrap();
-        (inner.chain.sample_rate, inner.chain.channels)
-    };
-    // Build chain twice: one for RT thread, one to update the shadow (GetState reads shadow)
-    let chain_rt = preset.clone().into_chain(channels, sr);
-    let chain_shadow = preset.into_chain(channels, sr);
-    state.replace_chain(chain_rt, chain_shadow);
+    state.rebuild_chain(|ch, sr| preset.clone().into_chain(ch, sr));
 }
 
 /// Load a named profile from the config dir and apply it to the chain.
 fn load_profile(name: &str, state: &SharedState) -> Result<(), String> {
     let profile = config::load_profile(name)?;
-    let (sr, channels) = {
-        let inner = state.0.lock().unwrap();
-        (inner.chain.sample_rate, inner.chain.channels)
-    };
-    let chain_rt = profile.clone().into_chain(channels, sr);
-    let chain_shadow = profile.into_chain(channels, sr);
-    state.replace_chain(chain_rt, chain_shadow);
+    state.rebuild_chain(|ch, sr| profile.clone().into_chain(ch, sr));
     Ok(())
 }
 
