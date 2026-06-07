@@ -1209,23 +1209,41 @@ impl GuiApp {
     }
 
     fn output_combo(&mut self, ui: &mut egui::Ui, s: &DaemonState) {
-        let current = s
-            .preferred_output
-            .clone()
-            .or_else(|| s.active_output.clone())
-            .unwrap_or_default();
+        // Sentinel for the "follow the OS default output" choice.
+        const AUTO: &str = "\u{0}auto";
+        let following = s.preferred_output.is_none();
+        let current = if following {
+            AUTO.to_string()
+        } else {
+            s.preferred_output.clone().unwrap_or_default()
+        };
         let mut sel = current.clone();
+        // When following the system, show the device it's currently on.
+        let selected_text = if following {
+            match &s.active_output {
+                Some(d) => format!("Auto · {}", ellipsize(&s.sink_label(d), 16)),
+                None => "Automatic".to_string(),
+            }
+        } else {
+            ellipsize(&s.sink_label(&sel), 24)
+        };
         egui::ComboBox::from_id_salt("toolbar_sink")
-            .selected_text(ellipsize(&s.sink_label(&sel), 24))
+            .selected_text(selected_text)
             .width(180.0)
             .show_ui(ui, |ui| {
+                ui.selectable_value(&mut sel, AUTO.to_string(), "Automatic (follow system)");
+                ui.separator();
                 for sink in &s.available_sinks {
                     let label = s.sink_label(sink);
                     ui.selectable_value(&mut sel, sink.clone(), label);
                 }
             });
-        if sel != current && !sel.is_empty() {
-            self.queue(Command::SetOutputTarget { node_name: sel });
+        if sel != current {
+            if sel == AUTO {
+                self.queue(Command::FollowSystemOutput);
+            } else if !sel.is_empty() {
+                self.queue(Command::SetOutputTarget { node_name: sel });
+            }
         }
     }
 

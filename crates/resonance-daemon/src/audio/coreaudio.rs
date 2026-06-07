@@ -92,7 +92,8 @@ pub fn spawn(
 
             loop {
                 while let Ok(name) = route_rx.try_recv() {
-                    preferred_output = Some(name);
+                    // Empty = follow the OS default output (clear the pin).
+                    preferred_output = if name.is_empty() { None } else { Some(name) };
                 }
 
                 if tap.is_none() {
@@ -120,7 +121,11 @@ pub fn spawn(
                     agg_id,
                 ) {
                     Ok(StreamExit::RouteChanged(new_pref)) => {
-                        preferred_output = Some(new_pref);
+                        preferred_output = if new_pref.is_empty() {
+                            None
+                        } else {
+                            Some(new_pref)
+                        };
                         backoff = Duration::from_millis(50);
                     }
                     Ok(StreamExit::Ended) => {

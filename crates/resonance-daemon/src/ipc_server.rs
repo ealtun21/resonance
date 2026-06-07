@@ -378,6 +378,19 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
             Response::Ok
         }
 
+        Command::FollowSystemOutput => {
+            // Clear the pin and follow the OS default. On non-Windows an empty
+            // route name signals the audio backend to track the default device;
+            // on Windows the APO already sits on whatever endpoint is in use.
+            #[cfg(not(target_os = "windows"))]
+            {
+                let route_tx = state.0.lock().unwrap().route_tx.clone();
+                let _ = route_tx.send(String::new());
+            }
+            state.0.lock().unwrap().preferred_output = None;
+            Response::Ok
+        }
+
         Command::ApplyState {
             preamp_db,
             enabled,

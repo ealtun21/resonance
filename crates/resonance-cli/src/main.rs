@@ -82,9 +82,9 @@ enum Sub {
     },
     /// List available PipeWire output sinks and the active one
     Devices,
-    /// Set the active output device (by name, as shown by `devices`)
+    /// Set the active output device by name, or "auto" to follow the OS default
     Output {
-        /// Device name (must match a `devices` entry)
+        /// Device name (from `devices`), or "auto" to follow the system default
         name: String,
     },
     /// Store the current state into an A/B comparison slot
@@ -227,7 +227,18 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
         Sub::Map { profile } => Ok(Command::MapOutput { profile }),
         Sub::Unmap => Ok(Command::UnmapOutput),
         Sub::Maps => Ok(Command::ListMappings),
-        Sub::Output { name } => Ok(Command::SetOutputTarget { node_name: name }),
+        Sub::Output { name } => {
+            // `output auto` (or follow/default/system) clears the pin and tracks
+            // the OS default device.
+            if matches!(
+                name.to_ascii_lowercase().as_str(),
+                "auto" | "follow" | "default" | "system"
+            ) {
+                Ok(Command::FollowSystemOutput)
+            } else {
+                Ok(Command::SetOutputTarget { node_name: name })
+            }
+        }
         Sub::Reset => Ok(Command::Reset),
         Sub::Export { path } => Ok(Command::ExportApo { path }),
         Sub::Store { slot } => Ok(Command::StoreSlot {

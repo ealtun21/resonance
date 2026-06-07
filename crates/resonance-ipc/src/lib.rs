@@ -93,8 +93,11 @@ pub enum Command {
     ForgetSink { node_name: String },
     /// List all output→profile mappings
     ListMappings,
-    /// Route the filter output to a specific PipeWire sink by node.name
+    /// Route the filter output to a specific output device by name (pins it).
     SetOutputTarget { node_name: String },
+    /// Stop pinning an output and follow the OS default output device instead
+    /// (auto-switch when the default changes, e.g. plugging headphones).
+    FollowSystemOutput,
     /// Subscribe to state-change events (TUI stream)
     Subscribe,
     /// Stop the daemon

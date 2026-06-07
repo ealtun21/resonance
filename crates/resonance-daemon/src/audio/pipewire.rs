@@ -330,7 +330,8 @@ fn build_and_run(fd_ptr: *mut FilterData, gs: &Arc<Mutex<GraphState>>) -> Result
         // Apply any pending preferred-output changes from the IPC thread.
         let mut reroute_needed = false;
         while let Ok(name) = g.route_rx.try_recv() {
-            g.preferred_output = Some(name);
+            // Empty = follow the OS default sink (clear the pin).
+            g.preferred_output = if name.is_empty() { None } else { Some(name) };
             reroute_needed = true;
         }
         if reroute_needed {
