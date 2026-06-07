@@ -82,6 +82,11 @@ enum Sub {
     },
     /// List available PipeWire output sinks and the active one
     Devices,
+    /// Set the active output device (by name, as shown by `devices`)
+    Output {
+        /// Device name (must match a `devices` entry)
+        name: String,
+    },
     /// Store the current state into an A/B comparison slot
     Store {
         /// Slot: a | b
@@ -222,6 +227,7 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
         Sub::Map { profile } => Ok(Command::MapOutput { profile }),
         Sub::Unmap => Ok(Command::UnmapOutput),
         Sub::Maps => Ok(Command::ListMappings),
+        Sub::Output { name } => Ok(Command::SetOutputTarget { node_name: name }),
         Sub::Reset => Ok(Command::Reset),
         Sub::Export { path } => Ok(Command::ExportApo { path }),
         Sub::Store { slot } => Ok(Command::StoreSlot {
