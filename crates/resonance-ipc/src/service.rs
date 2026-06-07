@@ -1,7 +1,9 @@
 //! Per-user service control for `resonanced`, shared by every client.
 //!
 //! Cross-platform façade with one implementation per OS:
-//!   - Linux: systemd user-service unit at `$XDG_CONFIG_HOME/systemd/user/resonanced.service`
+//!   - Linux: systemd user-service unit at `$XDG_CONFIG_HOME/systemd/user/resonanced.service`,
+//!     or, where `systemctl --user` is absent (OpenRC/runit/SysV/bare session),
+//!     a freedesktop Autostart `.desktop` plus direct process control.
 //!   - macOS: launchd LaunchAgent plist at `~/Library/LaunchAgents/com.ealtun21.resonanced.plist`
 //!
 //! Every backend exposes the same operations so callers stay platform-agnostic:
@@ -9,9 +11,13 @@
 //! `enable()`, `disable()`, and the helper booleans `is_installed/active/enabled`.
 
 #[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
 mod systemd;
 #[cfg(target_os = "linux")]
-use systemd as backend;
+mod xdg_autostart;
+#[cfg(target_os = "linux")]
+use linux as backend;
 
 #[cfg(target_os = "macos")]
 use crate::launchd as backend;

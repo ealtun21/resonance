@@ -13,6 +13,7 @@ serde = { workspace = true }
 postcard = { workspace = true }
 thiserror = { workspace = true }
 
-# Cross-platform uid lookup for the macOS launchd backend.
-[target.'cfg(target_os = "macos")'.dependencies]
+# uid lookup (macOS launchd backend) + SIGTERM to the daemon pidfile
+# (Linux XDG-autostart fallback backend).
+[target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
