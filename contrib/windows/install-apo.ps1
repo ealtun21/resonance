@@ -10,6 +10,14 @@ param(
 )
 $ErrorActionPreference = 'Continue'
 
+# Transcript so the (run-hidden) installer's APO registration + per-endpoint
+# attach results are captured — the only way to diagnose attach failures on
+# machines we can't reach (real audio drivers, Win editions, AV, etc.).
+$logDir = Join-Path $env:ProgramData 'Resonance'
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+try { Start-Transcript -Path (Join-Path $logDir 'apo-install.log') -Force | Out-Null } catch {}
+Write-Output "install-apo: DllPath=$DllPath exists=$(Test-Path $DllPath) OS=$([Environment]::OSVersion.Version)"
+
 $clsid = '{7C3D2A1E-9B6F-4E2A-8D5C-1F0A3B4C5D6E}'
 $backupRoot = 'HKLM:\SOFTWARE\Resonance\ApoBackup'
 
@@ -107,3 +115,4 @@ Get-ChildItem $render -EA SilentlyContinue | ForEach-Object {
 # --- 5) restart the audio engine so audiodg reloads APO registrations ---
 Restart-Service audiosrv -Force -EA SilentlyContinue
 Write-Output 'Resonance APO installed.'
+try { Stop-Transcript | Out-Null } catch {}
