@@ -527,7 +527,7 @@ impl GuiApp {
         cc.egui_ctx.set_visuals(theme.visuals());
         // Compact, consistent button sizing so controls stay usable when the
         // window is narrow (set once; set_visuals doesn't touch spacing).
-        cc.egui_ctx.style_mut(|s| {
+        cc.egui_ctx.global_style_mut(|s| {
             s.spacing.button_padding = egui::vec2(8.0, 3.0);
             s.spacing.interact_size.y = 22.0;
         });
