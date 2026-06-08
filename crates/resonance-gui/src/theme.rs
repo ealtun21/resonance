@@ -161,6 +161,13 @@ impl Theme {
         v.hyperlink_color = p.accent;
         v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, p.accent);
         v.widgets.active.bg_stroke = egui::Stroke::new(1.0, p.accent);
+        // Tint buttons with the accent so they read as interactive instead of
+        // flat grey, with a clear hover/active progression.
+        let btn = blend(panel, p.accent, 0.22);
+        v.widgets.inactive.weak_bg_fill = btn;
+        v.widgets.inactive.bg_fill = btn;
+        v.widgets.hovered.weak_bg_fill = blend(panel, p.accent, 0.42);
+        v.widgets.active.weak_bg_fill = p.accent.gamma_multiply(0.75);
         v
     }
 }

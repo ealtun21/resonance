@@ -91,10 +91,18 @@ pub fn uninstall() -> io::Result<()> {
 /// Spawn the daemon detached (no console window, survives the launching process).
 fn spawn_daemon() -> io::Result<()> {
     use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    // Null the daemon's stdio. Otherwise the detached child inherits the
+    // launcher's stdout/stderr handles: a piped CLI (`resonance daemon restart`)
+    // then blocks until the daemon exits (the pipe stays open), and the daemon's
+    // own stderr (e.g. a startup bail) leaks back onto the launcher's output.
     Command::new(super::daemon_bin())
         .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()?;
     Ok(())
 }

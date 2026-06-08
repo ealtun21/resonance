@@ -525,6 +525,12 @@ impl GuiApp {
             .map(|s| Theme::from_label(&s))
             .unwrap_or(Theme::System);
         cc.egui_ctx.set_visuals(theme.visuals());
+        // Compact, consistent button sizing so controls stay usable when the
+        // window is narrow (set once; set_visuals doesn't touch spacing).
+        cc.egui_ctx.style_mut(|s| {
+            s.spacing.button_padding = egui::vec2(8.0, 3.0);
+            s.spacing.interact_size.y = 22.0;
+        });
         let titlebar_mode = cc
             .storage
             .and_then(|s| s.get_string("titlebar"))
