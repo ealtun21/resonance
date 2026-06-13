@@ -82,10 +82,20 @@ where
             Err(_) => break,
         };
 
+        // Shutdown must reply *before* the process exits, or the client always
+        // sees a torn connection and reports failure for a successful shutdown.
+        let is_shutdown = matches!(cmd, Command::Shutdown);
         let response = dispatch(cmd, &state).await;
         if let Err(e) = write_response_async(&mut writer, &response).await {
             warn!("write error: {e}");
             break;
+        }
+        if is_shutdown {
+            use tokio::io::AsyncWriteExt;
+            let _ = writer.flush().await;
+            info!("shutdown requested");
+            crate::shutdown::cleanup();
+            std::process::exit(0);
         }
     }
     Ok(())
@@ -454,11 +464,9 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
             }
         }
 
-        Command::Shutdown => {
-            info!("shutdown requested");
-            crate::shutdown::cleanup();
-            std::process::exit(0);
-        }
+        // The actual cleanup + exit happens in `handle_client` after this Ok is
+        // flushed to the client (see the `is_shutdown` branch there).
+        Command::Shutdown => Response::Ok,
     }
 }
 

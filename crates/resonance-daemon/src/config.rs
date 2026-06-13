@@ -83,7 +83,10 @@ impl Profile {
         let mut builder = ProcessorChain::builder()
             .channels(channels)
             .sample_rate(sample_rate)
-            .preamp_db(self.preamp_db);
+            // Sanitize the preamp here: ApplyState and a hand-edited/corrupt
+            // profile `.toml` both reach `into_chain` without going through the
+            // SetPreamp finite-check, and a NaN preamp silences all output.
+            .preamp_db(sane_preamp(self.preamp_db));
 
         for b in &self.bands {
             if let Ok(filter) = ApoFilter::builder()
@@ -127,7 +130,33 @@ fn profiles_dir() -> PathBuf {
 }
 
 fn profile_path(name: &str) -> PathBuf {
-    profiles_dir().join(format!("{name}.toml"))
+    // Sanitize at the single chokepoint every profile file path flows through,
+    // so save/load/delete/rename can't be steered outside the profiles dir by a
+    // name like "../../foo" coming from a client.
+    let mut safe = sanitize_name(name);
+    if safe.is_empty() {
+        safe = "_".to_string();
+    }
+    profiles_dir().join(format!("{safe}.toml"))
+}
+
+/// Clamp a preamp value to a sane dB range, mapping non-finite to 0 dB.
+/// `f64::clamp` would propagate NaN, so the finite check must come first.
+fn sane_preamp(db: f64) -> f64 {
+    if db.is_finite() {
+        db.clamp(-60.0, 24.0)
+    } else {
+        0.0
+    }
+}
+
+/// Atomically replace `path`'s contents: write a sibling temp file, then rename
+/// over the target. A crash mid-write leaves the old file intact instead of a
+/// truncated one that the lenient loaders would silently treat as empty.
+fn write_atomic(path: &std::path::Path, contents: &str) -> Result<(), String> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, contents).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
 fn mappings_path() -> PathBuf {
@@ -144,7 +173,7 @@ pub fn save_profile(name: &str, profile: &Profile) -> Result<(), String> {
     let dir = profiles_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let toml = toml::to_string_pretty(profile).map_err(|e| e.to_string())?;
-    std::fs::write(profile_path(name), toml).map_err(|e| e.to_string())
+    write_atomic(&profile_path(name), &toml)
 }
 
 pub fn load_profile(name: &str) -> Result<Profile, String> {
@@ -231,7 +260,7 @@ impl Mappings {
     pub fn save(&self) -> Result<(), String> {
         std::fs::create_dir_all(config_dir()).map_err(|e| e.to_string())?;
         let toml = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(mappings_path(), toml).map_err(|e| e.to_string())
+        write_atomic(&mappings_path(), &toml)
     }
 
     pub fn get(&self, output: &str) -> Option<&str> {
@@ -278,7 +307,7 @@ impl KnownSinks {
     pub fn save(&self) -> Result<(), String> {
         std::fs::create_dir_all(config_dir()).map_err(|e| e.to_string())?;
         let toml = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(known_sinks_path(), toml).map_err(|e| e.to_string())
+        write_atomic(&known_sinks_path(), &toml)
     }
 
     /// Record a `node.name → description`. Returns true if it added or changed an

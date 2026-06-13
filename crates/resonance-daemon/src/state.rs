@@ -55,6 +55,10 @@ pub struct Inner {
     /// Profile auto-loaded for the active output (if mapped).
     pub mapped_profile: Option<String>,
     pub audio_tx: Producer<AudioCommand>,
+    /// Set when a command couldn't be pushed (ring full): the RT chain has
+    /// fallen behind the authoritative shadow and must be resynced wholesale on
+    /// the next push that finds room.
+    pub needs_resync: bool,
     /// Latest spectrum — updated by the spectrum task, read by IPC handler.
     pub spectrum: [f32; SPECTRUM_BINS],
     /// Available PipeWire Audio/Sink names (updated by pw_node).
@@ -97,6 +101,7 @@ impl SharedState {
             active_output: None,
             mapped_profile: None,
             audio_tx,
+            needs_resync: false,
             spectrum: [0.0; SPECTRUM_BINS],
             available_sinks: Vec::new(),
             sink_descriptions: Vec::new(),
@@ -148,8 +153,20 @@ impl SharedState {
     pub fn send(&self, cmd: AudioCommand, shadow_update: impl FnOnce(&mut ProcessorChain)) {
         let mut guard = self.0.lock().unwrap();
         let inner = &mut *guard;
+        // The shadow chain is the source of truth and is always updated.
         shadow_update(&mut inner.chain);
-        let _ = inner.audio_tx.push(cmd);
+        // The RT thread is one command behind the shadow. If the ring is full
+        // the command is dropped and the two diverge; remember that so the next
+        // push with room can resync the RT thread to the authoritative shadow
+        // (one wholesale ReplaceChain, recovering any commands lost in between).
+        if inner.audio_tx.push(cmd).is_err() {
+            inner.needs_resync = true;
+        } else if inner.needs_resync {
+            let resync = AudioCommand::ReplaceChain(Box::new(inner.chain.clone()));
+            if inner.audio_tx.push(resync).is_ok() {
+                inner.needs_resync = false;
+            }
+        }
         // Mirror the new state to the Windows APO (no-op when no writer).
         if let Some(w) = inner.apo_writer.as_mut() {
             w.publish(&inner.chain);

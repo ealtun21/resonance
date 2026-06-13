@@ -24,7 +24,7 @@ impl FxEffect {
     ];
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ProcessorChain {
     pub channels: usize,
     pub sample_rate: f64,
