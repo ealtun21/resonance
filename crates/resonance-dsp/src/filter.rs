@@ -262,6 +262,11 @@ pub struct ApoFilter {
     pub gain_db: f64,
     pub q: f64,
     pub enabled: bool,
+    /// Whether the current parameters are realizable at the active sample rate.
+    /// Distinct from `enabled` (user intent): a band sitting at/above Nyquist
+    /// after a rate drop is held inert here, then resumes on its own when a
+    /// higher rate makes it realizable again — without touching `enabled`.
+    realizable: bool,
     biquad: BiquadFilter,
 }
 
@@ -345,6 +350,7 @@ impl ApoFilterBuilder {
             gain_db,
             q,
             enabled: self.enabled,
+            realizable: true,
             biquad: BiquadFilter::new(coeffs, channels),
         })
     }
@@ -375,8 +381,17 @@ fn coeffs_for(
 }
 
 impl ApoFilter {
+    /// Re-evaluate whether the band is realizable at `sr`, holding it inert when
+    /// not (rather than leaving stale coefficients live). Returns the result.
+    pub fn rebind(&mut self, sr: f64) -> bool {
+        self.realizable = self
+            .update(self.filter_type, self.freq, self.gain_db, self.q, sr)
+            .is_ok();
+        self.realizable
+    }
+
     pub fn process_channel(&mut self, sample: f64, channel: usize) -> f64 {
-        if !self.enabled {
+        if !self.enabled || !self.realizable {
             return sample;
         }
         self.biquad.process_channel(sample, channel)
@@ -393,6 +408,11 @@ impl ApoFilter {
         q: f64,
         sr: f64,
     ) -> Result<(), FilterError> {
+        // Coerce non-finite Q/gain to flat defaults exactly as the builder does
+        // — `update` is the live-edit path and is reachable from untrusted IPC
+        // (`SetBand`) and presets, so a NaN gain must not poison the biquad.
+        let q = if !q.is_finite() || q <= 0.0 { 0.707 } else { q };
+        let gain_db = if gain_db.is_finite() { gain_db } else { 0.0 };
         let coeffs = coeffs_for(filter_type, freq, gain_db, q, sr)?;
         self.filter_type = filter_type;
         self.freq = freq;

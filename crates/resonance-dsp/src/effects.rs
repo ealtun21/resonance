@@ -14,6 +14,10 @@ pub trait Effect: Send {
 /// 2nd-order Butterworth HP biquad coefficients (Audio EQ Cookbook).
 /// Returns (b0, b1, b2, a1, a2) already divided by a0.
 fn butterworth_hp(fc: f64, sr: f64) -> (f64, f64, f64, f64, f64) {
+    // Keep the corner below Nyquist: at sample rates under ~2·fc the raw corner
+    // exceeds π rad/sample and the biquad becomes unstable, eventually emitting
+    // NaN. Clamp to 0.45·sr so the HP stays well-formed at any negotiated rate.
+    let fc = fc.min(0.45 * sr);
     let w0 = 2.0 * PI * fc / sr;
     let cos_w = w0.cos();
     let sin_w = w0.sin();

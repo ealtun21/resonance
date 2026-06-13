@@ -132,14 +132,11 @@ impl ProcessorChain {
         self.sample_rate = sample_rate;
         for f in self.filters.iter_mut() {
             // A band whose freq is at/above the new Nyquist (e.g. a 20 kHz band
-            // after 48k→32k) can't be realized — `update` fails and would leave
-            // the OLD-rate coefficients live against the new rate. Disable it
-            // instead of silently keeping a wrong filter.
-            if f.update(f.filter_type, f.freq, f.gain_db, f.q, sample_rate)
-                .is_err()
-            {
-                f.enabled = false;
-            }
+            // after 48k→32k) can't be realized — `rebind` holds it inert rather
+            // than leaving the old-rate coefficients live, and re-arms it on its
+            // own if a later rate makes it realizable again. User `enabled`
+            // intent is untouched.
+            f.rebind(sample_rate);
         }
         let ch = self.channels;
         self.fidelity = carry_settings(&self.fidelity, FidelityEffect::new(ch, sample_rate));
@@ -276,6 +273,43 @@ mod tests {
         // No-op when unchanged.
         chain.rebind_sample_rate(44_100.0);
         assert_eq!(chain.sample_rate, 44_100.0);
+    }
+
+    #[test]
+    fn rebind_holds_unrealizable_band_inert_then_re_arms() {
+        use crate::filter::{ApoFilter, FilterType};
+        // A 20 kHz band is realizable at 48k (Nyquist 24k) but not at 32k
+        // (Nyquist 16k). It must go inert at 32k yet keep processing again at 48k
+        // — and the user-facing `enabled` flag stays set throughout.
+        let mut chain = ProcessorChain::builder()
+            .sample_rate(48_000.0)
+            .add_filter(
+                ApoFilter::builder()
+                    .filter_type(FilterType::Peaking)
+                    .freq(20_000.0)
+                    .gain_db(6.0)
+                    .q(2.0)
+                    .enabled(true)
+                    .channels(2)
+                    .sample_rate(48_000.0)
+                    .build()
+                    .unwrap(),
+            )
+            .build();
+
+        let probe = |c: &mut ProcessorChain| {
+            c.reset();
+            let mut buf = vec![0.5; 64];
+            c.process(&mut buf);
+            buf.iter().any(|&s| (s - 0.5).abs() > 1e-9)
+        };
+
+        assert!(probe(&mut chain), "band should process at 48k");
+        chain.rebind_sample_rate(32_000.0);
+        assert!(chain.filters[0].enabled, "user enabled flag preserved");
+        assert!(!probe(&mut chain), "band inert at 32k (above Nyquist)");
+        chain.rebind_sample_rate(48_000.0);
+        assert!(probe(&mut chain), "band re-arms when the rate returns");
     }
 
     #[test]
