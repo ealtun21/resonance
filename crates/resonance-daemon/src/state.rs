@@ -132,9 +132,13 @@ impl SharedState {
         let Some(w) = inner.apo_writer.as_ref() else {
             return;
         };
+        // The gate is a daemon write — its store reaches the file the APO reads.
         w.set_telemetry_enabled(watching);
         if watching {
-            if let Some(t) = w.read_telemetry() {
+            // Read telemetry FRESH: the daemon's long-lived mapped view doesn't
+            // observe the APO's cross-session writes, but a fresh file read does.
+            let path = resonance_apo::state::default_state_path();
+            if let Some(t) = resonance_apo::state::read_telemetry_fresh(&path) {
                 let n = inner.spectrum.len().min(t.spectrum.len());
                 inner.spectrum[..n].copy_from_slice(&t.spectrum[..n]);
                 inner.meters.store(crate::meters::Sample {

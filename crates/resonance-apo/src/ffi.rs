@@ -124,17 +124,21 @@ fn worker_loop(weak: Weak<Shared>) {
             continue;
         };
 
-        // Mirror the daemon's "is a client watching" gate to the RT thread.
-        let want = f.telemetry_enabled();
+        // Read the daemon's chain + "is a client watching" gate FRESH each poll.
+        // A long-lived mapped view (`f`) does not observe the daemon's writes
+        // across sessions on Windows; a fresh read of the file does. `f` is kept
+        // only for telemetry *writes* below (the APO's own region).
+        let _ = f;
+        let fresh = crate::state::read_chain_fresh(&path);
+        let want = fresh.as_ref().map(|(_, _, gate)| *gate).unwrap_or(false);
         shared.telemetry_on.store(want, Ordering::Release);
 
         // Rebuild the chain when the daemon publishes new params.
-        let cur = f.generation();
-        if cur != last_gen {
-            let channels = shared.channels.load(Ordering::Acquire);
-            if channels != 0 {
-                let sr = f64::from_bits(shared.sample_rate_bits.load(Ordering::Acquire));
-                if let Some(snap) = f.read() {
+        if let Some((cur, snap, _)) = fresh {
+            if cur != last_gen {
+                let channels = shared.channels.load(Ordering::Acquire);
+                if channels != 0 {
+                    let sr = f64::from_bits(shared.sample_rate_bits.load(Ordering::Acquire));
                     // Update in place to preserve filter/effect state (click-free
                     // live edits). Only a structural change (band added/removed)
                     // needs a rebuild, which we do outside the lock.

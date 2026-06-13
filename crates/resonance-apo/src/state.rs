@@ -468,6 +468,98 @@ impl SharedFile {
 /// Daemon-facing alias (the daemon historically referenced `ApoStateWriter`).
 pub type ApoStateWriter = SharedFile;
 
+// ── Fresh cross-process reads (Windows) ──────────────────────────────────────
+//
+// On Windows the daemon (session 1) and the APO (audiodg, LocalService, session
+// 0) live in different sessions. A long-lived memory-mapped *view* of the shared
+// file does NOT observe the other process's writes there — but the writes do
+// land in the file (a plain read, or a freshly-mapped view, sees them). So every
+// cross-process *reader* fetches the bytes fresh each poll instead of reading
+// through a stale mapping. Writers keep their mapping (their stores reach the
+// file). Off the RT thread, so the extra read is free.
+
+#[inline]
+fn read_u32(buf: &[u8], off: usize) -> Option<u32> {
+    buf.get(off..off + 4)
+        .map(|b| u32::from_ne_bytes(b.try_into().unwrap()))
+}
+#[inline]
+fn read_u64(buf: &[u8], off: usize) -> Option<u64> {
+    buf.get(off..off + 8)
+        .map(|b| u64::from_ne_bytes(b.try_into().unwrap()))
+}
+#[inline]
+fn read_f32(buf: &[u8], off: usize) -> Option<f32> {
+    buf.get(off..off + 4)
+        .map(|b| f32::from_ne_bytes(b.try_into().unwrap()))
+}
+
+/// Fresh read of the daemon's chain snapshot + telemetry gate (generation,
+/// snapshot, telemetry_enabled). Seqlock: read twice and require an even,
+/// unchanged generation. `None` while a write is in flight or the header is
+/// not yet valid — the caller simply polls again.
+pub fn read_chain_fresh(path: &Path) -> Option<(u64, ChainSnapshot, bool)> {
+    let gen_off = std::mem::offset_of!(SharedState, generation);
+    let snap_off = std::mem::offset_of!(SharedState, snapshot);
+    let gate_off = std::mem::offset_of!(SharedState, telemetry_enabled);
+    for _ in 0..8 {
+        let b1 = std::fs::read(path).ok()?;
+        if b1.len() < STATE_SIZE || read_u32(&b1, 0)? != STATE_MAGIC {
+            return None;
+        }
+        let g1 = read_u64(&b1, gen_off)?;
+        if g1 & 1 != 0 {
+            continue; // writer mid-update
+        }
+        // SAFETY: ChainSnapshot is repr(C) + Copy with no padding-sensitive
+        // invariants; read unaligned from the heap buffer at its field offset.
+        let snap = unsafe {
+            std::ptr::read_unaligned(b1.as_ptr().add(snap_off) as *const ChainSnapshot)
+        };
+        let gate = read_u32(&b1, gate_off)? != 0;
+        // Confirm the generation didn't change across the copy (no torn read).
+        let g2 = read_u64(&std::fs::read(path).ok()?, gen_off)?;
+        if g1 == g2 {
+            return Some((g1, snap, gate));
+        }
+    }
+    None
+}
+
+/// Fresh read of the APO's telemetry block (meters + spectrum), used by the
+/// daemon. Same seqlock-over-fresh-reads scheme as [`read_chain_fresh`].
+pub fn read_telemetry_fresh(path: &Path) -> Option<TelemetrySnapshot> {
+    let tel_off = std::mem::offset_of!(SharedState, telemetry);
+    let gen_off = tel_off + std::mem::offset_of!(Telemetry, generation);
+    for _ in 0..8 {
+        let b = std::fs::read(path).ok()?;
+        if b.len() < STATE_SIZE || read_u32(&b, 0)? != STATE_MAGIC {
+            return None;
+        }
+        let g1 = read_u64(&b, gen_off)?;
+        if g1 & 1 != 0 {
+            continue;
+        }
+        let mut spectrum = [0.0f32; TELEMETRY_BINS];
+        let spec_off = tel_off + std::mem::offset_of!(Telemetry, spectrum);
+        for (i, s) in spectrum.iter_mut().enumerate() {
+            *s = read_f32(&b, spec_off + i * 4)?;
+        }
+        let snap = TelemetrySnapshot {
+            in_peak: read_f32(&b, tel_off + std::mem::offset_of!(Telemetry, in_peak))?,
+            out_peak: read_f32(&b, tel_off + std::mem::offset_of!(Telemetry, out_peak))?,
+            in_rms: read_f32(&b, tel_off + std::mem::offset_of!(Telemetry, in_rms))?,
+            out_rms: read_f32(&b, tel_off + std::mem::offset_of!(Telemetry, out_rms))?,
+            spectrum,
+        };
+        let g2 = read_u64(&std::fs::read(path).ok()?, gen_off)?;
+        if g1 == g2 {
+            return Some(snap);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
