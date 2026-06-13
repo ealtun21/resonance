@@ -134,12 +134,19 @@ impl Theme {
     }
 
     /// Whether this theme uses a light base (affects text contrast defaults).
-    fn is_light(self) -> bool {
+    pub(crate) fn is_light(self) -> bool {
         match self {
             Theme::Light => true,
             Theme::Matugen => matugen_is_light(),
             _ => false,
         }
+    }
+
+    /// `(caption_fill, caption_text)` for theming the native Windows title bar so
+    /// it matches the app — the panel fill the toolbar sits on, and its text.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn native_caption_colors(self) -> (egui::Color32, egui::Color32) {
+        (self.visuals().window_fill, self.palette().neutral)
     }
 
     /// Build the full `egui::Visuals` for this theme.

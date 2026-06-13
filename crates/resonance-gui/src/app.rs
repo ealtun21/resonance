@@ -215,6 +215,14 @@ impl TitlebarMode {
 
     /// Whether to draw our custom titlebar (and hide native decorations).
     fn use_csd(self) -> bool {
+        // Never on Windows: a borderless (decoration-less) winit window there has
+        // unreliable client-area input — clicks/drags and even egui's own dialog
+        // buttons misbehave. The native title bar works perfectly and is themed
+        // to match via DWM (see native_titlebar). CSD remains for Linux (tiling
+        // WMs) and macOS.
+        if cfg!(target_os = "windows") {
+            return false;
+        }
         match self {
             TitlebarMode::Custom => true,
             TitlebarMode::Native => false,
@@ -241,6 +249,63 @@ pub(crate) fn saved_use_csd() -> bool {
         .map(|v| TitlebarMode::from_label(&v))
         .unwrap_or(TitlebarMode::Auto)
         .use_csd()
+}
+
+/// Theme the native Windows title bar via DWM so it matches the app instead of
+/// the default light/grey OS bar. Immersive dark mode works on Windows 10+; the
+/// exact caption/text colours apply on Windows 11 (22000+) and are harmless
+/// no-ops on Windows 10 (it stays dark).
+#[cfg(target_os = "windows")]
+mod native_titlebar {
+    use std::ffi::c_void;
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn FindWindowW(class: *const u16, name: *const u16) -> isize;
+    }
+    #[link(name = "dwmapi")]
+    unsafe extern "system" {
+        fn DwmSetWindowAttribute(hwnd: isize, attr: u32, pv: *const c_void, cb: u32) -> i32;
+    }
+    const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
+    const DWMWA_CAPTION_COLOR: u32 = 35; // Win11 22000+
+    const DWMWA_TEXT_COLOR: u32 = 36; // Win11 22000+
+
+    /// 0x00BBGGRR COLORREF from an egui colour.
+    fn colorref(c: egui::Color32) -> u32 {
+        (c.r() as u32) | ((c.g() as u32) << 8) | ((c.b() as u32) << 16)
+    }
+
+    fn hwnd() -> isize {
+        let title: Vec<u16> = "Resonance\0".encode_utf16().collect();
+        // SAFETY: null class + valid NUL-terminated wide title; FindWindow reads
+        // only the title and returns the matching top-level window (ours).
+        unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) }
+    }
+
+    /// Returns false if the window wasn't found yet (caller should retry).
+    pub fn apply(dark: bool, caption: egui::Color32, text: egui::Color32) -> bool {
+        let h = hwnd();
+        if h == 0 {
+            return false;
+        }
+        let dark_i: i32 = dark as i32;
+        let cap = colorref(caption);
+        let txt = colorref(text);
+        // SAFETY: each call passes a pointer to a 4-byte value of the stated
+        // size; unsupported attributes (Win10) just return an error we ignore.
+        unsafe {
+            DwmSetWindowAttribute(
+                h,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                (&dark_i as *const i32).cast(),
+                4,
+            );
+            DwmSetWindowAttribute(h, DWMWA_CAPTION_COLOR, (&cap as *const u32).cast(), 4);
+            DwmSetWindowAttribute(h, DWMWA_TEXT_COLOR, (&txt as *const u32).cast(), 4);
+        }
+        true
+    }
 }
 
 /// Heuristic: are we on a tiling WM where a client-side title bar and window
@@ -365,6 +430,10 @@ pub struct GuiApp {
     /// viewport (so we only send the command when it changes).
     titlebar_mode: TitlebarMode,
     decorations_applied: Option<bool>,
+    /// Theme the native Windows title bar (via DWM) was last styled for; re-apply
+    /// only when the theme changes. `None` until applied.
+    #[cfg(target_os = "windows")]
+    native_titlebar_theme: Option<Theme>,
     /// Interactive titlebar regions (window buttons + brand) for the current
     /// frame. The resize grips skip these so a click on a button isn't eaten by
     /// the (foreground) resize border. Set by `titlebar`, read by
@@ -628,6 +697,8 @@ impl GuiApp {
             // then won't toggle decorations (a runtime toggle breaks Windows
             // input mapping). Only a later mode CHANGE re-applies it.
             decorations_applied: Some(!titlebar_mode.use_csd()),
+            #[cfg(target_os = "windows")]
+            native_titlebar_theme: None,
             matugen_mtime: crate::theme::matugen_source_mtime(),
             last_matugen_check: Instant::now(),
             lower_tab: LowerTab::default(),
@@ -775,6 +846,16 @@ impl eframe::App for GuiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Read the latest snapshot the IPC worker published (never blocks).
         self.pull_shared();
+
+        // Tint the native Windows title bar to match the theme (re-apply on theme
+        // change; retry until the window handle exists).
+        #[cfg(target_os = "windows")]
+        if self.native_titlebar_theme != Some(self.theme) {
+            let (caption, text) = self.theme.native_caption_colors();
+            if native_titlebar::apply(!self.theme.is_light(), caption, text) {
+                self.native_titlebar_theme = Some(self.theme);
+            }
+        }
 
         // Keyboard: Ctrl-Z undo, Ctrl-Y / Ctrl-Shift-Z redo.
         let (undo, redo) = ui.ctx().input(|i| {
