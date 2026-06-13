@@ -30,6 +30,10 @@ $render = "HKLM:\$renderSub"
 $fx   = '{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D}'
 $mode = '{D3993A3F-99C2-4402-B5EC-A92A0367664B}'
 
+# Read the saved prior signature-check state before the backup tree is removed,
+# so we can decide whether to clear DisableProtectedAudioDG below.
+$priorDpadg = (Get-ItemProperty -Path $backupRoot -Name 'DisableProtectedAudioDG_prior' -EA SilentlyContinue).'DisableProtectedAudioDG_prior'
+
 # restore each endpoint we touched from the backup
 if (Test-Path $backupRoot) {
   Get-ChildItem $backupRoot -EA SilentlyContinue | ForEach-Object {
@@ -56,8 +60,15 @@ if (Test-Path $backupRoot) {
 Remove-Item -Recurse -Force "HKLM:\SOFTWARE\Classes\CLSID\$clsid" -EA SilentlyContinue
 Remove-Item -Recurse -Force "HKLM:\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects\$clsid" -EA SilentlyContinue
 
-# clear the signature-check override (we set it on install)
-Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio' -Name 'DisableProtectedAudioDG' -EA SilentlyContinue
+# Restore the signature-check override to its pre-install state. Only clear it
+# if it didn't exist before we installed ('<none>' or no marker) — otherwise
+# another unsigned APO (e.g. EqualizerAPO) set it and still needs it.
+$audioKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio'
+if ($null -eq $priorDpadg -or $priorDpadg -eq '<none>') {
+  Remove-ItemProperty -Path $audioKey -Name 'DisableProtectedAudioDG' -EA SilentlyContinue
+} else {
+  Set-ItemProperty -Path $audioKey -Name 'DisableProtectedAudioDG' -Value ([int]$priorDpadg) -Type DWord
+}
 
 # drop the daemon's shared state file
 Remove-Item -Force 'C:\ProgramData\Resonance\apo_state.bin' -EA SilentlyContinue

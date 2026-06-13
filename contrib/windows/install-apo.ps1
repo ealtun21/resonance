@@ -75,7 +75,10 @@ $cat = "HKLM:\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects\$clsid"
 New-Item -Force -Path $cat | Out-Null
 Set-ItemProperty -Path $cat -Name 'FriendlyName' -Value 'Resonance APO'
 Set-ItemProperty -Path $cat -Name 'Copyright'    -Value 'Resonance'
-foreach ($kv in @{MajorVersion=0;MinorVersion=5;MinInputConnections=1;MaxInputConnections=1;MinOutputConnections=1;MaxOutputConnections=1;MaxInstances=4294967295;Flags=15;NumAPOInterfaces=1}.GetEnumerator()) {
+# MaxInstances is "unlimited" = 0xFFFFFFFF. We store it as -1: Windows PowerShell
+# 5.1 converts a DWord value through Int32, so the literal 4294967295 overflows
+# and the property is silently never written. -1 has the identical 32-bit pattern.
+foreach ($kv in @{MajorVersion=0;MinorVersion=5;MinInputConnections=1;MaxInputConnections=1;MinOutputConnections=1;MaxOutputConnections=1;MaxInstances=-1;Flags=15;NumAPOInterfaces=1}.GetEnumerator()) {
   New-ItemProperty -Force -Path $cat -Name $kv.Key -PropertyType DWord -Value $kv.Value | Out-Null
 }
 Set-ItemProperty -Path $cat -Name 'APOInterface0' -Value '{FD7F2B29-24D0-4B5C-B177-592C39F9CA10}'
@@ -83,6 +86,9 @@ Set-ItemProperty -Path $cat -Name 'APOInterface0' -Value '{FD7F2B29-24D0-4B5C-B1
 # --- 3) disable APO signature check so the unsigned APO loads in audiodg ---
 $audioKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio'
 if (-not (Test-Path $audioKey)) { New-Item -Path $audioKey -Force | Out-Null }
+# Record the prior value (or '<none>') so uninstall only clears the override if
+# WE created it — another unsigned APO (e.g. EqualizerAPO) may also rely on it.
+$priorDpadg = (Get-ItemProperty -Path $audioKey -Name 'DisableProtectedAudioDG' -EA SilentlyContinue).DisableProtectedAudioDG
 Set-ItemProperty -Path $audioKey -Name 'DisableProtectedAudioDG' -Value 1 -Type DWord
 
 # --- 4) attach to each render endpoint, ONE mode per endpoint ---
@@ -102,6 +108,12 @@ $mode = '{D3993A3F-99C2-4402-B5EC-A92A0367664B}'   # per-slot processing-mode li
 $defaultMode = '{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}'   # DEFAULT processing mode
 $combinedName = '{b3f8fa53-0004-438e-9003-51a46e139bfc},41'   # combined-device flag
 New-Item -Force -Path $backupRoot | Out-Null
+# Persist the prior signature-check state alongside the slot backups.
+if ($null -eq $priorDpadg) {
+  Set-ItemProperty -Path $backupRoot -Name 'DisableProtectedAudioDG_prior' -Value '<none>'
+} else {
+  Set-ItemProperty -Path $backupRoot -Name 'DisableProtectedAudioDG_prior' -Value ([string]$priorDpadg)
+}
 $allSlots = '1','2','5','6','7'
 
 $attached = 0
