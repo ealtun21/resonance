@@ -162,15 +162,16 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         .map(|o| format!("🔊 {o}"))
         .unwrap_or_default();
 
-    let status_color = if app.status.is_empty() {
+    let status = app.status_text();
+    let status_color = if status.is_empty() {
         Color::DarkGray
     } else {
         Color::Yellow
     };
-    let status_str = if app.status.is_empty() {
+    let status_str = if status.is_empty() {
         String::new()
     } else {
-        format!("  {}", app.status)
+        format!("  {status}")
     };
 
     // Live meters.
@@ -572,9 +573,14 @@ fn render_bands(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         ""
     };
-    let _ = field_hint;
     let block = Block::default()
-        .title(Line::from(" EQ Bands ").fg(if focused { Color::Cyan } else { Color::Magenta }))
+        .title(
+            Line::from(format!(" EQ Bands{field_hint} ")).fg(if focused {
+                Color::Cyan
+            } else {
+                Color::Magenta
+            }),
+        )
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(border_style);
@@ -789,8 +795,9 @@ fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (u8, u8, u8) {
 // ── Load-preset file picker ─────────────────────────────────────────────────
 
 fn centered_rect(area: Rect, pct_w: u16, pct_h: u16) -> Rect {
-    let w = area.width * pct_w / 100;
-    let h = area.height * pct_h / 100;
+    // Widen the multiply: area.width * pct_w overflows u16 past ~819 columns.
+    let w = (area.width as u32 * pct_w as u32 / 100) as u16;
+    let h = (area.height as u32 * pct_h as u32 / 100) as u16;
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     Rect::new(x, y, w, h)
@@ -1354,8 +1361,13 @@ fn render_text_input_overlay(
     let mut display = buf.to_string();
     display.insert(cursor, '█');
 
-    let w =
-        (label.len() as u16 + display.len() as u16 + 8).clamp(30, parent.width.saturating_sub(4));
+    // Prefer at least 30 columns, but never exceed the parent — clamp(30, max)
+    // panics when the terminal is narrower than ~34 columns (min > max).
+    let desired = (label.len() as u16)
+        .saturating_add(display.len() as u16)
+        .saturating_add(8);
+    let max_w = parent.width.saturating_sub(4).max(1);
+    let w = desired.max(30).min(max_w);
     let h = 3;
     let x = parent.x + (parent.width.saturating_sub(w)) / 2;
     let y = parent.y + (parent.height.saturating_sub(h)) / 2;

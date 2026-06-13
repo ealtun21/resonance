@@ -126,9 +126,22 @@ fn is_preset(name: &str) -> bool {
     name.ends_with(".fac") || name.ends_with(".txt") || name.ends_with(".toml")
 }
 
+/// Read at most `max` bytes of a file as lossy UTF-8 (for bounded previews).
+fn read_head(path: &Path, max: usize) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::fs::File::open(path)?
+        .take(max as u64)
+        .read_to_end(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
 /// Build a human-readable preview for a preset file (falls back to a raw head).
 fn preview_file(path: &Path) -> Vec<String> {
-    let Ok(content) = std::fs::read_to_string(path) else {
+    // Cap the read: this runs on every cursor move while browsing, so a huge or
+    // hostile file shouldn't be slurped whole. Real presets are a few KB; 64 KiB
+    // is plenty to summarise, and the parsers tolerate a truncated tail.
+    let Ok(content) = read_head(path, 64 * 1024) else {
         return vec!["(cannot read file)".to_string()];
     };
 

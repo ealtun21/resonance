@@ -1,13 +1,15 @@
 use ratatui::layout::Rect;
 use resonance_ipc::{
     BandState, Command, DaemonState, EffectsState, FxEffectId, Response,
-    transport::SyncClient as IpcClient,
+    transport::{SyncClient as IpcClient, TransportError},
 };
 use std::time::{Duration, Instant};
 
 /// Spectrum envelope time constants: bars snap up, glide down.
 const SPECTRUM_ATTACK_TAU: f32 = 0.020;
 const SPECTRUM_DECAY_TAU: f32 = 0.200;
+/// How long a status message stays visible after it's set.
+const STATUS_TTL: Duration = Duration::from_secs(4);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panel {
@@ -54,6 +56,10 @@ pub struct App {
     pub band_field: BandField,
     pub mode: InputMode,
     pub status: String,
+    /// When the current status message stops being shown. Action feedback would
+    /// otherwise be wiped by the next state poll (every few ms) before the user
+    /// can read it; it now lingers for `STATUS_TTL`.
+    status_until: Instant,
     pub last_frame: Rect,
     pub prefs: crate::prefs::Prefs,
     /// Smoothed spectrum bar heights (drawn instead of raw bins to stop flicker).
@@ -89,6 +95,7 @@ impl App {
             band_field: BandField::Gain,
             mode: InputMode::Normal,
             status: String::new(),
+            status_until: Instant::now(),
             last_frame: Rect::default(),
             prefs,
             spectrum_display: Vec::new(),
@@ -111,10 +118,11 @@ impl App {
     /// Run a service action, update status text + cached snapshot, and try to
     /// (re)connect afterward so the UI reflects the change immediately.
     pub fn daemon_action(&mut self, label: &str, r: std::io::Result<()>) {
-        self.status = match r {
+        let msg = match r {
             Ok(()) => format!("daemon: {label} ok"),
             Err(e) => format!("daemon: {label} failed: {e}"),
         };
+        self.set_status(msg);
         self.refresh_daemon_status();
         if self.ipc.is_none() {
             self.connect();
@@ -152,9 +160,9 @@ impl App {
                     self.redo_stack.push(cur);
                 }
                 self.apply_snapshot(&prev);
-                self.status = "undo".into();
+                self.set_status("undo");
             }
-            None => self.status = "nothing to undo".into(),
+            None => self.set_status("nothing to undo"),
         }
     }
 
@@ -165,9 +173,9 @@ impl App {
                     self.undo_stack.push(cur);
                 }
                 self.apply_snapshot(&next);
-                self.status = "redo".into();
+                self.set_status("redo");
             }
-            None => self.status = "nothing to redo".into(),
+            None => self.set_status("nothing to redo"),
         }
     }
 
@@ -187,6 +195,12 @@ impl App {
         let dt = self.last_anim.elapsed().as_secs_f32().min(0.1);
         self.last_anim = Instant::now();
         let Some(bins) = self.state.as_ref().map(|s| s.spectrum.as_slice()) else {
+            // Disconnected: decay the bars to zero instead of freezing the last
+            // frame, so a dead daemon doesn't look like it's still playing.
+            let coeff = 1.0 - (-dt / SPECTRUM_DECAY_TAU).exp();
+            for disp in self.spectrum_display.iter_mut() {
+                *disp -= *disp * coeff;
+            }
             return;
         };
         if self.spectrum_display.len() != bins.len() {
@@ -204,16 +218,31 @@ impl App {
         }
     }
 
+    /// Set the transient status message and (re)start its visibility window.
+    pub fn set_status(&mut self, msg: impl Into<String>) {
+        self.status = msg.into();
+        self.status_until = Instant::now() + STATUS_TTL;
+    }
+
+    /// The status message, blanked once its TTL has elapsed.
+    pub fn status_text(&self) -> &str {
+        if Instant::now() < self.status_until {
+            &self.status
+        } else {
+            ""
+        }
+    }
+
     pub fn connect(&mut self) {
         // The TUI polls less aggressively than the GUI, so a slightly longer
         // (read+write) timeout than the GUI's is fine.
         match IpcClient::connect_with_timeout(Duration::from_millis(500)) {
             Ok(c) => {
                 self.ipc = Some(c);
-                self.status = "connected".into();
+                self.set_status("connected");
             }
             Err(e) => {
-                self.status = format!("not connected: {e}");
+                self.set_status(format!("not connected: {e}"));
             }
         }
     }
@@ -229,11 +258,20 @@ impl App {
                 if s.meters.clip {
                     self.clip_until = Some(Instant::now() + Duration::from_millis(250));
                 }
+                // Keep the band cursor in range: a profile load or another
+                // client can shrink the band list out from under it, after which
+                // band edits/deletes would target the wrong (or no) band.
+                if !s.bands.is_empty() {
+                    self.band_cursor = self.band_cursor.min(s.bands.len() - 1);
+                } else {
+                    self.band_cursor = 0;
+                }
                 self.state = Some(s);
-                self.status.clear();
+                // Don't wipe the status here — it expires on its own TTL so
+                // action feedback survives the next poll a few ms later.
             }
             Err(e) => {
-                self.status = format!("error: {e}");
+                self.set_status(format!("error: {e}"));
                 self.state = None;
                 self.ipc = None;
             }
@@ -246,8 +284,16 @@ impl App {
             return;
         };
         if let Err(e) = ipc.send(cmd) {
-            self.status = format!("error: {e}");
-            self.ipc = None;
+            // A daemon-level rejection (e.g. "profile not found") is not a
+            // broken connection — show it but keep the socket. Only a real
+            // transport error drops the connection so we reconnect.
+            match e {
+                TransportError::Daemon(msg) => self.set_status(msg),
+                _ => {
+                    self.set_status(format!("error: {e}"));
+                    self.ipc = None;
+                }
+            }
         }
     }
 
@@ -259,7 +305,7 @@ impl App {
         match ipc.send_recv(cmd) {
             Ok(r) => Some(r),
             Err(e) => {
-                self.status = format!("error: {e}");
+                self.set_status(format!("error: {e}"));
                 self.ipc = None;
                 None
             }
@@ -270,6 +316,9 @@ impl App {
 
     pub fn toggle_power(&mut self) {
         let enabled = self.state.as_ref().map(|s| !s.enabled).unwrap_or(true);
+        // Snapshot first: `enabled` is part of the undo state, so toggling power
+        // must be undoable like every other edit.
+        self.push_undo();
         self.send(Command::SetPower { enabled });
         self.refresh_state();
     }
@@ -368,10 +417,10 @@ impl App {
         match self.query(Command::ImportPreset { path, name: None }) {
             Some(Response::Imported(name)) => {
                 self.send(Command::LoadProfile { name: name.clone() });
-                self.status = format!("imported + loaded '{name}'");
+                self.set_status(format!("imported + loaded '{name}'"));
             }
-            Some(Response::Error(e)) => self.status = format!("import failed: {e}"),
-            _ => self.status = "import failed".into(),
+            Some(Response::Error(e)) => self.set_status(format!("import failed: {e}")),
+            _ => self.set_status("import failed"),
         }
     }
 
@@ -793,9 +842,9 @@ impl App {
                     match self.query(Command::ExportProfile {
                         path: path_str.clone(),
                     }) {
-                        Some(Response::Ok) => self.status = format!("exported → {path_str}"),
-                        Some(Response::Error(e)) => self.status = format!("export failed: {e}"),
-                        _ => self.status = "export failed".into(),
+                        Some(Response::Ok) => self.set_status(format!("exported → {path_str}")),
+                        Some(Response::Error(e)) => self.set_status(format!("export failed: {e}")),
+                        _ => self.set_status("export failed"),
                     }
                 }
                 if let InputMode::Settings(s) = &mut self.mode {
@@ -809,8 +858,8 @@ impl App {
                         from: from.clone(),
                         to: to.clone(),
                     }) {
-                        Some(Response::Ok) => self.status = format!("renamed to '{to}'"),
-                        Some(Response::Error(e)) => self.status = format!("rename failed: {e}"),
+                        Some(Response::Ok) => self.set_status(format!("renamed to '{to}'")),
+                        Some(Response::Error(e)) => self.set_status(format!("rename failed: {e}")),
                         _ => {}
                     }
                 }
@@ -1091,7 +1140,7 @@ impl App {
                         self.do_unmap_output();
                     }
                 } else {
-                    self.status = "can only unmap the active output".into();
+                    self.set_status("can only unmap the active output");
                 }
             }
             _ => {}
@@ -1111,7 +1160,7 @@ impl App {
             _ => return,
         };
         if profiles.is_empty() {
-            self.status = "no profiles saved".into();
+            self.set_status("no profiles saved");
             return;
         }
         let for_sink = if tab == 2 {
