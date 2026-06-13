@@ -973,8 +973,13 @@ impl eframe::App for GuiApp {
         self.help_dialog(&ctx);
 
         // With native decorations off, the OS resize borders are gone — add our
-        // own edge/corner grips so the window can still be resized.
-        if csd {
+        // own edge/corner grips so the window can still be resized. Suppress them
+        // while a modal dialog/overlay is open: the grips are a foreground layer
+        // (above egui Windows), so they'd sit over and swallow clicks on the
+        // dialog's own controls — e.g. its close button.
+        let modal_open =
+            !matches!(self.dialog, Dialog::None) || self.confirm.is_some() || self.show_help;
+        if csd && !modal_open {
             self.csd_resize_grips(&ctx);
         }
 
