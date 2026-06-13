@@ -87,36 +87,48 @@ fn parse_filter_line(line: &str, ln: usize) -> Result<Option<EqBand>, ApoError> 
             tokens.next();
         }
     }
-    let filter_type = parse_filter_type(&filter_type_str, ln)?;
+    // Unknown filter types (Peace's "None" placeholder, unmodelled Butterworth/
+    // Linkwitz-Riley variants, …) skip just this line rather than failing the
+    // whole file — matching the line-level leniency for unknown directives.
+    let Some(filter_type) = lookup_filter_type(&filter_type_str) else {
+        return Ok(None);
+    };
 
     let mut freq = 1000.0f64;
     let mut gain_db = 0.0f64;
     let mut q = 0.707f64;
 
+    // Consume an optional unit token only when it actually is one — otherwise a
+    // unit-less "Fc 1000 Gain 3" would swallow the following "Gain" keyword.
+    let eat_unit = |tokens: &mut std::iter::Peekable<std::str::SplitWhitespace>, unit: &str| {
+        if tokens.peek().is_some_and(|t| t.eq_ignore_ascii_case(unit)) {
+            tokens.next();
+        }
+    };
     while let Some(key) = tokens.next() {
         match key {
             "Fc" => {
-                freq = tokens
-                    .next()
-                    .ok_or_else(|| err(ln, "expected value after Fc"))?
-                    .parse::<f64>()
-                    .map_err(|_| err(ln, "invalid Fc value"))?;
-                tokens.next(); // consume "Hz"
+                freq = parse_finite(
+                    tokens.next().ok_or_else(|| err(ln, "expected value after Fc"))?,
+                    ln,
+                    "Fc",
+                )?;
+                eat_unit(&mut tokens, "Hz");
             }
             "Gain" => {
-                gain_db = tokens
-                    .next()
-                    .ok_or_else(|| err(ln, "expected value after Gain"))?
-                    .parse::<f64>()
-                    .map_err(|_| err(ln, "invalid Gain value"))?;
-                tokens.next(); // consume "dB"
+                gain_db = parse_finite(
+                    tokens.next().ok_or_else(|| err(ln, "expected value after Gain"))?,
+                    ln,
+                    "Gain",
+                )?;
+                eat_unit(&mut tokens, "dB");
             }
             "Q" => {
-                q = tokens
-                    .next()
-                    .ok_or_else(|| err(ln, "expected value after Q"))?
-                    .parse::<f64>()
-                    .map_err(|_| err(ln, "invalid Q value"))?;
+                q = parse_finite(
+                    tokens.next().ok_or_else(|| err(ln, "expected value after Q"))?,
+                    ln,
+                    "Q",
+                )?;
             }
             _ => {}
         }
@@ -190,24 +202,27 @@ fn filter_uses_gain(t: ApoFilterType) -> bool {
     )
 }
 
-fn parse_filter_type(s: &str, ln: usize) -> Result<ApoFilterType, ApoError> {
-    match s {
-        "PK" => Ok(ApoFilterType::Peaking),
-        "LS" => Ok(ApoFilterType::LowShelf),
-        "LS 12dB" => Ok(ApoFilterType::LowShelf12Db),
-        "LSC" => Ok(ApoFilterType::LowShelfQ),
-        "HS" => Ok(ApoFilterType::HighShelf),
-        "HS 12dB" => Ok(ApoFilterType::HighShelf12Db),
-        "HSC" => Ok(ApoFilterType::HighShelfQ),
-        "LP" => Ok(ApoFilterType::LowPass),
-        "LPQ" => Ok(ApoFilterType::LowPassQ),
-        "HP" => Ok(ApoFilterType::HighPass),
-        "HPQ" => Ok(ApoFilterType::HighPassQ),
-        "BP" => Ok(ApoFilterType::BandPass),
-        "NO" => Ok(ApoFilterType::Notch),
-        "AP" => Ok(ApoFilterType::AllPass),
-        _ => Err(err(ln, &format!("unknown filter type '{s}'"))),
-    }
+/// Map an EqualizerAPO filter keyword to a modelled type, or `None` if the type
+/// is unknown/unsupported (inverse of [`apo_keyword`]). A `6dB` shelf slope maps
+/// to the maximally-flat (0.707-Q) shelf — the closest slope we model.
+fn lookup_filter_type(s: &str) -> Option<ApoFilterType> {
+    Some(match s {
+        "PK" | "PEQ" => ApoFilterType::Peaking,
+        "LS" | "LS 6dB" => ApoFilterType::LowShelf,
+        "LS 12dB" => ApoFilterType::LowShelf12Db,
+        "LSC" => ApoFilterType::LowShelfQ,
+        "HS" | "HS 6dB" => ApoFilterType::HighShelf,
+        "HS 12dB" => ApoFilterType::HighShelf12Db,
+        "HSC" => ApoFilterType::HighShelfQ,
+        "LP" => ApoFilterType::LowPass,
+        "LPQ" => ApoFilterType::LowPassQ,
+        "HP" => ApoFilterType::HighPass,
+        "HPQ" => ApoFilterType::HighPassQ,
+        "BP" => ApoFilterType::BandPass,
+        "NO" => ApoFilterType::Notch,
+        "AP" => ApoFilterType::AllPass,
+        _ => return None,
+    })
 }
 
 /// Parse the `GraphicEQ:` value into `(freq Hz, gain dB)` target points.
@@ -232,12 +247,8 @@ fn parse_graphic_eq(s: &str, ln: usize) -> Result<Vec<(f64, f64)>, ApoError> {
                     (&first[..idx], &first[idx..])
                 }
             };
-            let freq = freq_str
-                .parse::<f64>()
-                .map_err(|_| err(ln, "invalid freq in GraphicEQ"))?;
-            let gain_db = gain_str
-                .parse::<f64>()
-                .map_err(|_| err(ln, "invalid gain in GraphicEQ"))?;
+            let freq = parse_finite(freq_str, ln, "GraphicEQ freq")?;
+            let gain_db = parse_finite(gain_str, ln, "GraphicEQ gain")?;
             Ok((freq, gain_db))
         })
         .collect()
@@ -245,15 +256,20 @@ fn parse_graphic_eq(s: &str, ln: usize) -> Result<Vec<(f64, f64)>, ApoError> {
 
 fn parse_db(s: &str, ln: usize) -> Result<f64, ApoError> {
     let val = s.trim_end_matches("dB").trim();
-    let db = val
+    parse_finite(val, ln, "dB")
+}
+
+/// Parse an `f64` and reject non-finite values. Rust's `f64` parser accepts
+/// `"nan"`/`"inf"`, which would poison the DSP chain with NaN/Inf coefficients,
+/// so every numeric field from an untrusted preset goes through this.
+fn parse_finite(s: &str, ln: usize, what: &str) -> Result<f64, ApoError> {
+    let v = s
         .parse::<f64>()
-        .map_err(|_| err(ln, "invalid dB value"))?;
-    // Rust's f64 parse accepts "nan"/"inf"; reject them so a hostile preset
-    // can't feed NaN/Inf into preamp or band gain.
-    if !db.is_finite() {
-        return Err(err(ln, "dB value must be finite"));
+        .map_err(|_| err(ln, &format!("invalid {what} value")))?;
+    if !v.is_finite() {
+        return Err(err(ln, &format!("{what} value must be finite")));
     }
-    Ok(db)
+    Ok(v)
 }
 
 fn err(line: usize, msg: &str) -> ApoError {
@@ -335,6 +351,48 @@ mod tests {
                 assert!((a.gain_db - b.gain_db).abs() < 0.05, "gain mismatch");
             }
         }
+    }
+
+    #[test]
+    fn rejects_non_finite_values() {
+        // Hostile presets must not feed NaN/Inf into the DSP chain (a NaN gain
+        // in a GraphicEQ line used to panic the curve fitter).
+        assert!(parse_apo("GraphicEQ: 20 nan; 100 2; 1000 0; 5000 1\n").is_err());
+        assert!(parse_apo("GraphicEQ: 20 0; inf 2; 1000 0\n").is_err());
+        assert!(parse_apo("Filter 1: ON PK Fc nan Hz Gain 3 dB Q 1\n").is_err());
+        assert!(parse_apo("Filter 1: ON PK Fc 1000 Hz Gain inf dB Q 1\n").is_err());
+        assert!(parse_apo("Preamp: nan dB\n").is_err());
+    }
+
+    #[test]
+    fn six_db_shelf_slope_parses() {
+        let p = parse_apo("Filter 1: ON LS 6dB Fc 100 Hz Gain 3 dB\n").unwrap();
+        assert_eq!(p.bands.len(), 1);
+        assert_eq!(p.bands[0].filter_type, ApoFilterType::LowShelf);
+        let p = parse_apo("Filter 1: ON HS 6dB Fc 8000 Hz Gain -2 dB\n").unwrap();
+        assert_eq!(p.bands[0].filter_type, ApoFilterType::HighShelf);
+    }
+
+    #[test]
+    fn unknown_filter_type_skips_only_that_line() {
+        // Peace writes "ON None" placeholders and APO has types we don't model
+        // (BWLP/LRHP/…); one unknown keyword must not reject the whole file.
+        let p = parse_apo(
+            "Filter 1: ON None\nFilter 2: ON BWLP Fc 80 Hz\nFilter 3: ON PK Fc 1000 Hz Gain -3 dB Q 1\n",
+        )
+        .unwrap();
+        assert_eq!(p.bands.len(), 1);
+        assert_eq!(p.bands[0].filter_type, ApoFilterType::Peaking);
+    }
+
+    #[test]
+    fn missing_unit_token_does_not_swallow_next_keyword() {
+        // "Fc 1000 Gain 3" (no "Hz" unit) must still read the Gain.
+        let p = parse_apo("Filter 1: ON PK Fc 1000 Gain 3 Q 2\n").unwrap();
+        assert_eq!(p.bands.len(), 1);
+        assert!((p.bands[0].freq - 1000.0).abs() < 0.01);
+        assert!((p.bands[0].gain_db - 3.0).abs() < 0.01);
+        assert!((p.bands[0].q - 2.0).abs() < 0.01);
     }
 
     #[test]

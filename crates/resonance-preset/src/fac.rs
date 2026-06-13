@@ -67,27 +67,50 @@ pub fn parse_fac(content: &str) -> Result<Preset, FacError> {
         ln = next_ln;
     }
 
+    // Counts of application-dependent values. Each must be bounded before it
+    // drives a skip loop so a garbled count can't spin or overflow.
+    let bounded_count = |line: &str, ln: usize, what: &str| -> Result<usize, FacError> {
+        let n = parse_prefixed_int(line, ln)?;
+        if !(0..=100_000).contains(&n) {
+            return Err(FacError::ParseError {
+                line: ln,
+                msg: format!("implausible {what} count {n}"),
+            });
+        }
+        Ok(n as usize)
+    };
+
     // "7: Number of Application Dependent Integers"
     let (next_ln, num_ints_line) = next(ln)?;
     ln = next_ln;
-    let num_ints = parse_prefixed_int(num_ints_line, ln)?;
+    let num_ints = bounded_count(num_ints_line, ln, "app-dependent integer")?;
 
     // "0: Number of Application Dependent Reals"
     let (next_ln, num_reals_line) = next(ln)?;
     ln = next_ln;
-    let _num_reals = parse_prefixed_int(num_reals_line, ln)?;
+    let num_reals = bounded_count(num_reals_line, ln, "app-dependent real")?;
 
     // "0: Number of Application Dependent Strings"
     let (next_ln, num_strings_line) = next(ln)?;
     ln = next_ln;
-    let _num_strings = parse_prefixed_int(num_strings_line, ln)?;
+    let num_strings = bounded_count(num_strings_line, ln, "app-dependent string")?;
 
-    // Read app-depend integers (expect 7)
+    // Read app-depend integers (we use the first 7 — effect on/off flags).
     let mut app_ints = [0i32; 7];
-    for slot in app_ints.iter_mut().take((num_ints as usize).min(7)) {
+    for i in 0..num_ints {
         let (next_ln, line) = next(ln)?;
         ln = next_ln;
-        *slot = parse_prefixed_int(line, ln)?;
+        if let Some(slot) = app_ints.get_mut(i) {
+            *slot = parse_prefixed_int(line, ln)?;
+        }
+        // Extra integers beyond the 7 we model are still consumed so the reals/
+        // strings/EQ sections that follow stay aligned.
+    }
+    // Skip any declared reals and strings — we don't use them, but they occupy
+    // lines that the EQ section would otherwise be misread from.
+    for _ in 0..(num_reals + num_strings) {
+        let (next_ln, _) = next(ln)?;
+        ln = next_ln;
     }
 
     // EQ section
@@ -178,9 +201,16 @@ fn parse_prefixed_int(line: &str, ln: usize) -> Result<i32, FacError> {
 }
 
 /// Parse the leading "value: label" number, returning `None` for header lines
-/// (e.g. "Band 1") whose prefix isn't numeric.
+/// (e.g. "Band 1") whose prefix isn't numeric. Non-finite prefixes ("nan"/"inf",
+/// which `f64::parse` accepts) are rejected so they can't poison a band's
+/// frequency or gain — the line is treated as a non-value and skipped.
 fn numeric_prefix(line: &str) -> Option<f64> {
-    line.split(':').next()?.trim().parse::<f64>().ok()
+    line.split(':')
+        .next()?
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite())
 }
 
 #[cfg(test)]

@@ -47,6 +47,11 @@ const GAIN_RIDGE: f64 = 2e-3;
 const PEAK_COUNTS: [usize; 5] = [4, 6, 8, 10, 12];
 /// Max LM iterations per fit.
 const MAX_ITERS: usize = 250;
+/// Upper bound on target points fed to the optimiser. The fit cost is roughly
+/// O(points × params² × iters × fits), so an unbounded point list from a hostile
+/// preset is a CPU denial-of-service on load. Real AutoEq/REW exports are well
+/// under this; denser curves are uniformly downsampled, which the fit tolerates.
+const MAX_FIT_POINTS: usize = 512;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
@@ -119,13 +124,25 @@ pub fn graphic_eq_summary(content: &str) -> Option<GraphicEqSummary> {
 /// Returns `(preamp_db, bands)`: the broadband level lands in `preamp_db`, the
 /// shape in the bands. Returns an empty band list if there are too few points.
 pub fn fit_graphic_eq(points: &[(f64, f64)]) -> (f64, Vec<EqBand>) {
-    let pts: Vec<(f64, f64)> = points
+    let mut pts: Vec<(f64, f64)> = points
         .iter()
         .copied()
-        .filter(|(f, _)| *f > 0.0 && *f < FIT_SR / 2.0)
+        .filter(|(f, g)| f.is_finite() && *f > 0.0 && *f < FIT_SR / 2.0 && g.is_finite())
         .collect();
     if pts.len() < 3 {
         return (0.0, Vec::new());
+    }
+    // Bound optimiser work: downsample a too-dense curve uniformly (keep the
+    // endpoints so the fitted span still covers the full range).
+    if pts.len() > MAX_FIT_POINTS {
+        let stride = pts.len() / MAX_FIT_POINTS + 1;
+        let last = pts.len() - 1;
+        pts = pts
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i % stride == 0 || *i == last)
+            .map(|(_, p)| *p)
+            .collect();
     }
     let freqs: Vec<f64> = pts.iter().map(|(f, _)| *f).collect();
     let target: Vec<f64> = pts.iter().map(|(_, g)| *g).collect();
@@ -231,7 +248,7 @@ fn seed(freqs: &[f64], target: &[f64], n_peaks: usize) -> (f64, Vec<Filt>) {
         let (idx, &peak) = resid
             .iter()
             .enumerate()
-            .max_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).unwrap())
+            .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
             .unwrap();
         if peak.abs() < 0.05 {
             break;
@@ -577,6 +594,30 @@ mod tests {
         let at_peak = response_db(preamp, &bands, 4300.0);
         assert!(at_peak > 4.0, "peak only {at_peak:.1} dB");
         assert!(rms_against(preamp, &bands, &pts) < 0.6);
+    }
+
+    #[test]
+    fn non_finite_points_are_dropped_not_fitted() {
+        // A NaN gain among the points must not panic the seeder's max_by.
+        let pts = vec![
+            (20.0, -3.0),
+            (100.0, f64::NAN),
+            (1000.0, 0.0),
+            (5000.0, 2.0),
+            (f64::INFINITY, 1.0),
+        ];
+        let (_preamp, _bands) = fit_graphic_eq(&pts);
+    }
+
+    #[test]
+    fn dense_curve_is_downsampled_not_unbounded() {
+        // A pathologically dense curve must be bounded before the optimiser.
+        let pts: Vec<(f64, f64)> = (0..20_000)
+            .map(|i| (20.0 + i as f64, ((i % 7) as f64) - 3.0))
+            .collect();
+        let (_preamp, bands) = fit_graphic_eq(&pts);
+        // It still produces a fit without spinning on 20k points.
+        assert!(bands.len() <= 14);
     }
 
     #[test]
