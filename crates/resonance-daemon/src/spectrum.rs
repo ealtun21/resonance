@@ -34,11 +34,15 @@ pub async fn run(mut rx: rtrb::Consumer<f32>, state: SharedState) {
     const ATTACK: f32 = 0.0; // instant — track peaks immediately
     const RELEASE: f32 = 0.30; // snappier fall (less smear)
 
+    // Reused across iterations so the 40 Hz loop never allocates.
+    let mut fft_buf: Vec<Complex<f32>> = vec![Complex::new(0.0, 0.0); FFT_SIZE];
+
     let mut interval = tokio::time::interval(Duration::from_millis(25)); // ~40 fps
 
     loop {
         interval.tick().await;
 
+        // Always drain the ring so it can't back up, even while idle.
         let available = rx.slots();
         for _ in 0..available {
             if let Ok(s) = rx.pop() {
@@ -51,22 +55,32 @@ pub async fn run(mut rx: rtrb::Consumer<f32>, state: SharedState) {
             continue;
         }
 
+        // Skip the FFT entirely when no client has polled recently: the daemon
+        // runs continuously but the spectrum is only consumed while a TUI/GUI is
+        // open. Drain (above) keeps the ring healthy; we just don't spend cycles.
+        // Use the live chain rate so bins are labelled correctly at 44.1k etc.
+        // (was hardcoded 48k → ~9% bin-frequency error on a 44.1k device).
+        let (sr, watching) = {
+            let inner = state.0.lock().unwrap();
+            let watching = inner
+                .last_poll
+                .map(|t| t.elapsed() < Duration::from_millis(1500))
+                .unwrap_or(false);
+            let r = inner.chain.sample_rate;
+            (if r.is_finite() && r > 0.0 { r } else { 48000.0 }, watching)
+        };
+        if !watching {
+            continue;
+        }
+
         let start = write_pos % FFT_SIZE;
-        let mut fft_buf: Vec<Complex<f32>> = (0..FFT_SIZE)
-            .map(|i| {
-                let sample_idx = (start + i) % FFT_SIZE;
-                Complex::new(buf[sample_idx] * window[i], 0.0)
-            })
-            .collect();
+        for (i, slot) in fft_buf.iter_mut().enumerate() {
+            let sample_idx = (start + i) % FFT_SIZE;
+            *slot = Complex::new(buf[sample_idx] * window[i], 0.0);
+        }
 
         fft.process(&mut fft_buf);
 
-        // Use the live chain rate so bins are labelled correctly at 44.1k etc.
-        // (was hardcoded 48k → ~9% bin-frequency error on a 44.1k device).
-        let sr = {
-            let r = state.0.lock().unwrap().chain.sample_rate;
-            if r.is_finite() && r > 0.0 { r } else { 48000.0 }
-        };
         let hz_per_bin = sr / FFT_SIZE as f64;
         let norm = 2.0 / FFT_SIZE as f32;
 

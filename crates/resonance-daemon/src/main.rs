@@ -59,7 +59,13 @@ fn init_logging() {
     }));
 }
 
-#[tokio::main]
+// A single-threaded runtime is plenty: the daemon's async side is all low-rate
+// IPC and event handling, and the only real-time work (the audio callback) runs
+// on its own dedicated OS thread, not on tokio. The default multi-thread runtime
+// would otherwise spawn one worker per core — wasted stacks and idle scheduler
+// wakeups for no latency benefit. Blocking work (preset parsing) still uses
+// spawn_blocking's separate pool.
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     init_logging();
 

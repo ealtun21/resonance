@@ -31,8 +31,20 @@ serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"] }
 toml = "1.1"
 
-# Async / runtime
-tokio = { version = "1", features = ["full"] }
+# Async / runtime. The daemon is the only tokio user and runs a current-thread
+# runtime, so we enable exactly the features it needs rather than "full" (which
+# drags in the multi-thread scheduler, process, io-std, test-util, …). Smaller
+# build and binary.
+tokio = { version = "1", default-features = false, features = [
+    "rt",
+    "macros",
+    "net",
+    "sync",
+    "time",
+    "signal",
+    "io-util",
+    "fs",
+] }
 
 # TUI
 ratatui = "0.30"
