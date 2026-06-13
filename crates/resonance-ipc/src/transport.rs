@@ -25,6 +25,15 @@ pub fn write_msg<W: Write, T: serde::Serialize>(
     msg: &T,
 ) -> Result<(), TransportError> {
     let bytes = to_stdvec(msg)?;
+    // Enforce the same ceiling the reader does, before the `as u32` cast — so an
+    // oversized frame fails here with a clear error instead of being written and
+    // then rejected (or silently truncated past 4 GiB) on the far side.
+    if bytes.len() > MAX_MSG_LEN as usize {
+        return Err(TransportError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("message too large: {} bytes", bytes.len()),
+        )));
+    }
     let len = bytes.len() as u32;
     writer.write_all(&len.to_le_bytes())?;
     writer.write_all(&bytes)?;
