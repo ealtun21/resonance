@@ -12,6 +12,7 @@ use crate::theme::{Palette, Theme};
 use eframe::egui;
 use resonance_ipc::{
     BandState, BandType, Command, DaemonState, EffectsState, FxEffectId, Response, service,
+    transport::TransportError,
 };
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -424,9 +425,16 @@ fn spawn_ipc_worker(
                     let Some(c) = ipc.as_mut() else { break };
                     match msg {
                         WorkerCmd::Cmd(cmd) => {
-                            if c.send(cmd).is_err() {
-                                ipc = None;
-                                break;
+                            // A daemon-level rejection (Response::Error) is not a
+                            // dead connection — surface it and keep the socket.
+                            // Only a transport failure tears it down to reconnect.
+                            match c.send(cmd) {
+                                Ok(()) => {}
+                                Err(TransportError::Daemon(msg)) => worker_status(&shared, msg),
+                                Err(_) => {
+                                    ipc = None;
+                                    break;
+                                }
                             }
                         }
                         WorkerCmd::RefreshMeta => refresh_meta_now = true,
@@ -681,6 +689,12 @@ impl GuiApp {
         self.state = state;
         self.profiles = profiles;
         self.mappings = mappings;
+        // Drop lock pins that no longer name a valid band — a profile load or
+        // another client can shrink the band list, after which a stale pin would
+        // silently apply to a different band.
+        let bands = self.state.as_ref().map(|s| s.bands.len()).unwrap_or(0);
+        self.vlock = self.vlock.filter(|&i| i < bands);
+        self.hlock = self.hlock.filter(|&i| i < bands);
         if let Some(msg) = status {
             self.set_status(msg);
         }
@@ -2490,6 +2504,11 @@ impl GuiApp {
 
                         if ui.button("✕").on_hover_text("remove").clicked() {
                             self.queue_edit(Command::RemoveBand { index: i });
+                            // Keep the lock pins pointing at the same band after
+                            // the list shifts (or drop them if the pinned band
+                            // was the one removed).
+                            remap_pin_on_remove(&mut self.vlock, i);
+                            remap_pin_on_remove(&mut self.hlock, i);
                         }
                         ui.end_row();
                     }
@@ -3129,6 +3148,16 @@ fn nav_bar(ui: &mut egui::Ui, browser: &mut Browser) -> Option<String> {
     typed
 }
 
+/// Adjust a band-index lock pin after the band at `removed` is deleted: drop the
+/// pin if it was that band, decrement it if it sat above the removed index.
+fn remap_pin_on_remove(pin: &mut Option<usize>, removed: usize) {
+    match *pin {
+        Some(i) if i == removed => *pin = None,
+        Some(i) if i > removed => *pin = Some(i - 1),
+        _ => {}
+    }
+}
+
 fn nearest_band(
     state: &DaemonState,
     p: egui::Pos2,
@@ -3137,6 +3166,11 @@ fn nearest_band(
 ) -> Option<usize> {
     let mut best: Option<(usize, f32)> = None;
     for (i, b) in state.bands.iter().enumerate() {
+        // Disabled bands aren't drawn, so they must not be grabbable either —
+        // otherwise a drag/double-click lands on an invisible node.
+        if !b.enabled {
+            continue;
+        }
         let node = egui::pos2(x_of(curve::clampf_log(b.freq)), y_of(b.gain_db));
         let d = node.distance(p);
         if d < 14.0 && best.map(|(_, bd)| d < bd).unwrap_or(true) {
@@ -3317,7 +3351,10 @@ fn gain_bar(ui: &mut egui::Ui, db: f64, pal: &Palette) {
         ],
         egui::Stroke::new(1.0, pal.grid),
     );
-    let t = (db / GAIN_LIMIT).clamp(-1.0, 1.0) as f32;
+    // Scale to the FR graph's ±DB_RANGE so the bar length matches the curve's
+    // vertical extent (and the TUI's bar), not the much larger ±GAIN_LIMIT edit
+    // clamp — which made a typical ±6 dB edit read as a sliver.
+    let t = (db / curve::DB_RANGE).clamp(-1.0, 1.0) as f32;
     let half = rect.width() * 0.5 - 2.0;
     let w = t.abs() * half;
     if w >= 1.0 {

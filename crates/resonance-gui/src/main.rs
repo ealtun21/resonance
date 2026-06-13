@@ -141,7 +141,17 @@ fn spawn_daemon_detached() {
         }
     }
     match cmd.spawn() {
-        Ok(_child) => {
+        Ok(child) => {
+            // Reap the child when it eventually exits so it doesn't linger as a
+            // zombie for the GUI's lifetime. This fallback path has no service
+            // manager to own the process, so the GUI must.
+            std::thread::Builder::new()
+                .name("resonance-daemon-reaper".into())
+                .spawn(move || {
+                    let mut child = child;
+                    let _ = child.wait();
+                })
+                .ok();
             if !wait_for_daemon(std::time::Duration::from_secs(2)) {
                 eprintln!("GUI: daemon spawned but not reachable yet — GUI will retry");
             }
