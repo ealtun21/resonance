@@ -8,8 +8,10 @@
 # flatpak-cargo-generator.py comes from
 # https://github.com/flatpak/flatpak-builder-tools/tree/master/cargo
 #
-# NOTE: PipeWire access is granted via --socket=pipewire. The daemon (resonanced)
-# captures/plays system audio; the sandbox reaches it over the PipeWire socket.
+# NOTE: PipeWire access is granted by exposing the PipeWire runtime socket
+# (xdg-run/pipewire-0). The daemon (resonanced) captures/plays system audio over
+# it. There is no `--socket=pipewire` flatpak permission — that value makes
+# `flatpak build-finish` fail with "Unknown socket type".
 app-id: io.github.ealtun21.Resonance
 runtime: org.freedesktop.Platform
 runtime-version: '24.08'
@@ -19,7 +21,7 @@ sdk-extensions:
 command: resonance-gui
 
 finish-args:
-  - --socket=pipewire
+  - --filesystem=xdg-run/pipewire-0
   - --socket=wayland
   - --socket=fallback-x11
   - --device=dri

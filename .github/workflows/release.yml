@@ -60,15 +60,38 @@ jobs:
           # it from the release (not the tag tree), keeping the two in lockstep.
           ver="${GITHUB_REF_NAME#v}"
           name="resonance-${ver}-x86_64-linux"
-          sha="$(awk '{print $1}' "dist/$name.tar.gz.sha256")"
+          appid="io.github.ealtun21.Resonance"
           cp contrib/aur-bin/PKGBUILD dist/PKGBUILD
           # pkgver must match this release tag (it drives the download URL); the
           # in-repo PKGBUILD is just a template, the tag is the source of truth.
           sed -i "s/^pkgver=.*/pkgver=$ver/" dist/PKGBUILD
-          # Replace the first quoted 64-hex (sha256sums[0] = the tarball) only.
-          sed -i "0,/'[0-9a-f]\{64\}'/s//'$sha'/" dist/PKGBUILD
-          echo "stamped pkgver $ver + tarball sha256 $sha into dist/PKGBUILD"
-          grep -nE "^pkgver=|$sha" dist/PKGBUILD
+          # Recompute EVERY source checksum, in source=() order, from the files
+          # this tag actually ships (the raw/v$ver/contrib URLs resolve to these
+          # exact files). Previously only sha256sums[0] (the tarball) was stamped,
+          # so the four contrib-asset hashes went stale whenever those files
+          # changed — e.g. the metainfo on every release — and broke makepkg.
+          h0="$(awk '{print $1}' "dist/$name.tar.gz.sha256")"
+          h1="$(sha256sum "contrib/$appid.desktop" | cut -d' ' -f1)"
+          h2="$(sha256sum "contrib/$appid.svg" | cut -d' ' -f1)"
+          h3="$(sha256sum "contrib/$appid.metainfo.xml" | cut -d' ' -f1)"
+          h4="$(sha256sum "contrib/systemd/resonanced.service" | cut -d' ' -f1)"
+          awk -v h0="$h0" -v h1="$h1" -v h2="$h2" -v h3="$h3" -v h4="$h4" '
+            /^sha256sums=\(/ {
+              print "sha256sums=("
+              printf "    \x27%s\x27\n", h0
+              printf "    \x27%s\x27\n", h1
+              printf "    \x27%s\x27\n", h2
+              printf "    \x27%s\x27\n", h3
+              printf "    \x27%s\x27\n", h4
+              print ")"
+              skip = 1; next
+            }
+            skip && /^\)/ { skip = 0; next }
+            skip { next }
+            { print }
+          ' dist/PKGBUILD > dist/PKGBUILD.tmp && mv dist/PKGBUILD.tmp dist/PKGBUILD
+          echo "stamped pkgver $ver + all source checksums into dist/PKGBUILD"
+          grep -nE "^pkgver=|^sha256sums=|^    '[0-9a-f]{64}'" dist/PKGBUILD
 
       - name: Build RPM
         run: |

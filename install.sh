@@ -55,9 +55,12 @@ rootfs_readonly() {
     if command -v steamos-readonly >/dev/null 2>&1; then
         steamos-readonly status 2>/dev/null | grep -qiw enabled && return 0
     fi
-    # Field 4 of /proc/mounts is the comma-separated option list.
+    # Field 4 of /proc/mounts is the comma-separated option list. Match `ro`
+    # only as a whole option — `grep -w ro` also matches the `ro` inside the
+    # common `errors=remount-ro` (Debian/Ubuntu ext4), which is NOT a read-only
+    # mount and would wrongly force a home install on ordinary systems.
     awk '$2=="/" || $2=="/usr" { print $4 }' /proc/mounts 2>/dev/null \
-        | grep -qw ro && return 0
+        | grep -qE '(^|,)ro(,|$)' && return 0
     return 1
 }
 
@@ -380,6 +383,22 @@ main() {
             if install_arch_bin_remote; then return; fi
         fi
         info "Package-manager path unavailable; falling back to prebuilt binaries"
+    fi
+
+    # FROM_SOURCE=1 outside a checkout (and not handled by the Arch makepkg path
+    # above): clone the tag and build with cargo, matching the documented flag
+    # and the macOS source path. Without this, FROM_SOURCE was silently ignored
+    # on non-Arch Linux and prebuilt binaries were installed anyway.
+    if [[ "${FROM_SOURCE:-0}" == "1" ]]; then
+        command -v git   >/dev/null 2>&1 || err "git required for source install"
+        command -v cargo >/dev/null 2>&1 || err "cargo not found. Install Rust: https://rustup.rs"
+        local tmp; tmp="$(mktemp -d)"; _CLEANUP_DIR="$tmp"
+        local ver; ver="$(resolve_version)"
+        info "FROM_SOURCE=1 — cloning $REPO@$ver for a source build"
+        git -C "$tmp" clone --depth 1 --branch "$ver" "https://github.com/$REPO" src \
+            || err "git clone failed"
+        install_from_source "$tmp/src"
+        return
     fi
 
     install_prebuilt
