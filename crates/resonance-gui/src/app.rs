@@ -1724,6 +1724,12 @@ impl GuiApp {
 
     /// Settings menu: window-decoration (titlebar) mode.
     fn settings_menu(&mut self, ui: &mut egui::Ui) {
+        // The only setting here is the titlebar mode, which is forced to native
+        // on Windows (CSD has unreliable input there). Hide the whole menu so
+        // there's no dead control.
+        if cfg!(target_os = "windows") {
+            return;
+        }
         ui.menu_button("⚙", |ui| {
             ui.label("Titlebar");
             for m in TitlebarMode::ALL {
