@@ -345,6 +345,19 @@ pub struct GuiApp {
     /// viewport (so we only send the command when it changes).
     titlebar_mode: TitlebarMode,
     decorations_applied: Option<bool>,
+    /// Interactive titlebar regions (window buttons + brand) for the current
+    /// frame. The resize grips skip these so a click on a button isn't eaten by
+    /// the (foreground) resize border. Set by `titlebar`, read by
+    /// `csd_resize_grips`.
+    titlebar_hot_rects: Vec<egui::Rect>,
+    /// True while dragging the custom titlebar to move the window. We move it
+    /// manually (keeping the grabbed point under the cursor) rather than via the
+    /// OS modal move loop, which on Windows swallows the mouse-up and leaves
+    /// egui's pointer stuck "pressed" — freezing every click afterward.
+    moving_window: bool,
+    /// Cursor position (window-relative points) captured when the titlebar drag
+    /// began; the window moves so this point tracks the cursor.
+    move_grab: egui::Vec2,
     /// Matugen colour-file mtime + last poll, for live theme reload.
     matugen_mtime: Option<SystemTime>,
     last_matugen_check: Instant,
@@ -572,6 +585,9 @@ impl GuiApp {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_edit: None,
+            titlebar_hot_rects: Vec::new(),
+            moving_window: false,
+            move_grab: egui::Vec2::ZERO,
             clip_until: None,
             theme,
             palette: theme.palette(),
@@ -948,7 +964,7 @@ impl GuiApp {
     /// a drag on an edge/corner asks the backend to resize, replacing the native
     /// resize borders that `Decorations(false)` removes.
     fn csd_resize_grips(&self, ctx: &egui::Context) {
-        use egui::{CursorIcon as Cur, ResizeDirection as Dir, Sense, ViewportCommand};
+        use egui::{CursorIcon as Cur, ResizeDirection as Dir, Sense};
         // No resizing while maximized.
         if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
             return;
@@ -1012,7 +1028,17 @@ impl GuiApp {
                 Cur::ResizeSouthEast,
             ),
         ];
+        let pointer = ctx.pointer_latest_pos();
         for (name, rect, dir, cursor) in grips {
+            // Yield to the titlebar's window buttons / brand: when the pointer is
+            // over one of them, don't even create this (foreground) grip area, so
+            // the click reaches the button below instead of being swallowed by
+            // the resize border on the button's top edge.
+            if let Some(p) = pointer {
+                if rect.contains(p) && self.titlebar_hot_rects.iter().any(|r| r.contains(p)) {
+                    continue;
+                }
+            }
             egui::Area::new(egui::Id::new(("csd_grip", name)))
                 .order(egui::Order::Foreground)
                 .fixed_pos(rect.min)
@@ -1022,11 +1048,56 @@ impl GuiApp {
                     if resp.hovered() {
                         ui.ctx().set_cursor_icon(cursor);
                     }
-                    if resp.drag_started() {
-                        ui.ctx()
-                            .send_viewport_cmd(ViewportCommand::BeginResize(dir));
+                    // Resize manually by the per-frame pointer delta rather than
+                    // ViewportCommand::BeginResize: its OS modal resize loop eats
+                    // the mouse-up on Windows and leaves egui's pointer stuck
+                    // "pressed", which then swallows every subsequent click.
+                    if resp.dragged() {
+                        if let Some(ptr) = ui.ctx().input(|i| i.pointer.interact_pos()) {
+                            Self::manual_resize(ui.ctx(), dir, ptr);
+                        }
                     }
                 });
+        }
+    }
+
+    /// Resize the window so the dragged edge/corner snaps to the cursor (window-
+    /// relative `ptr`), keeping the opposite edge fixed. Manual — avoids
+    /// ViewportCommand::BeginResize's OS modal loop, which on Windows swallows
+    /// the mouse-up and freezes egui's pointer.
+    fn manual_resize(ctx: &egui::Context, dir: egui::ResizeDirection, ptr: egui::Pos2) {
+        use egui::ResizeDirection as D;
+        const FLOOR: egui::Vec2 = egui::vec2(500.0, 400.0);
+        let inner = ctx.content_rect().size();
+        let outer = ctx.input(|i| i.viewport().outer_rect);
+
+        let (mut nw, mut nh) = (inner.x, inner.y);
+        let (mut mvx, mut mvy) = (0.0f32, 0.0f32);
+        // Horizontal edge: right edge → cursor.x; left edge → cursor.x (opposite
+        // edge fixed, so the origin shifts by the width change).
+        match dir {
+            D::East | D::NorthEast | D::SouthEast => nw = ptr.x.max(FLOOR.x),
+            D::West | D::NorthWest | D::SouthWest => {
+                nw = (inner.x - ptr.x).max(FLOOR.x);
+                mvx = inner.x - nw;
+            }
+            _ => {}
+        }
+        // Vertical edge.
+        match dir {
+            D::South | D::SouthEast | D::SouthWest => nh = ptr.y.max(FLOOR.y),
+            D::North | D::NorthEast | D::NorthWest => {
+                nh = (inner.y - ptr.y).max(FLOOR.y);
+                mvy = inner.y - nh;
+            }
+            _ => {}
+        }
+
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(nw, nh)));
+        if (mvx != 0.0 || mvy != 0.0) && let Some(o) = outer {
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
+                o.min + egui::vec2(mvx, mvy),
+            ));
         }
     }
 }
@@ -1573,13 +1644,9 @@ impl GuiApp {
         let h = 30.0;
         let full = egui::vec2(ui.available_width(), h);
         let (rect, resp) = ui.allocate_exact_size(full, egui::Sense::click_and_drag());
-        if resp.drag_started_by(egui::PointerButton::Primary) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-        }
-        if resp.double_clicked_by(egui::PointerButton::Primary) {
-            let max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
-        }
+        // Drag-to-move / double-click-maximize are gated below (after the window
+        // buttons + brand are laid out) so a press on a control isn't turned into
+        // a window drag — which is what ate clicks on the close button.
 
         // Brand logo + title at the left (the title lives here, not the toolbar).
         // The brand doubles as the help button: click it to open the controls &
@@ -1684,6 +1751,51 @@ impl GuiApp {
         paint_glyph(ui.painter(), min.rect, "minimize", pal.neutral);
         if min.clicked() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        }
+
+        // Interactive regions the resize grips must yield to (a foreground grip
+        // would otherwise steal clicks on a button's top edge).
+        self.titlebar_hot_rects = vec![close.rect, max.rect, min.rect, brand_rect];
+        let over_control =
+            |p: egui::Pos2| self.titlebar_hot_rects.iter().any(|r| r.contains(p));
+
+        // Drag-to-move on the empty bar only (never when the press is on a window
+        // button or the brand/help hit-area). Move the window manually by the
+        // per-frame pointer delta instead of ViewportCommand::StartDrag, whose OS
+        // modal move loop eats the mouse-up on Windows and freezes egui's pointer
+        // (the cause of "the whole UI stops registering clicks after a drag").
+        if resp.drag_started_by(egui::PointerButton::Primary)
+            && resp.interact_pointer_pos().is_none_or(|p| !over_control(p))
+        {
+            // Capture where in the window the cursor grabbed; keep that point
+            // under the cursor as it moves (using window-relative pointer pos,
+            // not a per-frame delta, which would feed back as the window moves).
+            if let Some(p) = ctx.input(|i| i.pointer.interact_pos()) {
+                self.move_grab = p.to_vec2();
+                self.moving_window = true;
+            }
+        }
+        if !resp.dragged_by(egui::PointerButton::Primary) {
+            self.moving_window = false;
+        }
+        if self.moving_window {
+            if let (Some(pos), Some(outer)) = (
+                ctx.input(|i| i.pointer.interact_pos()),
+                ctx.input(|i| i.viewport().outer_rect),
+            ) {
+                let shift = pos.to_vec2() - self.move_grab;
+                if shift != egui::Vec2::ZERO {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(outer.min + shift));
+                }
+            }
+        }
+        if resp.double_clicked_by(egui::PointerButton::Primary)
+            && ctx
+                .pointer_interact_pos()
+                .is_none_or(|p| !over_control(p))
+        {
+            let maxed = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maxed));
         }
     }
 
