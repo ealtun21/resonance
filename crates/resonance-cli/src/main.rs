@@ -80,7 +80,7 @@ enum Sub {
         /// Output file path (e.g. ./my-eq.txt)
         path: String,
     },
-    /// List available PipeWire output sinks and the active one
+    /// List available output devices and the active one
     Devices,
     /// Set the active output device by name, or "auto" to follow the OS default
     Output {
@@ -118,8 +118,9 @@ enum Sub {
     },
     /// Send a raw shutdown signal to the daemon
     Shutdown,
-    /// Manage the resonanced user service (start/stop/autostart).
-    /// Backed by systemd on Linux, launchd on macOS.
+    /// Manage the resonanced user service (start/stop/autostart). Backed by
+    /// systemd (with an xdg-autostart fallback) on Linux, launchd on macOS, and
+    /// the Run registry key on Windows.
     Daemon {
         #[command(subcommand)]
         action: DaemonAction,
@@ -451,7 +452,7 @@ fn print_state(p: &Paint, s: &resonance_ipc::DaemonState) {
 fn print_devices(p: &Paint, s: &resonance_ipc::DaemonState) {
     println!("{}", p.bold("output sinks"));
     if s.available_sinks.is_empty() {
-        println!("  {}", p.dim("(none reported by PipeWire yet)"));
+        println!("  {}", p.dim("(no output devices reported yet)"));
     }
     for sink in &s.available_sinks {
         let active = s.active_output.as_deref() == Some(sink.as_str());

@@ -1,4 +1,4 @@
-.PHONY: check fmt clippy test build clean
+.PHONY: check fmt fmt-fix clippy test build clean
 
 check: fmt clippy test
 

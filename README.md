@@ -57,7 +57,7 @@ The repo ships a `PKGBUILD`. Run the same script **inside a checkout** and it
 builds a real pacman package instead of fetching prebuilts:
 
 ```sh
-./install.sh        # makepkg -si — tracked by pacman, removable with: sudo pacman -R resonance
+./install.sh        # makepkg -si — tracked by pacman, removable with: sudo pacman -R resonance-eq
 ```
 
 Or invoke makepkg directly:
@@ -89,10 +89,11 @@ anywhere that floor is met; `resonanced` additionally needs a running PipeWire.
 
 ### From source (any distro)
 
-Prerequisites (Arch/CachyOS):
+Prerequisites (Arch/CachyOS) — the `pipewire` package ships both libpipewire
+and the SPA headers/pkg-config files; `pkgconf` provides `pkg-config`:
 
 ```sh
-sudo pacman -S pipewire libspa-0.3 pkg-config
+sudo pacman -S pipewire pkgconf
 ```
 
 Build:
@@ -193,6 +194,24 @@ the same `enable / disable / start / stop / restart` commands as on Linux.
 - Logs (when running via launchd): `~/Library/Logs/resonance/`
 - Socket: `$TMPDIR/resonance.sock` (e.g. `/var/folders/.../T/resonance.sock`)
 
+### Windows
+
+Download the installer (`resonance-setup-x.y.z.exe`) from the
+[releases page](https://github.com/ealtun21/resonance/releases) and run it. It
+installs the daemon + clients, attaches the in-graph **Audio Processing Object
+(APO)** to your playback device, and sets `DisableProtectedAudioDG` so the
+unsigned APO loads. No virtual cable or kernel driver is involved.
+
+The daemon is the control plane only (it runs no audio on Windows — the APO does
+the DSP inside the Windows audio engine). Drive it with the same CLI/TUI/GUI as
+elsewhere; `resonance daemon enable` registers autostart via the Run registry
+key. Clients reach the daemon over a localhost TCP port (written to a
+`resonance.port` file under the per-user temp dir, `%TEMP%`) instead of a Unix
+socket.
+
+DRM/protected-audio apps may mute while the APO is active. Uninstall via
+*Add/Remove Programs*, which detaches the APO and restores the audio settings.
+
 ### Architecture
 
 - **Linux**: virtual sink "Resonance EQ" + pw_filter ↔ real device, set as
@@ -214,12 +233,46 @@ RUST_LOG=info resonanced
 Drive it with the CLI:
 
 ```sh
-resonance status
-resonance load /path/to/preset.fac
-resonance set fidelity 70         # 0–100
-resonance power on|off
-resonance preamp -3.5
+# State & effects
+resonance status                       # show power, preset, effects, EQ, meters
+resonance power on|off                 # master bypass
+resonance set fidelity 70              # effect intensity 0–100
+                                       #   (fidelity|ambience|surround|dynamic_boost|bass)
+resonance preamp -3.5                  # preamp gain in dB
+resonance reset                        # flat EQ, effects off, 0 dB preamp
+
+# Presets & profiles
+resonance load /path/to/preset.fac     # load a .fac / EqualizerAPO .txt
+resonance import preset.txt [name]     # parse + save as a profile (no load)
+resonance export my-eq.txt             # write current EQ as EqualizerAPO .txt
+resonance save <name>                  # save current state as a named profile
+resonance profile <name>               # load a saved profile
+resonance profiles                     # list saved profiles
+resonance rm-profile <name>            # delete a profile
+resonance rename <from> <to>           # rename a profile
+resonance list [dir]                   # list preset files (default: XDG library)
+resonance autoeq "HD 600"              # download an AutoEq correction + import it
+
+# Output devices & per-output mappings
+resonance devices                      # list output devices, mark the active one
+resonance output <name>|auto           # pin an output (or follow the system default)
+resonance map <profile>                # auto-load <profile> for the active output
+resonance unmap                        # remove the active output's mapping
+resonance maps                         # list output → profile mappings
+
+# A/B compare
+resonance store a|b                    # stash the current state into a slot
+resonance recall a|b                   # restore a stashed slot
+
+# Service control (systemd / launchd / Windows Run key)
+resonance daemon start|stop|restart|enable|disable|install|uninstall|status
+
+# Shell completions
+resonance completions bash|zsh|fish|elvish|powershell
 ```
+
+File paths (`load`/`import`/`export`/`list`) are resolved relative to your
+current shell directory, not the daemon's.
 
 Or use the interactive clients:
 
@@ -228,11 +281,14 @@ resonance-tui      # ratatui terminal UI
 resonance-gui      # egui desktop UI
 ```
 
-The daemon listens on a Unix socket. The default path is platform-aware:
+On Linux and macOS the daemon listens on a Unix socket; the default path is
+platform-aware:
 - Linux: `$XDG_RUNTIME_DIR/resonance.sock`
 - macOS: `$TMPDIR/resonance.sock`
 
-Override anywhere with `RESONANCE_SOCKET=/some/path`.
+Override either with `RESONANCE_SOCKET=/some/path`. On Windows the clients use a
+localhost TCP port instead (its number is stored in a `resonance.port` file under
+`%TEMP%`; `RESONANCE_SOCKET` overrides that path too).
 
 ## Architecture
 
