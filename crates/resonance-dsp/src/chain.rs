@@ -56,6 +56,11 @@ impl ProcessorChain {
             buf.iter_mut().for_each(|s| *s *= gain);
         }
 
+        // Band-major cascade: each biquad makes one pass over the buffer. The
+        // buffer is small enough to stay cache-resident across passes, so this
+        // keeps a single filter's coefficients+state hot per pass — measurably
+        // faster than a sample-major inner loop that cycles every band's state
+        // on each sample once the band count grows.
         for filter in &mut self.filters {
             let frames = buf.len() / channels;
             for frame in 0..frames {
@@ -273,6 +278,57 @@ mod tests {
         // No-op when unchanged.
         chain.rebind_sample_rate(44_100.0);
         assert_eq!(chain.sample_rate, 44_100.0);
+    }
+
+    #[test]
+    fn multi_band_cascade_is_order_equivalent() {
+        use crate::filter::{ApoFilter, FilterType};
+        // The sample-major cascade must produce bit-identical output to applying
+        // each band as a full sequential pass (filter-major), the obviously-
+        // correct reference.
+        let specs = [
+            (FilterType::Peaking, 100.0, 4.0, 1.0),
+            (FilterType::HighShelf, 8000.0, -3.0, 0.707),
+            (FilterType::Peaking, 1000.0, -5.0, 2.0),
+        ];
+        let mk = || {
+            let mut b = ProcessorChain::builder().channels(2).sample_rate(48_000.0);
+            for (ft, f, g, q) in specs {
+                b = b.add_filter(
+                    ApoFilter::builder()
+                        .filter_type(ft)
+                        .freq(f)
+                        .gain_db(g)
+                        .q(q)
+                        .enabled(true)
+                        .channels(2)
+                        .sample_rate(48_000.0)
+                        .build()
+                        .unwrap(),
+                );
+            }
+            b.build()
+        };
+        let input: Vec<f64> = (0..512).map(|i| ((i as f64) * 0.017).sin() * 0.6).collect();
+
+        // Reference: each band applied as its own full pass (filter-major).
+        let mut reference = input.clone();
+        let mut ref_chain = mk();
+        for fi in 0..ref_chain.filters.len() {
+            for frame in 0..(reference.len() / 2) {
+                for ch in 0..2 {
+                    let idx = frame * 2 + ch;
+                    reference[idx] = ref_chain.filters[fi].process_channel(reference[idx], ch);
+                }
+            }
+        }
+
+        let mut got = input.clone();
+        mk().process(&mut got);
+
+        for (a, b) in reference.iter().zip(&got) {
+            assert_eq!(a.to_bits(), b.to_bits(), "cascade reorder changed output");
+        }
     }
 
     #[test]
