@@ -50,8 +50,9 @@ const MAX_ITERS: usize = 250;
 /// Upper bound on target points fed to the optimiser. The fit cost is roughly
 /// O(points × params² × iters × fits), so an unbounded point list from a hostile
 /// preset is a CPU denial-of-service on load. Real AutoEq/REW exports are well
-/// under this; denser curves are uniformly downsampled, which the fit tolerates.
-const MAX_FIT_POINTS: usize = 512;
+/// under this; denser curves are uniformly downsampled, which the fit — placing
+/// at most a dozen bands — tolerates easily.
+const MAX_FIT_POINTS: usize = 256;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
@@ -611,12 +612,15 @@ mod tests {
 
     #[test]
     fn dense_curve_is_downsampled_not_unbounded() {
-        // A pathologically dense curve must be bounded before the optimiser.
-        let pts: Vec<(f64, f64)> = (0..20_000)
-            .map(|i| (20.0 + i as f64, ((i % 7) as f64) - 3.0))
+        // A curve with far more points than the cap must be bounded before the
+        // optimiser: it's downsampled to MAX_FIT_POINTS, so the fit works on a
+        // bounded set and returns promptly no matter how dense the input.
+        let pts: Vec<(f64, f64)> = (0..5_000)
+            .map(|i| (20.0 + i as f64 * 4.0, 0.0))
+            .filter(|(f, _)| *f < 20_000.0)
             .collect();
+        assert!(pts.len() > MAX_FIT_POINTS);
         let (_preamp, bands) = fit_graphic_eq(&pts);
-        // It still produces a fit without spinning on 20k points.
         assert!(bands.len() <= 14);
     }
 

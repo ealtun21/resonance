@@ -109,7 +109,9 @@ fn parse_filter_line(line: &str, ln: usize) -> Result<Option<EqBand>, ApoError> 
         match key {
             "Fc" => {
                 freq = parse_finite(
-                    tokens.next().ok_or_else(|| err(ln, "expected value after Fc"))?,
+                    tokens
+                        .next()
+                        .ok_or_else(|| err(ln, "expected value after Fc"))?,
                     ln,
                     "Fc",
                 )?;
@@ -117,7 +119,9 @@ fn parse_filter_line(line: &str, ln: usize) -> Result<Option<EqBand>, ApoError> 
             }
             "Gain" => {
                 gain_db = parse_finite(
-                    tokens.next().ok_or_else(|| err(ln, "expected value after Gain"))?,
+                    tokens
+                        .next()
+                        .ok_or_else(|| err(ln, "expected value after Gain"))?,
                     ln,
                     "Gain",
                 )?;
@@ -125,7 +129,9 @@ fn parse_filter_line(line: &str, ln: usize) -> Result<Option<EqBand>, ApoError> 
             }
             "Q" => {
                 q = parse_finite(
-                    tokens.next().ok_or_else(|| err(ln, "expected value after Q"))?,
+                    tokens
+                        .next()
+                        .ok_or_else(|| err(ln, "expected value after Q"))?,
                     ln,
                     "Q",
                 )?;
