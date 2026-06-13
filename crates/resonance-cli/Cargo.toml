@@ -15,7 +15,5 @@ path = "src/main.rs"
 resonance-ipc = { path = "../resonance-ipc" }
 clap = { workspace = true }
 clap_complete = { workspace = true }
-serde = { workspace = true }
-postcard = { workspace = true }
 anyhow = { workspace = true }
 ureq = { workspace = true }

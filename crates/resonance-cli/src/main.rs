@@ -42,6 +42,9 @@ enum Sub {
     /// Set preamp gain in dB
     Preamp {
         /// Gain in dB (e.g. -3.5)
+        // Negative values are the primary use case; without this clap reads the
+        // leading '-' as an unknown flag and rejects `resonance preamp -3.5`.
+        #[arg(allow_hyphen_values = true)]
         db: f64,
     },
     /// Save the current settings as a named profile
@@ -206,17 +209,31 @@ fn main() -> Result<()> {
 fn to_ipc_command(sub: Sub) -> Result<Command> {
     match sub {
         Sub::Status => Ok(Command::GetState),
-        Sub::Load { path } => Ok(Command::LoadPreset { path }),
-        Sub::List { dir } => Ok(Command::ListPresets { dir }),
+        Sub::Load { path } => Ok(Command::LoadPreset {
+            path: absolutize(path),
+        }),
+        Sub::List { dir } => Ok(Command::ListPresets {
+            dir: dir.map(absolutize),
+        }),
         Sub::Autoeq { .. } => unreachable!(),
         Sub::Power { state } => Ok(Command::SetPower {
             enabled: parse_bool(&state)?,
         }),
-        Sub::Preamp { db } => Ok(Command::SetPreamp { db }),
-        Sub::Set { effect, value } => Ok(Command::SetEffectIntensity {
-            effect: parse_effect(&effect)?,
-            value: value.min(100) as f64 / 100.0,
-        }),
+        Sub::Preamp { db } => {
+            if !db.is_finite() {
+                bail!("preamp must be a finite number, got '{db}'");
+            }
+            Ok(Command::SetPreamp { db })
+        }
+        Sub::Set { effect, value } => {
+            if value > 100 {
+                bail!("intensity must be 0–100, got {value}");
+            }
+            Ok(Command::SetEffectIntensity {
+                effect: parse_effect(&effect)?,
+                value: value as f64 / 100.0,
+            })
+        }
         Sub::Save { name } => Ok(Command::SaveProfile { name }),
         Sub::Profile { name } => Ok(Command::LoadProfile { name }),
         Sub::Profiles => Ok(Command::ListProfiles),
@@ -237,14 +254,19 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
             }
         }
         Sub::Reset => Ok(Command::Reset),
-        Sub::Export { path } => Ok(Command::ExportApo { path }),
+        Sub::Export { path } => Ok(Command::ExportApo {
+            path: absolutize(path),
+        }),
         Sub::Store { slot } => Ok(Command::StoreSlot {
             slot: parse_slot(&slot)?,
         }),
         Sub::Recall { slot } => Ok(Command::RecallSlot {
             slot: parse_slot(&slot)?,
         }),
-        Sub::Import { path, name } => Ok(Command::ImportPreset { path, name }),
+        Sub::Import { path, name } => Ok(Command::ImportPreset {
+            path: absolutize(path),
+            name,
+        }),
         Sub::Rename { from, to } => Ok(Command::RenameProfile { from, to }),
         Sub::Shutdown => Ok(Command::Shutdown),
         Sub::Daemon { .. } | Sub::Devices | Sub::Completions { .. } => unreachable!(),
@@ -499,8 +521,22 @@ impl Paint {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
+/// Resolve a path against the *client's* working directory so the daemon — which
+/// runs from a different cwd (often `/` under systemd) — operates on the file the
+/// user meant. Leaves absolute paths untouched; the shell already expands `~`.
+fn absolutize(path: String) -> String {
+    let p = std::path::Path::new(&path);
+    if p.is_absolute() {
+        return path;
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(p).to_string_lossy().into_owned(),
+        Err(_) => path,
+    }
+}
+
 fn parse_bool(s: &str) -> Result<bool> {
-    match s {
+    match s.to_ascii_lowercase().as_str() {
         "on" | "1" | "true" => Ok(true),
         "off" | "0" | "false" => Ok(false),
         _ => bail!("expected on/off, got '{s}'"),
