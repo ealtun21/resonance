@@ -223,6 +223,26 @@ impl TitlebarMode {
     }
 }
 
+/// Decide CSD from the *persisted* titlebar preference without a running app, so
+/// `main` can create the window already decoration-less. Toggling decorations at
+/// runtime (winit `set_decorations`) corrupts the client-area input mapping on
+/// Windows — clicks/drags then land off-target across the whole window — so the
+/// window must be born in the right state. Defaults to `Auto` (no stored value).
+pub(crate) fn saved_use_csd() -> bool {
+    eframe::storage_dir("Resonance")
+        .map(|d| d.join("app.ron"))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| {
+            // egui's kv storage is RON: `…"titlebar":"Custom"…`. Pull the value.
+            s.split("\"titlebar\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').nth(1).map(str::to_owned))
+        })
+        .map(|v| TitlebarMode::from_label(&v))
+        .unwrap_or(TitlebarMode::Auto)
+        .use_csd()
+}
+
 /// Heuristic: are we on a tiling WM where a client-side title bar and window
 /// buttons add nothing (the compositor owns geometry)? Checks well-known tiling
 /// compositors via their signature env vars and the desktop name.
@@ -603,7 +623,11 @@ impl GuiApp {
             service_busy: false,
             status_until: None,
             titlebar_mode,
-            decorations_applied: None,
+            // `main` already created the window with decorations matching this
+            // mode (see saved_use_csd), so record that state — the first frame
+            // then won't toggle decorations (a runtime toggle breaks Windows
+            // input mapping). Only a later mode CHANGE re-applies it.
+            decorations_applied: Some(!titlebar_mode.use_csd()),
             matugen_mtime: crate::theme::matugen_source_mtime(),
             last_matugen_check: Instant::now(),
             lower_tab: LowerTab::default(),

@@ -39,9 +39,15 @@ fn main() -> eframe::Result<()> {
         .spawn(ensure_daemon_running)
         .expect("spawn daemon supervisor thread");
 
+    // Create the window with the right decoration state up front. Toggling
+    // decorations at runtime corrupts winit's client-area input mapping on
+    // Windows (clicks/drags land off-target across the whole window), so a CSD
+    // launch must be born decoration-less rather than flipped on the first frame.
+    let csd = app::saved_use_csd();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Resonance")
+            .with_decorations(!csd)
             // Floor only — the real minimum width is computed at runtime from the
             // toolbar's measured content and pushed via `MinInnerSize`, so it
             // adapts to font/scale/device-name instead of a hardcoded value.
