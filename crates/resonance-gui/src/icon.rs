@@ -1,10 +1,7 @@
-//! Brand icon, shared by the window/taskbar icon (rasterised in `main.rs`) and
-//! the in-app titlebar logo (drawn with the egui painter). Both mirror
+//! Brand icon for the OS window/taskbar icon (rasterised in `main.rs`). Mirrors
 //! `contrib/io.github.ealtun21.Resonance.svg` so the app reads the same
 //! everywhere: a rounded purple tile, five teal→purple EQ bars, and a white
 //! response curve overlaid.
-
-use eframe::egui;
 
 // Brand colours straight from the SVG gradients.
 const BG_TOP: [u8; 3] = [0x2b, 0x22, 0x40];
@@ -54,54 +51,6 @@ fn curve_pts() -> Vec<(f32, f32)> {
         }
     }
     v
-}
-
-// ── egui painter (titlebar logo) ─────────────────────────────────────────────
-
-/// Paint the brand logo into `rect` with the egui painter (used by the titlebar).
-pub fn paint(painter: &egui::Painter, rect: egui::Rect) {
-    // Square sub-rect, centred, so the icon keeps its aspect ratio.
-    let s = rect.width().min(rect.height());
-    let o = egui::pos2(rect.center().x - s * 0.5, rect.center().y - s * 0.5);
-    let map = |x: f32, y: f32| egui::pos2(o.x + x / 128.0 * s, o.y + y / 128.0 * s);
-    let col = |c: [u8; 3]| egui::Color32::from_rgb(c[0], c[1], c[2]);
-
-    // Rounded background (solid mid-purple; the SVG's subtle gradient is lost on
-    // a tiny logo anyway).
-    let bg = egui::Rect::from_min_max(map(BG.0, BG.1), map(BG.0 + BG.2, BG.1 + BG.3));
-    painter.rect_filled(bg, BG_RX / 128.0 * s, col(lerp3(BG_TOP, BG_BOT, 0.5)));
-
-    // Bars with a vertical teal→purple gradient via per-vertex mesh colours.
-    for (x, y, w, h) in BARS {
-        let top = map(x, y);
-        let bot = map(x + w, y + h);
-        let mut mesh = egui::Mesh::default();
-        let tl = col(BAR_TOP);
-        let bl = col(BAR_BOT);
-        let i = mesh.vertices.len() as u32;
-        for (pos, c) in [
-            (egui::pos2(top.x, top.y), tl),
-            (egui::pos2(bot.x, top.y), tl),
-            (egui::pos2(bot.x, bot.y), bl),
-            (egui::pos2(top.x, bot.y), bl),
-        ] {
-            mesh.vertices.push(egui::epaint::Vertex {
-                pos,
-                uv: egui::epaint::WHITE_UV,
-                color: c,
-            });
-        }
-        mesh.indices
-            .extend_from_slice(&[i, i + 1, i + 2, i, i + 2, i + 3]);
-        painter.add(egui::Shape::mesh(mesh));
-    }
-
-    // White response curve.
-    let pts: Vec<egui::Pos2> = curve_pts().into_iter().map(|(x, y)| map(x, y)).collect();
-    let stroke = egui::Stroke::new((s * 0.04).max(1.0), egui::Color32::from_white_alpha(217));
-    for w in pts.windows(2) {
-        painter.line_segment([w[0], w[1]], stroke);
-    }
 }
 
 // ── raster (window / taskbar icon) ───────────────────────────────────────────

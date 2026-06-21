@@ -39,15 +39,14 @@ fn main() -> eframe::Result<()> {
         .spawn(ensure_daemon_running)
         .expect("spawn daemon supervisor thread");
 
-    // Create the window with the right decoration state up front. Toggling
-    // decorations at runtime corrupts winit's client-area input mapping on
-    // Windows (clicks/drags land off-target across the whole window), so a CSD
-    // launch must be born decoration-less rather than flipped on the first frame.
-    let csd = app::saved_use_csd();
+    // Native OS window decorations on every platform. The Windows native title
+    // bar is colour-themed at runtime via DWM (see app::native_titlebar). The
+    // old custom client-side titlebar was removed — a decoration-less winit
+    // window had unreliable client-area input (clicks/drags landing off-target).
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Resonance")
-            .with_decorations(!csd)
+            .with_decorations(true)
             // Floor only — the real minimum width is computed at runtime from the
             // toolbar's measured content and pushed via `MinInnerSize`, so it
             // adapts to font/scale/device-name instead of a hardcoded value.

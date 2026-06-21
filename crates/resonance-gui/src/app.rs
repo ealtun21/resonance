@@ -179,78 +179,6 @@ fn spawn_service_worker(
 /// this long so it stops reading like a permanent label.
 const STATUS_TTL: Duration = Duration::from_secs(4);
 
-/// How the window is decorated.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TitlebarMode {
-    /// Custom client-side titlebar on stacking WMs; native decorations on
-    /// tiling WMs (where window buttons / a drag bar are pointless).
-    Auto,
-    /// Always our custom client-side titlebar with window controls.
-    Custom,
-    /// Always the OS window decorations (no custom bar).
-    Native,
-}
-
-impl TitlebarMode {
-    const ALL: [TitlebarMode; 3] = [
-        TitlebarMode::Auto,
-        TitlebarMode::Custom,
-        TitlebarMode::Native,
-    ];
-
-    fn label(self) -> &'static str {
-        match self {
-            TitlebarMode::Auto => "Auto",
-            TitlebarMode::Custom => "Custom",
-            TitlebarMode::Native => "Native",
-        }
-    }
-
-    fn from_label(s: &str) -> TitlebarMode {
-        Self::ALL
-            .into_iter()
-            .find(|m| m.label() == s)
-            .unwrap_or(TitlebarMode::Auto)
-    }
-
-    /// Whether to draw our custom titlebar (and hide native decorations).
-    fn use_csd(self) -> bool {
-        // Never on Windows: a borderless (decoration-less) winit window there has
-        // unreliable client-area input — clicks/drags and even egui's own dialog
-        // buttons misbehave. The native title bar works perfectly and is themed
-        // to match via DWM (see native_titlebar). CSD remains for Linux (tiling
-        // WMs) and macOS.
-        if cfg!(target_os = "windows") {
-            return false;
-        }
-        match self {
-            TitlebarMode::Custom => true,
-            TitlebarMode::Native => false,
-            TitlebarMode::Auto => !is_tiling_wm(),
-        }
-    }
-}
-
-/// Decide CSD from the *persisted* titlebar preference without a running app, so
-/// `main` can create the window already decoration-less. Toggling decorations at
-/// runtime (winit `set_decorations`) corrupts the client-area input mapping on
-/// Windows — clicks/drags then land off-target across the whole window — so the
-/// window must be born in the right state. Defaults to `Auto` (no stored value).
-pub(crate) fn saved_use_csd() -> bool {
-    eframe::storage_dir("Resonance")
-        .map(|d| d.join("app.ron"))
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| {
-            // egui's kv storage is RON: `…"titlebar":"Custom"…`. Pull the value.
-            s.split("\"titlebar\"")
-                .nth(1)
-                .and_then(|rest| rest.split('"').nth(1).map(str::to_owned))
-        })
-        .map(|v| TitlebarMode::from_label(&v))
-        .unwrap_or(TitlebarMode::Auto)
-        .use_csd()
-}
-
 /// Theme the native Windows title bar via DWM so it matches the app instead of
 /// the default light/grey OS bar. Immersive dark mode works on Windows 10+; the
 /// exact caption/text colours apply on Windows 11 (22000+) and are harmless
@@ -306,42 +234,6 @@ mod native_titlebar {
         }
         true
     }
-}
-
-/// Heuristic: are we on a tiling WM where a client-side title bar and window
-/// buttons add nothing (the compositor owns geometry)? Checks well-known tiling
-/// compositors via their signature env vars and the desktop name.
-fn is_tiling_wm() -> bool {
-    use std::env::var;
-    if var("HYPRLAND_INSTANCE_SIGNATURE").is_ok()
-        || var("SWAYSOCK").is_ok()
-        || var("I3SOCK").is_ok()
-    {
-        return true;
-    }
-    const TILING: [&str; 10] = [
-        "i3",
-        "sway",
-        "hyprland",
-        "river",
-        "bspwm",
-        "dwm",
-        "qtile",
-        "awesome",
-        "xmonad",
-        "herbstluft",
-    ];
-    [
-        "XDG_CURRENT_DESKTOP",
-        "XDG_SESSION_DESKTOP",
-        "DESKTOP_SESSION",
-    ]
-    .iter()
-    .filter_map(|k| var(k).ok())
-    .any(|v| {
-        let v = v.to_ascii_lowercase();
-        TILING.iter().any(|n| v.contains(n))
-    })
 }
 
 /// Which of the three lower sections is visible when the window is too narrow
@@ -426,27 +318,10 @@ pub struct GuiApp {
     service_busy: bool,
     /// When the current `status` text should auto-clear (transient feedback).
     status_until: Option<Instant>,
-    /// Window-decoration mode + the last decoration value pushed to the
-    /// viewport (so we only send the command when it changes).
-    titlebar_mode: TitlebarMode,
-    decorations_applied: Option<bool>,
     /// Theme the native Windows title bar (via DWM) was last styled for; re-apply
     /// only when the theme changes. `None` until applied.
     #[cfg(target_os = "windows")]
     native_titlebar_theme: Option<Theme>,
-    /// Interactive titlebar regions (window buttons + brand) for the current
-    /// frame. The resize grips skip these so a click on a button isn't eaten by
-    /// the (foreground) resize border. Set by `titlebar`, read by
-    /// `csd_resize_grips`.
-    titlebar_hot_rects: Vec<egui::Rect>,
-    /// True while dragging the custom titlebar to move the window. We move it
-    /// manually (keeping the grabbed point under the cursor) rather than via the
-    /// OS modal move loop, which on Windows swallows the mouse-up and leaves
-    /// egui's pointer stuck "pressed" — freezing every click afterward.
-    moving_window: bool,
-    /// Cursor position (window-relative points) captured when the titlebar drag
-    /// began; the window moves so this point tracks the cursor.
-    move_grab: egui::Vec2,
     /// Matugen colour-file mtime + last poll, for live theme reload.
     matugen_mtime: Option<SystemTime>,
     last_matugen_check: Instant,
@@ -641,11 +516,6 @@ impl GuiApp {
             s.spacing.button_padding = egui::vec2(8.0, 3.0);
             s.spacing.interact_size.y = 22.0;
         });
-        let titlebar_mode = cc
-            .storage
-            .and_then(|s| s.get_string("titlebar"))
-            .map(|s| TitlebarMode::from_label(&s))
-            .unwrap_or(TitlebarMode::Auto);
         let (cmd_tx, ipc_rx) = std::sync::mpsc::channel::<WorkerCmd>();
         let shared = Arc::new(Mutex::new(GuiShared::default()));
         spawn_ipc_worker(ipc_rx, shared.clone(), cc.egui_ctx.clone());
@@ -674,9 +544,6 @@ impl GuiApp {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_edit: None,
-            titlebar_hot_rects: Vec::new(),
-            moving_window: false,
-            move_grab: egui::Vec2::ZERO,
             clip_until: None,
             theme,
             palette: theme.palette(),
@@ -691,12 +558,6 @@ impl GuiApp {
             service_rx,
             service_busy: false,
             status_until: None,
-            titlebar_mode,
-            // `main` already created the window with decorations matching this
-            // mode (see saved_use_csd), so record that state — the first frame
-            // then won't toggle decorations (a runtime toggle breaks Windows
-            // input mapping). Only a later mode CHANGE re-applies it.
-            decorations_applied: Some(!titlebar_mode.use_csd()),
             #[cfg(target_os = "windows")]
             native_titlebar_theme: None,
             matugen_mtime: crate::theme::matugen_source_mtime(),
@@ -840,7 +701,6 @@ impl eframe::App for GuiApp {
     /// `persist_egui_memory`).
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string("theme", self.theme.label().to_string());
-        storage.set_string("titlebar", self.titlebar_mode.label().to_string());
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -923,18 +783,6 @@ impl eframe::App for GuiApp {
                 let ctx = ui.ctx().clone();
                 self.set_theme(&ctx, Theme::Matugen);
             }
-        }
-
-        // Apply the window-decoration mode (custom titlebar ⇒ hide native
-        // decorations). Only send the viewport command when the value changes.
-        let csd = self.titlebar_mode.use_csd();
-        if self.decorations_applied != Some(!csd) {
-            self.decorations_applied = Some(!csd);
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::Decorations(!csd));
-        }
-        if csd {
-            egui::Panel::top("titlebar").show_inside(ui, |ui| self.titlebar(ui));
         }
 
         egui::Panel::top("toolbar").show_inside(ui, |ui| self.toolbar(ui));
@@ -1053,162 +901,8 @@ impl eframe::App for GuiApp {
         self.confirm_dialog(&ctx);
         self.help_dialog(&ctx);
 
-        // With native decorations off, the OS resize borders are gone — add our
-        // own edge/corner grips so the window can still be resized. Suppress them
-        // while a modal dialog/overlay is open: the grips are a foreground layer
-        // (above egui Windows), so they'd sit over and swallow clicks on the
-        // dialog's own controls — e.g. its close button.
-        let modal_open =
-            !matches!(self.dialog, Dialog::None) || self.confirm.is_some() || self.show_help;
-        if csd && !modal_open {
-            self.csd_resize_grips(&ctx);
-        }
-
         // Drive ~144 fps repaint so spectrum/curve stay smooth.
         ctx.request_repaint_after(FRAME_INTERVAL);
-    }
-}
-
-impl GuiApp {
-    /// Invisible resize grips around the window border (custom-titlebar mode):
-    /// a drag on an edge/corner asks the backend to resize, replacing the native
-    /// resize borders that `Decorations(false)` removes.
-    fn csd_resize_grips(&self, ctx: &egui::Context) {
-        use egui::{CursorIcon as Cur, ResizeDirection as Dir, Sense};
-        // No resizing while maximized.
-        if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
-            return;
-        }
-        let r = ctx.content_rect();
-        let b = 6.0; // grip thickness (px)
-        let p = egui::pos2;
-        let grips: [(&str, egui::Rect, Dir, Cur); 8] = [
-            (
-                "n",
-                egui::Rect::from_min_max(p(r.left() + b, r.top()), p(r.right() - b, r.top() + b)),
-                Dir::North,
-                Cur::ResizeNorth,
-            ),
-            (
-                "s",
-                egui::Rect::from_min_max(
-                    p(r.left() + b, r.bottom() - b),
-                    p(r.right() - b, r.bottom()),
-                ),
-                Dir::South,
-                Cur::ResizeSouth,
-            ),
-            (
-                "w",
-                egui::Rect::from_min_max(p(r.left(), r.top() + b), p(r.left() + b, r.bottom() - b)),
-                Dir::West,
-                Cur::ResizeWest,
-            ),
-            (
-                "e",
-                egui::Rect::from_min_max(
-                    p(r.right() - b, r.top() + b),
-                    p(r.right(), r.bottom() - b),
-                ),
-                Dir::East,
-                Cur::ResizeEast,
-            ),
-            (
-                "nw",
-                egui::Rect::from_min_max(r.left_top(), p(r.left() + b, r.top() + b)),
-                Dir::NorthWest,
-                Cur::ResizeNorthWest,
-            ),
-            (
-                "ne",
-                egui::Rect::from_min_max(p(r.right() - b, r.top()), p(r.right(), r.top() + b)),
-                Dir::NorthEast,
-                Cur::ResizeNorthEast,
-            ),
-            (
-                "sw",
-                egui::Rect::from_min_max(p(r.left(), r.bottom() - b), p(r.left() + b, r.bottom())),
-                Dir::SouthWest,
-                Cur::ResizeSouthWest,
-            ),
-            (
-                "se",
-                egui::Rect::from_min_max(p(r.right() - b, r.bottom() - b), r.right_bottom()),
-                Dir::SouthEast,
-                Cur::ResizeSouthEast,
-            ),
-        ];
-        let pointer = ctx.pointer_latest_pos();
-        for (name, rect, dir, cursor) in grips {
-            // Yield to the titlebar's window buttons / brand: when the pointer is
-            // over one of them, don't even create this (foreground) grip area, so
-            // the click reaches the button below instead of being swallowed by
-            // the resize border on the button's top edge.
-            if let Some(p) = pointer {
-                if rect.contains(p) && self.titlebar_hot_rects.iter().any(|r| r.contains(p)) {
-                    continue;
-                }
-            }
-            egui::Area::new(egui::Id::new(("csd_grip", name)))
-                .order(egui::Order::Foreground)
-                .fixed_pos(rect.min)
-                .interactable(true)
-                .show(ctx, |ui| {
-                    let resp = ui.allocate_rect(rect, Sense::drag());
-                    if resp.hovered() {
-                        ui.ctx().set_cursor_icon(cursor);
-                    }
-                    // Resize manually by the per-frame pointer delta rather than
-                    // ViewportCommand::BeginResize: its OS modal resize loop eats
-                    // the mouse-up on Windows and leaves egui's pointer stuck
-                    // "pressed", which then swallows every subsequent click.
-                    if resp.dragged() {
-                        if let Some(ptr) = ui.ctx().input(|i| i.pointer.interact_pos()) {
-                            Self::manual_resize(ui.ctx(), dir, ptr);
-                        }
-                    }
-                });
-        }
-    }
-
-    /// Resize the window so the dragged edge/corner snaps to the cursor (window-
-    /// relative `ptr`), keeping the opposite edge fixed. Manual — avoids
-    /// ViewportCommand::BeginResize's OS modal loop, which on Windows swallows
-    /// the mouse-up and freezes egui's pointer.
-    fn manual_resize(ctx: &egui::Context, dir: egui::ResizeDirection, ptr: egui::Pos2) {
-        use egui::ResizeDirection as D;
-        const FLOOR: egui::Vec2 = egui::vec2(500.0, 400.0);
-        let inner = ctx.content_rect().size();
-        let outer = ctx.input(|i| i.viewport().outer_rect);
-
-        let (mut nw, mut nh) = (inner.x, inner.y);
-        let (mut mvx, mut mvy) = (0.0f32, 0.0f32);
-        // Horizontal edge: right edge → cursor.x; left edge → cursor.x (opposite
-        // edge fixed, so the origin shifts by the width change).
-        match dir {
-            D::East | D::NorthEast | D::SouthEast => nw = ptr.x.max(FLOOR.x),
-            D::West | D::NorthWest | D::SouthWest => {
-                nw = (inner.x - ptr.x).max(FLOOR.x);
-                mvx = inner.x - nw;
-            }
-            _ => {}
-        }
-        // Vertical edge.
-        match dir {
-            D::South | D::SouthEast | D::SouthWest => nh = ptr.y.max(FLOOR.y),
-            D::North | D::NorthEast | D::NorthWest => {
-                nh = (inner.y - ptr.y).max(FLOOR.y);
-                mvy = inner.y - nh;
-            }
-            _ => {}
-        }
-
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(nw, nh)));
-        if (mvx != 0.0 || mvy != 0.0) && let Some(o) = outer {
-            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
-                o.min + egui::vec2(mvx, mvy),
-            ));
-        }
     }
 }
 
@@ -1239,7 +933,6 @@ impl GuiApp {
                 self.daemon_menu(ui);
                 ui.separator();
                 self.theme_menu(ui);
-                self.settings_menu(ui);
                 self.tb_reset(ui);
                 ui.separator();
                 if let Some(s) = &state {
@@ -1308,7 +1001,6 @@ impl GuiApp {
                 tb_cell(ui, "menus", mid_w, TB_ROW_H, |ui| {
                     self.daemon_menu(ui);
                     self.theme_menu(ui);
-                    self.settings_menu(ui);
                 });
             });
             ui.separator();
@@ -1719,199 +1411,6 @@ impl GuiApp {
             });
         if sel != self.theme {
             self.set_theme(&ctx, sel);
-        }
-    }
-
-    /// Settings menu: window-decoration (titlebar) mode.
-    fn settings_menu(&mut self, ui: &mut egui::Ui) {
-        // The only setting here is the titlebar mode, which is forced to native
-        // on Windows (CSD has unreliable input there). Hide the whole menu so
-        // there's no dead control.
-        if cfg!(target_os = "windows") {
-            return;
-        }
-        ui.menu_button("⚙", |ui| {
-            ui.label("Titlebar");
-            for m in TitlebarMode::ALL {
-                let hint = match m {
-                    TitlebarMode::Auto => "custom bar, native on tiling WMs",
-                    TitlebarMode::Custom => "always our titlebar",
-                    TitlebarMode::Native => "always OS decorations",
-                };
-                if ui
-                    .selectable_label(self.titlebar_mode == m, m.label())
-                    .on_hover_text(hint)
-                    .clicked()
-                {
-                    self.titlebar_mode = m;
-                    ui.close();
-                }
-            }
-        });
-    }
-
-    /// Custom client-side titlebar: app logo + title + drag-to-move + window
-    /// controls. Shown only when `use_csd()` (native decorations are off).
-    fn titlebar(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        let pal = self.palette;
-        // Reserve a fixed-height strip and interact with its whole area for
-        // drag-to-move / double-click-maximize.
-        let h = 30.0;
-        let full = egui::vec2(ui.available_width(), h);
-        let (rect, resp) = ui.allocate_exact_size(full, egui::Sense::click_and_drag());
-        // Drag-to-move / double-click-maximize are gated below (after the window
-        // buttons + brand are laid out) so a press on a control isn't turned into
-        // a window drag — which is what ate clicks on the close button.
-
-        // Brand logo + title at the left (the title lives here, not the toolbar).
-        // The brand doubles as the help button: click it to open the controls &
-        // shortcuts overlay.
-        let pad = 8.0;
-        let logo = egui::Rect::from_min_size(
-            egui::pos2(rect.left() + pad, rect.center().y - 9.0),
-            egui::vec2(18.0, 18.0),
-        );
-        let title_pos = egui::pos2(logo.right() + 8.0, rect.center().y);
-        let galley = ui.painter().layout_no_wrap(
-            "Resonance".to_owned(),
-            egui::FontId::proportional(14.0),
-            pal.neutral,
-        );
-        // Clickable hit-area spanning the logo + the title text.
-        let brand_rect = egui::Rect::from_min_max(
-            logo.left_top(),
-            egui::pos2(title_pos.x + galley.size().x, rect.bottom()),
-        );
-        let brand = ui.interact(
-            brand_rect,
-            egui::Id::new("titlebar_brand_help"),
-            egui::Sense::click(),
-        );
-        if brand.clicked() {
-            self.show_help = !self.show_help;
-        }
-        if brand.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        let title_col = if brand.hovered() {
-            pal.highlight
-        } else {
-            pal.neutral
-        };
-        crate::icon::paint(ui.painter(), logo);
-        ui.painter().text(
-            title_pos,
-            egui::Align2::LEFT_CENTER,
-            "Resonance",
-            egui::FontId::proportional(14.0),
-            title_col,
-        );
-        brand.on_hover_text("controls & shortcuts (F1)");
-
-        // Window-control buttons at the right edge: close, maximize, minimize.
-        let bw = 30.0;
-        let btn_rect = |slot: usize| {
-            let right = rect.right() - slot as f32 * bw;
-            egui::Rect::from_min_max(
-                egui::pos2(right - bw, rect.top()),
-                egui::pos2(right, rect.bottom()),
-            )
-        };
-        let maxed = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-
-        // Close (slot 0).
-        let close = ui.interact(
-            btn_rect(0),
-            egui::Id::new("titlebtn_close"),
-            egui::Sense::click(),
-        );
-        if close.hovered() {
-            ui.painter().rect_filled(close.rect, 0.0, pal.cut);
-        }
-        paint_glyph(ui.painter(), close.rect, "close", egui::Color32::WHITE);
-        if close.clicked() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        }
-
-        // Maximize / restore (slot 1).
-        let max = ui.interact(
-            btn_rect(1),
-            egui::Id::new("titlebtn_max"),
-            egui::Sense::click(),
-        );
-        if max.hovered() {
-            ui.painter()
-                .rect_filled(max.rect, 0.0, pal.grid.gamma_multiply(0.8));
-        }
-        paint_glyph(
-            ui.painter(),
-            max.rect,
-            if maxed { "restore" } else { "maximize" },
-            pal.neutral,
-        );
-        if max.clicked() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maxed));
-        }
-
-        // Minimize (slot 2).
-        let min = ui.interact(
-            btn_rect(2),
-            egui::Id::new("titlebtn_min"),
-            egui::Sense::click(),
-        );
-        if min.hovered() {
-            ui.painter()
-                .rect_filled(min.rect, 0.0, pal.grid.gamma_multiply(0.8));
-        }
-        paint_glyph(ui.painter(), min.rect, "minimize", pal.neutral);
-        if min.clicked() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-        }
-
-        // Interactive regions the resize grips must yield to (a foreground grip
-        // would otherwise steal clicks on a button's top edge).
-        self.titlebar_hot_rects = vec![close.rect, max.rect, min.rect, brand_rect];
-        let over_control =
-            |p: egui::Pos2| self.titlebar_hot_rects.iter().any(|r| r.contains(p));
-
-        // Drag-to-move on the empty bar only (never when the press is on a window
-        // button or the brand/help hit-area). Move the window manually by the
-        // per-frame pointer delta instead of ViewportCommand::StartDrag, whose OS
-        // modal move loop eats the mouse-up on Windows and freezes egui's pointer
-        // (the cause of "the whole UI stops registering clicks after a drag").
-        if resp.drag_started_by(egui::PointerButton::Primary)
-            && resp.interact_pointer_pos().is_none_or(|p| !over_control(p))
-        {
-            // Capture where in the window the cursor grabbed; keep that point
-            // under the cursor as it moves (using window-relative pointer pos,
-            // not a per-frame delta, which would feed back as the window moves).
-            if let Some(p) = ctx.input(|i| i.pointer.interact_pos()) {
-                self.move_grab = p.to_vec2();
-                self.moving_window = true;
-            }
-        }
-        if !resp.dragged_by(egui::PointerButton::Primary) {
-            self.moving_window = false;
-        }
-        if self.moving_window {
-            if let (Some(pos), Some(outer)) = (
-                ctx.input(|i| i.pointer.interact_pos()),
-                ctx.input(|i| i.viewport().outer_rect),
-            ) {
-                let shift = pos.to_vec2() - self.move_grab;
-                if shift != egui::Vec2::ZERO {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(outer.min + shift));
-                }
-            }
-        }
-        if resp.double_clicked_by(egui::PointerButton::Primary)
-            && ctx
-                .pointer_interact_pos()
-                .is_none_or(|p| !over_control(p))
-        {
-            let maxed = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maxed));
         }
     }
 
@@ -3493,59 +2992,6 @@ fn centered<R>(ui: &mut egui::Ui, id_src: &str, add: impl FnOnce(&mut egui::Ui) 
     ui.ctx()
         .data_mut(|d| d.insert_temp(id, inner.response.rect.width()));
     inner.inner
-}
-
-/// Paint a window-control glyph centred in `rect`. The bundled icon font lacks
-/// minimize/maximize/restore glyphs, so draw them as line art.
-fn paint_glyph(painter: &egui::Painter, rect: egui::Rect, kind: &str, color: egui::Color32) {
-    let c = rect.center();
-    let s = 5.0;
-    let stroke = egui::Stroke::new(1.4, color);
-    match kind {
-        "minimize" => {
-            painter.line_segment(
-                [
-                    egui::pos2(c.x - s, c.y + 0.5),
-                    egui::pos2(c.x + s, c.y + 0.5),
-                ],
-                stroke,
-            );
-        }
-        "maximize" => {
-            painter.rect_stroke(
-                egui::Rect::from_center_size(c, egui::vec2(2.0 * s, 2.0 * s)),
-                0.0,
-                stroke,
-                egui::StrokeKind::Inside,
-            );
-        }
-        "restore" => {
-            let sq = egui::Rect::from_center_size(c, egui::vec2(1.8 * s, 1.8 * s));
-            painter.rect_stroke(
-                sq.translate(egui::vec2(-1.5, 1.5)),
-                0.0,
-                stroke,
-                egui::StrokeKind::Inside,
-            );
-            painter.rect_stroke(
-                sq.translate(egui::vec2(1.5, -1.5)),
-                0.0,
-                stroke,
-                egui::StrokeKind::Inside,
-            );
-        }
-        "close" => {
-            painter.line_segment(
-                [egui::pos2(c.x - s, c.y - s), egui::pos2(c.x + s, c.y + s)],
-                stroke,
-            );
-            painter.line_segment(
-                [egui::pos2(c.x - s, c.y + s), egui::pos2(c.x + s, c.y - s)],
-                stroke,
-            );
-        }
-        _ => {}
-    }
 }
 
 /// A colour that contrasts strongly with `bg`: near-white on dark backgrounds,
