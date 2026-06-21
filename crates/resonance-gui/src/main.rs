@@ -9,7 +9,9 @@ mod browser;
 mod curve;
 mod icon;
 mod ipc;
+mod state;
 mod theme;
+mod ui;
 
 use app::GuiApp;
 
