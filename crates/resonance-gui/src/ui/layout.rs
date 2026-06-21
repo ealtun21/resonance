@@ -117,7 +117,7 @@ impl GuiApp {
         // resizable — default_size only applies until the user drags a splitter.
         let fr_h = (ui.available_height() * 0.52).max(70.0);
         let spec_h = (ui.available_height() * 0.14).max(28.0);
-        egui::Panel::top("fr")
+        egui::Panel::top("fr_panel")
             .resizable(true)
             .default_size(fr_h)
             .min_size(70.0)
@@ -126,7 +126,7 @@ impl GuiApp {
                     self.eq_curve(ui, s);
                 }
             });
-        egui::Panel::bottom("spectrum")
+        egui::Panel::bottom("spectrum_panel")
             .resizable(true)
             .default_size(spec_h)
             .min_size(28.0)
@@ -147,7 +147,7 @@ impl GuiApp {
     /// Wide layout: fixed-width Effects (left) + Devices/Profiles (right) side
     /// panels; EQ bands (central) takes the rest so its table never squishes.
     fn lower_columns(&mut self, ui: &mut egui::Ui, state: &Option<DaemonState>) {
-        egui::Panel::left("fx_pane")
+        egui::Panel::left("effects_panel")
             .resizable(false)
             .default_size(EFFECTS_W)
             .show_inside(ui, |ui| {
@@ -155,7 +155,7 @@ impl GuiApp {
                     padded_scroll(ui, "effects_scroll", |ui| self.effects_section(ui, s));
                 }
             });
-        egui::Panel::right("dev_pane")
+        egui::Panel::right("devices_panel")
             .resizable(false)
             .default_size(DEVICES_W)
             .show_inside(ui, |ui| {
