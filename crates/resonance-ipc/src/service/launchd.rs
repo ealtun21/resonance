@@ -198,14 +198,28 @@ fn install_with(enabled: bool) -> io::Result<()> {
     ensure_log_dir()?;
     std::fs::write(&path, plist_text(enabled))?;
 
-    // If a previous version was already loaded, bootout so the new plist is
-    // honoured on the next bootstrap. Ignore failures (not loaded → fine).
+    // If a previous version is already loaded, bootout so the new plist is
+    // honoured on re-bootstrap, then wait for the domain to actually drop the
+    // label: bootstrapping while it's still registered fails with "Bootstrap
+    // failed: 5: Input/output error" (a race seen when upgrading over a running
+    // daemon). Bounded (~500 ms) so a wedged service can't hang install.
     let _ = launchctl(&["bootout", &service_target()]);
+    for _ in 0..50 {
+        if !is_loaded() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     let plist = path.to_string_lossy().into_owned();
-    check_launchctl(
-        launchctl(&["bootstrap", &domain_target(), &plist])?,
-        "bootstrap",
-    )
+    let out = launchctl(&["bootstrap", &domain_target(), &plist])?;
+    // Tolerate a residual bootstrap race: if the service ended up loaded anyway,
+    // the new plist is in effect, so treat it as success rather than surfacing a
+    // spurious "already bootstrapped" I/O error.
+    if out.status.success() || is_loaded() {
+        Ok(())
+    } else {
+        check_launchctl(out, "bootstrap")
+    }
 }
 
 pub fn install() -> io::Result<()> {
