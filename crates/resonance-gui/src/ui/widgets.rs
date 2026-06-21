@@ -32,7 +32,36 @@ pub(crate) fn install_symbol_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// A collapsible section card for the narrow-window accordion layout. `id` keys
+/// A rounded section card: a surface one tier above the panel, faintly bordered,
+/// with an accent title. Visually separates the lower sections in the wide
+/// 3-column layout (the title is supplied here, not by the section body).
+pub(crate) fn section_card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+    let (fill, stroke, accent) = {
+        let v = ui.visuals();
+        (
+            v.faint_bg_color,
+            v.widgets.noninteractive.bg_stroke,
+            v.hyperlink_color,
+        )
+    };
+    egui::Frame::default()
+        .fill(fill)
+        .stroke(stroke)
+        .corner_radius(egui::CornerRadius::same(8))
+        .inner_margin(egui::Margin::same(12))
+        .show(ui, |ui| {
+            // Fill the column width instead of shrinking to content — otherwise a
+            // narrow card starves the bands table of width, which then collapses
+            // its columns and narrows further (a feedback loop).
+            ui.set_min_width(ui.available_width());
+            ui.label(egui::RichText::new(title).strong().size(14.5).color(accent));
+            ui.add_space(7.0);
+            add(ui);
+        });
+}
+
+/// A collapsible section card for the narrow-window accordion layout: same card
+/// surface as [`section_card`] but the title is a `CollapsingHeader`. `id` keys
 /// the persisted open/closed state; `default_open` applies only the first time
 /// the id is seen, after which egui restores the user's last choice.
 pub(crate) fn accordion(
@@ -42,18 +71,33 @@ pub(crate) fn accordion(
     default_open: bool,
     body: impl FnOnce(&mut egui::Ui),
 ) {
-    egui::CollapsingHeader::new(egui::RichText::new(title).heading().size(15.0))
-        .id_salt(id)
-        .default_open(default_open)
+    let (fill, stroke, accent) = {
+        let v = ui.visuals();
+        (
+            v.faint_bg_color,
+            v.widgets.noninteractive.bg_stroke,
+            v.hyperlink_color,
+        )
+    };
+    egui::Frame::default()
+        .fill(fill)
+        .stroke(stroke)
+        .corner_radius(egui::CornerRadius::same(8))
+        .inner_margin(egui::Margin::symmetric(12, 8))
+        .outer_margin(egui::Margin {
+            bottom: 8,
+            ..Default::default()
+        })
         .show(ui, |ui| {
-            egui::Frame::default()
-                .inner_margin(egui::Margin {
-                    left: 2,
-                    right: 2,
-                    top: 4,
-                    bottom: 8,
-                })
-                .show(ui, body);
+            egui::CollapsingHeader::new(
+                egui::RichText::new(title).strong().size(14.5).color(accent),
+            )
+            .id_salt(id)
+            .default_open(default_open)
+            .show(ui, |ui| {
+                ui.add_space(2.0);
+                body(ui);
+            });
         });
 }
 

@@ -3,7 +3,7 @@
 //! lower area).
 
 use crate::app::{GuiApp, ServiceAction, ServiceFn};
-use crate::ui::widgets::{accordion, padded_scroll};
+use crate::ui::widgets::{accordion, padded_scroll, section_card};
 use eframe::egui;
 use resonance_ipc::{DaemonState, service};
 
@@ -149,21 +149,25 @@ impl GuiApp {
     fn lower_columns(&mut self, ui: &mut egui::Ui, state: &Option<DaemonState>) {
         egui::Panel::left("effects_panel")
             .resizable(false)
-            .default_size(EFFECTS_W)
+            .exact_size(EFFECTS_W)
             .show_inside(ui, |ui| {
                 if let Some(s) = state {
-                    padded_scroll(ui, "effects_scroll", |ui| self.effects_section(ui, s));
+                    padded_scroll(ui, "effects_scroll", |ui| {
+                        section_card(ui, "Effects", |ui| self.effects_section(ui, s))
+                    });
                 }
             });
         egui::Panel::right("devices_panel")
             .resizable(false)
-            .default_size(DEVICES_W)
+            .exact_size(DEVICES_W)
             .show_inside(ui, |ui| {
                 padded_scroll(ui, "side", |ui| self.devices_profiles(ui));
             });
         egui::CentralPanel::default().show_inside(ui, |ui| {
             if let Some(s) = state {
-                padded_scroll(ui, "bands_scroll", |ui| self.bands_section(ui, s));
+                padded_scroll(ui, "bands_scroll", |ui| {
+                    section_card(ui, "EQ bands", |ui| self.bands_section(ui, s))
+                });
             }
         });
     }

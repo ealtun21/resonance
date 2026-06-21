@@ -2,7 +2,7 @@
 
 use crate::app::GuiApp;
 use crate::state::Confirm;
-use crate::ui::widgets::centered;
+use crate::ui::widgets::{centered, section_card};
 use eframe::egui;
 use resonance_ipc::{Command, DaemonState};
 
@@ -10,17 +10,17 @@ impl GuiApp {
     // ── Right column: devices → profiles + profile list ─────────────────────
 
     pub(crate) fn devices_profiles(&mut self, ui: &mut egui::Ui) {
-        self.device_mapping_section(ui);
-        ui.add_space(8.0);
-        ui.separator();
-        self.profiles_panel(ui);
+        section_card(ui, "Device Profile Mapping", |ui| {
+            self.device_mapping_section(ui)
+        });
+        ui.add_space(10.0);
+        section_card(ui, "Profiles", |ui| self.profiles_panel(ui));
     }
 
     /// Device → profile mapping table: every output device we've ever seen, each
     /// with a profile dropdown. The active device auto-loads its mapped one.
     pub(crate) fn device_mapping_section(&mut self, ui: &mut egui::Ui) {
         let state = self.state.clone();
-        ui.vertical_centered(|ui| ui.heading("Device Profile Mapping"));
         if let Some(s) = &state {
             centered(ui, "dev_body", |ui| self.device_table(ui, s));
         } else {
@@ -28,9 +28,8 @@ impl GuiApp {
         }
     }
 
-    /// Saved profiles list (heading + the save/load/rename rows).
+    /// Saved profiles list (the save/load/rename rows).
     pub(crate) fn profiles_panel(&mut self, ui: &mut egui::Ui) {
-        ui.vertical_centered(|ui| ui.heading("Profiles"));
         centered(ui, "profiles_body", |ui| self.profiles_section(ui));
     }
 

@@ -104,13 +104,17 @@ impl GuiApp {
                 0.0,
                 egui::Color32::from_rgba_unmultiplied(r, g, b, alpha),
             );
-            painter.text(
-                egui::pos2((xl + xr) * 0.5, plot.top() + 1.0),
-                egui::Align2::CENTER_TOP,
-                label,
-                egui::FontId::monospace(8.0),
-                egui::Color32::from_rgba_unmultiplied(r, g, b, 150),
-            );
+            // Only label a region wide enough to fit the text, so the labels don't
+            // collide ("presmid treble air") when the graph is narrow.
+            if xr - xl > label.len() as f32 * 5.2 + 6.0 {
+                painter.text(
+                    egui::pos2((xl + xr) * 0.5, plot.top() + 1.0),
+                    egui::Align2::CENTER_TOP,
+                    label,
+                    egui::FontId::monospace(8.0),
+                    egui::Color32::from_rgba_unmultiplied(r, g, b, 150),
+                );
+            }
         }
 
         // Horizontal dB grid lines at multiples of the step within ±range.
@@ -138,20 +142,26 @@ impl GuiApp {
                 label_col,
             );
         }
-        // Vertical frequency grid + labels.
+        // Vertical frequency grid + labels. Always draw the gridline, but skip a
+        // label when it would crowd the previous one (keeps "80 100 150 200"
+        // from merging on a narrow graph).
+        let mut last_label_x = f32::NEG_INFINITY;
         for (logf, label) in curve::x_axis_ticks_range(vlo, vhi) {
             let x = x_of(logf);
             painter.line_segment(
                 [egui::pos2(x, plot.top()), egui::pos2(x, plot.bottom())],
                 grid,
             );
-            painter.text(
-                egui::pos2(x, plot.bottom() - 2.0),
-                egui::Align2::CENTER_BOTTOM,
-                label,
-                egui::FontId::monospace(9.0),
-                label_col,
-            );
+            if x - last_label_x >= 30.0 {
+                last_label_x = x;
+                painter.text(
+                    egui::pos2(x, plot.bottom() - 2.0),
+                    egui::Align2::CENTER_BOTTOM,
+                    label,
+                    egui::FontId::monospace(9.0),
+                    label_col,
+                );
+            }
         }
 
         // Response curve — colour-coded by gain: each segment is tinted toward

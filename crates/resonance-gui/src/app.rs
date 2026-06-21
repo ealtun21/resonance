@@ -222,6 +222,10 @@ pub struct GuiApp {
     /// Matugen colour-file mtime + last poll, for live theme reload.
     pub(crate) matugen_mtime: Option<SystemTime>,
     pub(crate) last_matugen_check: Instant,
+    /// Frame counter for the one-time window-state migration: counts up after the
+    /// window is forced out of a restored fullscreen so we clear the stale panel
+    /// sizes only once it has resized. `None` once the migration is done.
+    pub(crate) migrate_settle: Option<u8>,
 }
 
 /// Messages from the UI thread to the IPC worker.
@@ -402,8 +406,10 @@ impl GuiApp {
         // Compact, consistent button sizing so controls stay usable when the
         // window is narrow (set once; set_visuals doesn't touch spacing).
         cc.egui_ctx.global_style_mut(|s| {
-            s.spacing.button_padding = egui::vec2(8.0, 3.0);
-            s.spacing.interact_size.y = 22.0;
+            s.spacing.button_padding = egui::vec2(10.0, 5.0);
+            s.spacing.interact_size.y = 24.0;
+            s.spacing.item_spacing = egui::vec2(8.0, 7.0);
+            s.spacing.menu_margin = egui::Margin::same(6);
         });
         let (cmd_tx, ipc_rx) = std::sync::mpsc::channel::<WorkerCmd>();
         let shared = Arc::new(Mutex::new(GuiShared::default()));
@@ -451,6 +457,7 @@ impl GuiApp {
             native_titlebar_theme: None,
             matugen_mtime: crate::theme::matugen_source_mtime(),
             last_matugen_check: Instant::now(),
+            migrate_settle: None,
         }
     }
 
@@ -592,6 +599,46 @@ impl eframe::App for GuiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Read the latest snapshot the IPC worker published (never blocks).
         self.pull_shared();
+
+        // One-time window-state migration: older (CSD/borderless) builds persisted
+        // `fullscreen:true`/`maximized:true` plus panel sizes scaled to the full
+        // screen, which eframe restores into this decorated build — opening
+        // full-screen with no title bar and squashed panels. Force a normal window
+        // once; then, after it has resized (a few frames later), clear the stale
+        // panel sizes so they re-derive from the windowed height. Runs once, then
+        // the user's later window/panel choices are respected and re-persisted.
+        let migrated = ui.ctx().data_mut(|d| {
+            let id = egui::Id::new("window_state_migrated_v07");
+            let done = d.get_persisted::<bool>(id).unwrap_or(false);
+            d.insert_persisted(id, true);
+            done
+        });
+        if !migrated {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+            self.migrate_settle = Some(0);
+        }
+        if let Some(n) = self.migrate_settle {
+            if n >= 15 {
+                // Window has settled to its windowed size; drop the stale panel
+                // sizes so the proportional defaults re-apply to that size.
+                self.migrate_settle = None;
+                use egui::containers::panel::PanelState;
+                for id in [
+                    "fr_panel",
+                    "spectrum_panel",
+                    "effects_panel",
+                    "devices_panel",
+                ] {
+                    ui.ctx()
+                        .data_mut(|d| d.remove::<PanelState>(egui::Id::new(id)));
+                }
+            } else {
+                self.migrate_settle = Some(n + 1);
+            }
+        }
 
         // Tint the native Windows title bar to match the theme (re-apply on theme
         // change; retry until the window handle exists).

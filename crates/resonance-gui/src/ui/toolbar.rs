@@ -32,7 +32,10 @@ impl GuiApp {
             self.overflow_menu(ui);
             if let Some(s) = &state {
                 ui.separator();
-                self.meters_widget(ui, s);
+                // Nest in a horizontal so the meter group is a single item in the
+                // wrapped row — it reflows to the next line as a unit instead of
+                // the readouts splitting mid-group.
+                ui.horizontal(|ui| self.meters_widget(ui, s));
             }
             self.tb_status(ui);
         });

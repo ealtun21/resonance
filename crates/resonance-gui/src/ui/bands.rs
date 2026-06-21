@@ -8,9 +8,6 @@ use resonance_ipc::{BandType, Command, DaemonState};
 
 impl GuiApp {
     pub(crate) fn bands_section(&mut self, ui: &mut egui::Ui, state: &DaemonState) {
-        ui.vertical_centered(|ui| ui.heading("EQ bands"));
-        ui.add_space(4.0);
-
         // Collapse columns as the table narrows so it never needs a horizontal
         // scrollbar: drop the decorative gain bar first, then the Type combo (the
         // widest cell), abbreviating the type label when it's tight. Header and

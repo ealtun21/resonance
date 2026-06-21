@@ -7,8 +7,6 @@ use resonance_ipc::{Command, DaemonState, FxEffectId};
 
 impl GuiApp {
     pub(crate) fn effects_section(&mut self, ui: &mut egui::Ui, state: &DaemonState) {
-        ui.vertical_centered(|ui| ui.heading("Effects"));
-        ui.add_space(4.0);
         centered(ui, "effects_body", |ui| {
             egui::Grid::new("effects_grid")
                 .num_columns(3)

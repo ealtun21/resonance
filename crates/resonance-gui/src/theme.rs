@@ -157,24 +157,61 @@ impl Theme {
         } else {
             egui::Visuals::dark()
         };
-        let panel = darken(p.graph_bg, 1.18);
+        // Surface tiers give the UI depth instead of one flat slab: the window
+        // base sits darkest, panels a step up, and section cards (faint_bg) a
+        // step above that. The plot keeps the deepest `graph_bg`.
+        let (base, panel, card) = if self.is_light() {
+            (
+                lighten(p.graph_bg, 1.0),
+                darken(p.graph_bg, 1.04),
+                rgb(255, 255, 255),
+            )
+        } else {
+            (
+                darken(p.graph_bg, 1.5),
+                darken(p.graph_bg, 1.12),
+                lighten(p.graph_bg, 1.22),
+            )
+        };
+        v.window_fill = base;
         v.panel_fill = panel;
-        v.window_fill = panel;
         v.extreme_bg_color = p.graph_bg;
-        v.faint_bg_color = lighten(panel, 1.12);
-        v.window_stroke = egui::Stroke::new(1.0, p.grid);
-        v.selection.bg_fill = p.accent.gamma_multiply(0.55);
+        v.faint_bg_color = card;
+        v.window_stroke = egui::Stroke::new(1.0, blend(panel, p.grid, 0.7));
+        v.selection.bg_fill = p.accent.gamma_multiply(0.5);
         v.selection.stroke = egui::Stroke::new(1.0, p.accent);
         v.hyperlink_color = p.accent;
-        v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, p.accent);
-        v.widgets.active.bg_stroke = egui::Stroke::new(1.0, p.accent);
-        // Tint buttons with the accent so they read as interactive instead of
-        // flat grey, with a clear hover/active progression.
-        let btn = blend(panel, p.accent, 0.22);
+
+        // Rounded chrome throughout (softer, less utilitarian).
+        let rc = egui::CornerRadius::same(6);
+        v.window_corner_radius = rc;
+        v.menu_corner_radius = rc;
+        for w in [
+            &mut v.widgets.noninteractive,
+            &mut v.widgets.inactive,
+            &mut v.widgets.hovered,
+            &mut v.widgets.active,
+            &mut v.widgets.open,
+        ] {
+            w.corner_radius = egui::CornerRadius::same(5);
+        }
+
+        // Faint borders so panels/cards/inputs read as distinct surfaces.
+        let hairline = blend(card, p.grid, 0.55);
+        v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, hairline);
+        v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, hairline);
+        v.widgets.hovered.bg_stroke = egui::Stroke::new(1.2, p.accent);
+        v.widgets.active.bg_stroke = egui::Stroke::new(1.2, p.accent);
+
+        // Buttons: accent-tinted off the card surface with a clear hover/active
+        // progression so controls read as interactive, not flat grey.
+        let btn = blend(card, p.accent, 0.20);
         v.widgets.inactive.weak_bg_fill = btn;
         v.widgets.inactive.bg_fill = btn;
-        v.widgets.hovered.weak_bg_fill = blend(panel, p.accent, 0.42);
-        v.widgets.active.weak_bg_fill = p.accent.gamma_multiply(0.75);
+        v.widgets.hovered.weak_bg_fill = blend(card, p.accent, 0.40);
+        v.widgets.hovered.bg_fill = blend(card, p.accent, 0.40);
+        v.widgets.active.weak_bg_fill = p.accent.gamma_multiply(0.85);
+        v.widgets.active.bg_fill = p.accent.gamma_multiply(0.85);
         v
     }
 }
