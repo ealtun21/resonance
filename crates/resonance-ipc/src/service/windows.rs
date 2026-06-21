@@ -125,6 +125,19 @@ pub fn stop() -> io::Result<()> {
 
 pub fn restart() -> io::Result<()> {
     stop()?;
+    // `taskkill` returns once termination is *initiated*, before the OS reaps the
+    // PID. If we spawn immediately, the new daemon's single-instance pidfile
+    // guard can still see the old PID mid-exit and bail, leaving nothing running.
+    // Wait for the old instance to actually stop accepting IPC, bounded so a
+    // wedged process can't hang `daemon restart` (commit 4c277ac dropped the old
+    // ~2.5s tasklist poll for being slow — this is the minimal fast equivalent
+    // using the no-subprocess loopback probe, capped at ~500ms / ~15ms steps).
+    for _ in 0..33 {
+        if !is_active() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
     start()
 }
 
@@ -141,8 +154,11 @@ pub fn enable() -> io::Result<()> {
         let err = String::from_utf8_lossy(&out.stderr);
         return Err(io::Error::other(format!("reg add Run key: {}", err.trim())));
     }
+    // `enable` must leave the daemon running now (matches systemd `enable --now`
+    // / xdg `enable`), not merely set the Run key for next logon. Propagate a
+    // spawn failure so the UI sees a real error instead of a silent no-op.
     if !is_active() {
-        let _ = start();
+        start()?;
     }
     Ok(())
 }

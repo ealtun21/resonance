@@ -172,7 +172,7 @@ pub fn runtime_dir() -> PathBuf {
                 return p;
             }
         }
-        return data_home().join("resonance");
+        data_home().join("resonance")
     }
     #[cfg(not(windows))]
     {
