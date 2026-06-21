@@ -4,6 +4,7 @@
 use crate::app::GuiApp;
 use crate::browser::{Browser, Item};
 use crate::state::{Confirm, Dialog};
+use crate::ui::widgets::dialog_window;
 use eframe::egui;
 use resonance_ipc::Command;
 
@@ -15,61 +16,60 @@ impl GuiApp {
             return;
         }
         let mut open = true;
-        egui::Window::new("Controls & shortcuts")
+        dialog_window(ctx, "Controls & shortcuts")
             .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
-                // (gesture, what it does) rows under section headers.
-                let section = |ui: &mut egui::Ui, title: &str, rows: &[(&str, &str)]| {
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new(title).strong());
-                    egui::Grid::new(title)
-                        .num_columns(2)
-                        .spacing(egui::vec2(16.0, 4.0))
-                        .striped(true)
-                        .show(ui, |ui| {
-                            for (k, v) in rows {
-                                ui.label(egui::RichText::new(*k).monospace());
-                                ui.label(*v);
-                                ui.end_row();
-                            }
-                        });
-                };
-                section(
-                    ui,
-                    "EQ graph — nodes",
-                    &[
-                        ("Left-drag node", "move band (frequency + gain)"),
-                        ("Right-drag node", "adjust Q (drag up = narrower)"),
-                        ("Double-left-click", "add a peaking band there"),
-                        ("Double-right-click node", "pin frequency; again to release"),
-                        (
-                            "Shift+double-right-click node",
-                            "pin gain; again to release",
-                        ),
-                    ],
-                );
-                section(
-                    ui,
-                    "EQ graph — zoom",
-                    &[
-                        ("Scroll wheel", "zoom x-axis around the pointer"),
-                        ("Shift + left-drag", "box-select a frequency range to zoom"),
-                        ("Click \"reset ⟲\"", "restore the full 20 Hz–20 kHz view"),
-                    ],
-                );
-                section(
-                    ui,
-                    "Keyboard",
-                    &[
-                        ("Ctrl+Z", "undo"),
-                        ("Ctrl+Y / Ctrl+Shift+Z", "redo"),
-                        ("F1 / ?", "toggle this help"),
-                        ("Esc", "close this help"),
-                    ],
-                );
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    // (gesture, what it does) rows under section headers.
+                    let section = |ui: &mut egui::Ui, title: &str, rows: &[(&str, &str)]| {
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new(title).strong());
+                        egui::Grid::new(title)
+                            .num_columns(2)
+                            .spacing(egui::vec2(16.0, 4.0))
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for (k, v) in rows {
+                                    ui.label(egui::RichText::new(*k).monospace());
+                                    ui.label(*v);
+                                    ui.end_row();
+                                }
+                            });
+                    };
+                    section(
+                        ui,
+                        "EQ graph — nodes",
+                        &[
+                            ("Left-drag node", "move band (frequency + gain)"),
+                            ("Right-drag node", "adjust Q (drag up = narrower)"),
+                            ("Double-left-click", "add a peaking band there"),
+                            ("Double-right-click node", "pin frequency; again to release"),
+                            (
+                                "Shift+double-right-click node",
+                                "pin gain; again to release",
+                            ),
+                        ],
+                    );
+                    section(
+                        ui,
+                        "EQ graph — zoom",
+                        &[
+                            ("Scroll wheel", "zoom x-axis around the pointer"),
+                            ("Shift + left-drag", "box-select a frequency range to zoom"),
+                            ("Click \"reset ⟲\"", "restore the full 20 Hz–20 kHz view"),
+                        ],
+                    );
+                    section(
+                        ui,
+                        "Keyboard",
+                        &[
+                            ("Ctrl+Z", "undo"),
+                            ("Ctrl+Y / Ctrl+Shift+Z", "redo"),
+                            ("F1 / ?", "toggle this help"),
+                            ("Esc", "close this help"),
+                        ],
+                    );
+                });
             });
         if !open {
             self.show_help = false;
@@ -87,18 +87,17 @@ impl GuiApp {
         let mut to_load: Option<String> = None;
 
         let pal = self.palette;
-        egui::Window::new("Load preset")
-            // Fresh id: egui keys collapse/geometry state off the window title,
-            // and `collapsible(false)` hides the toggle without force-expanding.
-            // An older build let this window collapse, so the persisted collapsed
-            // state under the title-derived id left it stuck as a title-only
-            // pill. A dedicated id starts from `default_open` (expanded).
+        // Scale the file/preview lists to the window so the dialog fits a small
+        // window without overflowing. From the viewport (stable per window size),
+        // not the dialog's own content, so it can't oscillate.
+        let vh = ctx.content_rect().height();
+        let list_h = (vh * 0.42).clamp(120.0, 260.0);
+        let prev_h = (vh * 0.24).clamp(72.0, 150.0);
+        dialog_window(ctx, "Load preset")
+            // Fresh id: egui keys collapse/geometry state off the window title; a
+            // dedicated id avoids inheriting a stale collapsed state.
             .id(egui::Id::new("resonance_load_preset_dialog"))
             .open(&mut open)
-            .resizable(true)
-            .default_size([720.0, 480.0])
-            .min_width(520.0)
-            .collapsible(false)
             .show(ctx, |ui| {
                 if let Some(p) = nav_bar(ui, browser) {
                     to_load = Some(p);
@@ -133,8 +132,8 @@ impl GuiApp {
                     egui::ScrollArea::vertical()
                         .id_salt("files")
                         .auto_shrink([false, false])
-                        .min_scrolled_height(260.0)
-                        .max_height(260.0)
+                        .min_scrolled_height(list_h)
+                        .max_height(list_h)
                         .show(ui, |ui| {
                             for (i, it) in browser.entries.iter().enumerate() {
                                 let label = format!("{}  {}", entry_icon(it), it.name);
@@ -166,8 +165,8 @@ impl GuiApp {
                     egui::ScrollArea::vertical()
                         .id_salt("preview")
                         .auto_shrink([false, false])
-                        .min_scrolled_height(150.0)
-                        .max_height(150.0)
+                        .min_scrolled_height(prev_h)
+                        .max_height(prev_h)
                         .show(ui, |ui| {
                             if browser.preview.is_empty() {
                                 ui.weak("select a file to preview");
@@ -217,12 +216,9 @@ impl GuiApp {
         let mut close = false;
         let mut do_export: Option<String> = None;
 
-        egui::Window::new("Export profile")
+        let body_h = (ctx.content_rect().height() * 0.4).clamp(120.0, 240.0);
+        dialog_window(ctx, "Export profile")
             .open(&mut open)
-            .resizable(true)
-            .default_size([640.0, 500.0])
-            .min_width(480.0)
-            .collapsible(false)
             .show(ctx, |ui| {
                 // Typing a full file path into the location bar pre-fills the
                 // folder + name instead of loading anything.
@@ -243,8 +239,6 @@ impl GuiApp {
                 let mut select: Option<usize> = None;
                 let mut activate: Option<usize> = None;
                 let mut pick_name: Option<String> = None;
-                // Constant height (see Load dialog) — avoids window-size jitter.
-                let body_h = 240.0;
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .id_salt("save_files")

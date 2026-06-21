@@ -32,6 +32,48 @@ pub(crate) fn install_symbol_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// A collapsible section card for the narrow-window accordion layout. `id` keys
+/// the persisted open/closed state; `default_open` applies only the first time
+/// the id is seen, after which egui restores the user's last choice.
+pub(crate) fn accordion(
+    ui: &mut egui::Ui,
+    id: &str,
+    title: &str,
+    default_open: bool,
+    body: impl FnOnce(&mut egui::Ui),
+) {
+    egui::CollapsingHeader::new(egui::RichText::new(title).heading().size(15.0))
+        .id_salt(id)
+        .default_open(default_open)
+        .show(ui, |ui| {
+            egui::Frame::default()
+                .inner_margin(egui::Margin {
+                    left: 2,
+                    right: 2,
+                    top: 4,
+                    bottom: 8,
+                })
+                .show(ui, body);
+        });
+}
+
+/// A modal dialog window sized to fit the current viewport: centred, resizable,
+/// capped at 90% of the window (floor 320×240) so it never overflows a small
+/// window, and opening at a comfortable default width. Replaces the old
+/// hardcoded `default_size`/`min_width` that didn't fit narrow windows.
+pub(crate) fn dialog_window<'a>(ctx: &egui::Context, title: &'a str) -> egui::Window<'a> {
+    let vp = ctx.content_rect().size();
+    let max_w = (vp.x * 0.9).max(320.0);
+    let max_h = (vp.y * 0.9).max(240.0);
+    egui::Window::new(title)
+        .collapsible(false)
+        .resizable(true)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .max_width(max_w)
+        .max_height(max_h)
+        .default_width(max_w.min(620.0))
+}
+
 /// Truncate `s` to at most `max` chars, appending an ellipsis when cut. Keeps
 /// the toolbar output combo from expanding past its slot on long device names.
 pub(crate) fn ellipsize(s: &str, max: usize) -> String {

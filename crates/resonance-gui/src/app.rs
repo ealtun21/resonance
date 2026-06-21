@@ -9,7 +9,6 @@ use crate::curve;
 use crate::ipc::IpcClient;
 use crate::state::*;
 use crate::theme::{Palette, Theme};
-use crate::ui::layout::*;
 use crate::ui::widgets::*;
 use eframe::egui;
 use resonance_ipc::{Command, DaemonState, Response, service, transport::TransportError};
@@ -223,14 +222,6 @@ pub struct GuiApp {
     /// Matugen colour-file mtime + last poll, for live theme reload.
     pub(crate) matugen_mtime: Option<SystemTime>,
     pub(crate) last_matugen_check: Instant,
-    /// Selected section in narrow (tabbed) layout.
-    pub(crate) lower_tab: LowerTab,
-    /// Measured width the two-row toolbar actually needs this frame (left
-    /// columns + trailing group). Drives a dynamic `MinInnerSize` so the window
-    /// can't shrink to where the toolbar clips — no hardcoded min.
-    pub(crate) tb_required_w: f32,
-    /// Last min-inner width pushed to the viewport (only resend on change).
-    pub(crate) min_applied: Option<f32>,
 }
 
 /// Messages from the UI thread to the IPC worker.
@@ -460,9 +451,6 @@ impl GuiApp {
             native_titlebar_theme: None,
             matugen_mtime: crate::theme::matugen_source_mtime(),
             last_matugen_check: Instant::now(),
-            lower_tab: LowerTab::default(),
-            tb_required_w: 0.0,
-            min_applied: None,
         }
     }
 
@@ -685,114 +673,9 @@ impl eframe::App for GuiApp {
 
         egui::Panel::top("toolbar").show_inside(ui, |ui| self.toolbar(ui));
 
-        if self.state.is_none() {
-            egui::CentralPanel::default().show_inside(ui, |ui| self.disconnected(ui));
-        } else {
-            // Layout: FR graph (resizable top) + spectrum (resizable bottom)
-            // span the full width; below them three resizable columns —
-            // Effects │ EQ bands │ Devices/Profiles.
-            let state = self.state.clone();
-            // Default sizes are proportional to the current window so first
-            // launch / Reset layout gives the same shape at any size: FR ~40%
-            // height, spectrum ~18%, and the three columns split the width into
-            // equal thirds. (default_size only applies when no size is stored.)
-            let fr_h = (ui.available_height() * 0.50).max(70.0);
-            let spec_h = (ui.available_height() * 0.18).max(28.0);
-            egui::Panel::top("fr")
-                .resizable(true)
-                .default_size(fr_h)
-                .min_size(70.0)
-                .show_inside(ui, |ui| {
-                    if let Some(s) = &state {
-                        self.eq_curve(ui, s);
-                    }
-                });
-            egui::Panel::bottom("spectrum")
-                .resizable(true)
-                .default_size(spec_h)
-                .min_size(28.0)
-                .show_inside(ui, |ui| {
-                    if let Some(s) = &state {
-                        self.spectrum(ui, s);
-                    }
-                });
-
-            // The three lower sections share the band between FR and spectrum.
-            // The side panels (Effects, Devices/Profiles) are *fixed* at their
-            // content width and not manually resizable; EQ bands (central) takes
-            // all the remaining width. We stay in this 3-column layout only while
-            // the bands table fits at its natural width — the instant it would be
-            // clipped we collapse into the tabbed pane. Re-evaluated every frame,
-            // so it reflows live as the window is resized.
-            //
-            // `bands_w` is the table's natural width. `centered` stores it as a
-            // per-frame *temp* value (0 on a fresh launch); persist it so the
-            // column/tabbed decision is correct immediately, with a seeded
-            // default for the very first frame.
-            let bands_persist = egui::Id::new("bands_natural_w");
-            let bands_temp = ui
-                .ctx()
-                .data(|d| d.get_temp::<f32>(egui::Id::new(("centered", "bands_body"))));
-            if let Some(w) = bands_temp.filter(|w| *w > 1.0) {
-                ui.ctx().data_mut(|d| d.insert_persisted(bands_persist, w));
-            }
-            let bands_w = bands_temp
-                .filter(|w| *w > 1.0)
-                .or_else(|| ui.ctx().data_mut(|d| d.get_persisted::<f32>(bands_persist)))
-                .unwrap_or(DEFAULT_BANDS_W);
-            // +36 covers the two panel separators and scroll inner margins.
-            let cols_fit = ui.available_width() >= EFFECTS_W + DEVICES_W + bands_w + 36.0;
-            if cols_fit {
-                // Fixed-width side panels (no manual resize); EQ bands central
-                // takes the rest so it never squishes below its 8-column table.
-                egui::Panel::left("fx_pane")
-                    .resizable(false)
-                    .default_size(EFFECTS_W)
-                    .show_inside(ui, |ui| {
-                        if let Some(s) = &state {
-                            padded_scroll(ui, "effects_scroll", |ui| self.effects_section(ui, s));
-                        }
-                    });
-                egui::Panel::right("dev_pane")
-                    .resizable(false)
-                    .default_size(DEVICES_W)
-                    .show_inside(ui, |ui| {
-                        padded_scroll(ui, "side", |ui| self.devices_profiles(ui));
-                    });
-                egui::CentralPanel::default().show_inside(ui, |ui| {
-                    if let Some(s) = &state {
-                        padded_scroll(ui, "bands_scroll", |ui| self.bands_section(ui, s));
-                    }
-                });
-            } else {
-                egui::CentralPanel::default().show_inside(ui, |ui| {
-                    self.lower_tabs(ui, &state);
-                });
-            }
-        }
+        self.shell(ui);
 
         let ctx = ui.ctx().clone();
-
-        // Dynamic minimum window width: the two-row toolbar's measured required
-        // width (+ panel frame margin). The window then physically can't shrink
-        // to where the toolbar clips — adapts to font, scale and device-name
-        // length instead of a hardcoded constant. Floor until first measured.
-        let min_w = if self.tb_required_w > 1.0 {
-            // + panel frame inner margins + a small safety gutter at the edge.
-            (self.tb_required_w + 44.0).ceil()
-        } else {
-            600.0
-        };
-        if self
-            .min_applied
-            .map(|w| (w - min_w).abs() > 1.0)
-            .unwrap_or(true)
-        {
-            self.min_applied = Some(min_w);
-            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
-                min_w, 460.0,
-            )));
-        }
 
         self.preset_dialog(&ctx);
         self.export_dialog(&ctx);

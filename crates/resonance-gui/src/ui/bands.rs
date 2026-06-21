@@ -11,23 +11,38 @@ impl GuiApp {
         ui.vertical_centered(|ui| ui.heading("EQ bands"));
         ui.add_space(4.0);
 
+        // Collapse columns as the table narrows so it never needs a horizontal
+        // scrollbar: drop the decorative gain bar first, then the Type combo (the
+        // widest cell), abbreviating the type label when it's tight. Header and
+        // body branch on the SAME flags so the grid's column count always matches
+        // the cells emitted (a mismatch would misalign the whole table).
+        let avail = ui.available_width();
+        let show_graph = avail >= 520.0;
+        let show_type = avail >= 380.0;
+        let abbrev_type = avail < 540.0;
+        let num_columns = 6 + show_type as usize + show_graph as usize;
+
         centered(ui, "bands_body", |ui| {
             egui::Grid::new("bands_grid")
-                .num_columns(8)
+                .num_columns(num_columns)
                 .striped(true)
                 .spacing([10.0, 4.0])
                 .show(ui, |ui| {
                     ui.label("#");
                     ui.label("On");
-                    ui.label("Type");
+                    if show_type {
+                        ui.label("Type");
+                    }
                     ui.label("Freq (Hz)");
                     ui.label("Gain (dB)");
                     ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
                         ui.label("Q")
                     });
-                    ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                        ui.label("Gain Graph")
-                    });
+                    if show_graph {
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                            ui.label("Gain Graph")
+                        });
+                    }
                     ui.label("");
                     ui.end_row();
 
@@ -51,21 +66,30 @@ impl GuiApp {
                             });
                         }
 
-                        // Type combo.
-                        let mut bt = b.band_type;
-                        egui::ComboBox::from_id_salt(("bt", i))
-                            .selected_text(bt.full())
-                            .width(92.0)
-                            .show_ui(ui, |ui| {
-                                for cand in BAND_TYPES {
-                                    if ui.selectable_value(&mut bt, cand, cand.full()).clicked() {}
-                                }
-                            });
-                        if bt != b.band_type {
-                            self.queue_edit(Command::SetBandType {
-                                index: i,
-                                band_type: bt,
-                            });
+                        // Type combo (hidden on very narrow tables; abbreviated when tight).
+                        if show_type {
+                            let mut bt = b.band_type;
+                            let (label, w) = if abbrev_type {
+                                (bt.abbrev(), 52.0)
+                            } else {
+                                (bt.full(), 92.0)
+                            };
+                            egui::ComboBox::from_id_salt(("bt", i))
+                                .selected_text(label)
+                                .width(w)
+                                .show_ui(ui, |ui| {
+                                    for cand in BAND_TYPES {
+                                        if ui.selectable_value(&mut bt, cand, cand.full()).clicked()
+                                        {
+                                        }
+                                    }
+                                });
+                            if bt != b.band_type {
+                                self.queue_edit(Command::SetBandType {
+                                    index: i,
+                                    band_type: bt,
+                                });
+                            }
                         }
 
                         // Freq / gain / Q drag values.
@@ -107,7 +131,9 @@ impl GuiApp {
 
                         // Centre-out gain bar (the TUI's gain graph): fills right for
                         // boosts, left for cuts, tinted by gain colour.
-                        gain_bar(ui, b.gain_db, &self.palette);
+                        if show_graph {
+                            gain_bar(ui, b.gain_db, &self.palette);
+                        }
 
                         if ui.button("✕").on_hover_text("remove").clicked() {
                             self.queue_edit(Command::RemoveBand { index: i });

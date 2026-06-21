@@ -49,11 +49,11 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("Resonance")
             .with_decorations(true)
-            // Floor only — the real minimum width is computed at runtime from the
-            // toolbar's measured content and pushed via `MinInnerSize`, so it
-            // adapts to font/scale/device-name instead of a hardcoded value.
             .with_inner_size([1240.0, 760.0])
-            .with_min_inner_size([600.0, 460.0])
+            // Small-window friendly: below ~1000px the lower sections collapse to
+            // a single-column accordion and the toolbar wraps, so a low floor is
+            // fine — no runtime min-width computation needed.
+            .with_min_inner_size([360.0, 420.0])
             .with_icon(std::sync::Arc::new(app_icon())),
         ..Default::default()
     };

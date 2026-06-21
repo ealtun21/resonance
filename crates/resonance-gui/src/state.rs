@@ -60,14 +60,3 @@ pub(crate) enum Confirm {
     /// Delete this profile.
     DeleteProfile(String),
 }
-
-/// Which of the three lower sections is visible when the window is too narrow
-/// for side-by-side columns and they collapse into a single tabbed pane.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum LowerTab {
-    Effects,
-    #[default]
-    Bands,
-    Mapping,
-    Profiles,
-}
