@@ -513,9 +513,8 @@ pub fn read_chain_fresh(path: &Path) -> Option<(u64, ChainSnapshot, bool)> {
         }
         // SAFETY: ChainSnapshot is repr(C) + Copy with no padding-sensitive
         // invariants; read unaligned from the heap buffer at its field offset.
-        let snap = unsafe {
-            std::ptr::read_unaligned(b1.as_ptr().add(snap_off) as *const ChainSnapshot)
-        };
+        let snap =
+            unsafe { std::ptr::read_unaligned(b1.as_ptr().add(snap_off) as *const ChainSnapshot) };
         let gate = read_u32(&b1, gate_off)? != 0;
         // Confirm the generation didn't change across the copy (no torn read).
         let g2 = read_u64(&std::fs::read(path).ok()?, gen_off)?;
