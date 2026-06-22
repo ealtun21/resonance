@@ -104,71 +104,75 @@ impl GuiApp {
         });
     }
 
-    /// The main content shell: FR graph (hero) + spectrum (slim band) always
-    /// span the width; the lower sections render as 3 columns when the window is
-    /// wide, or a stacked accordion when narrow. Shown only when connected.
+    /// The main content shell. The FR graph is the elastic **hero**: it's the
+    /// `CentralPanel`, so it absorbs all width/height the toolbar and controls
+    /// don't use (a wide window widens the graph instead of stranding empty space
+    /// — the FabFilter/Pro-Q model). The live spectrum is drawn *inside* the graph
+    /// (see `eq_curve`), so there's no separate panel to go black on silence. The
+    /// controls cluster is a resizable bottom panel: 3 clamped columns when wide,
+    /// a stacked accordion when narrow.
     pub(crate) fn shell(&mut self, ui: &mut egui::Ui) {
         if self.state.is_none() {
             egui::CentralPanel::default().show_inside(ui, |ui| self.disconnected(ui));
             return;
         }
         let state = self.state.clone();
-        // FR graph is the hero (~52% height); spectrum a slim band (~14%). Both
-        // resizable — default_size only applies until the user drags a splitter.
-        let fr_h = (ui.available_height() * 0.52).max(70.0);
-        let spec_h = (ui.available_height() * 0.14).max(28.0);
-        egui::Panel::top("fr_panel")
+        let mode = layout_mode(ui.ctx(), ui.available_width());
+        // Controls default to ~40% of the height (clamped), leaving the rest to
+        // the graph; the splitter lets the user trade one for the other.
+        let controls_h = (ui.available_height() * 0.4).clamp(150.0, 340.0);
+        egui::Panel::bottom("controls_panel")
             .resizable(true)
-            .default_size(fr_h)
-            .min_size(70.0)
-            .show_inside(ui, |ui| {
-                if let Some(s) = &state {
-                    self.eq_curve(ui, s);
+            .default_size(controls_h)
+            .min_size(72.0)
+            .show_inside(ui, |ui| match mode {
+                LayoutMode::Wide => self.lower_columns(ui, &state),
+                LayoutMode::Narrow => {
+                    egui::ScrollArea::vertical()
+                        .id_salt("controls_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.accordion_stack(ui, &state));
                 }
             });
-        egui::Panel::bottom("spectrum_panel")
-            .resizable(true)
-            .default_size(spec_h)
-            .min_size(28.0)
-            .show_inside(ui, |ui| {
-                if let Some(s) = &state {
-                    self.spectrum(ui, s);
-                }
-            });
-        match layout_mode(ui.ctx(), ui.available_width()) {
-            LayoutMode::Wide => self.lower_columns(ui, &state),
-            LayoutMode::Narrow => {
-                egui::CentralPanel::default()
-                    .show_inside(ui, |ui| self.accordion_stack(ui, &state));
+        egui::CentralPanel::default().show_inside(ui, |ui| {
+            if let Some(s) = &state {
+                self.eq_curve(ui, s);
             }
-        }
+        });
     }
 
-    /// Wide layout: fixed-width Effects (left) + Devices/Profiles (right) side
-    /// panels; EQ bands (central) takes the rest so its table never squishes.
+    /// Wide layout: three columns — Effects | EQ bands (widest) | Devices/Profiles
+    /// — capped to a max width and centred so an ultra-wide window leaves neutral
+    /// surface margins (libadwaita `AdwClamp` idiom) instead of stretching cards
+    /// across voids. Manual columns (not side panels) so the cluster can centre.
     fn lower_columns(&mut self, ui: &mut egui::Ui, state: &Option<DaemonState>) {
-        egui::Panel::left("effects_panel")
-            .resizable(false)
-            .exact_size(EFFECTS_W)
-            .show_inside(ui, |ui| {
+        const CAP: f32 = 1200.0;
+        const GAP: f32 = 10.0;
+        let avail = ui.available_width();
+        let w = avail.min(CAP);
+        let side_pad = ((avail - w) / 2.0).max(0.0);
+        let bands_w = (w - EFFECTS_W - DEVICES_W - 2.0 * GAP).max(240.0);
+        let h = ui.available_height();
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = GAP;
+            ui.add_space(side_pad);
+            ui.allocate_ui(egui::vec2(EFFECTS_W, h), |ui| {
                 if let Some(s) = state {
                     padded_scroll(ui, "effects_scroll", |ui| {
                         section_card(ui, "Effects", |ui| self.effects_section(ui, s))
                     });
                 }
             });
-        egui::Panel::right("devices_panel")
-            .resizable(false)
-            .exact_size(DEVICES_W)
-            .show_inside(ui, |ui| {
+            ui.allocate_ui(egui::vec2(bands_w, h), |ui| {
+                if let Some(s) = state {
+                    padded_scroll(ui, "bands_scroll", |ui| {
+                        section_card(ui, "EQ bands", |ui| self.bands_section(ui, s))
+                    });
+                }
+            });
+            ui.allocate_ui(egui::vec2(DEVICES_W, h), |ui| {
                 padded_scroll(ui, "side", |ui| self.devices_profiles(ui));
             });
-        egui::CentralPanel::default().show_inside(ui, |ui| {
-            if let Some(s) = state {
-                padded_scroll(ui, "bands_scroll", |ui| {
-                    section_card(ui, "EQ bands", |ui| self.bands_section(ui, s))
-                });
-            }
         });
     }
 

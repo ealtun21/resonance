@@ -626,15 +626,8 @@ impl eframe::App for GuiApp {
                 // sizes so the proportional defaults re-apply to that size.
                 self.migrate_settle = None;
                 use egui::containers::panel::PanelState;
-                for id in [
-                    "fr_panel",
-                    "spectrum_panel",
-                    "effects_panel",
-                    "devices_panel",
-                ] {
-                    ui.ctx()
-                        .data_mut(|d| d.remove::<PanelState>(egui::Id::new(id)));
-                }
+                ui.ctx()
+                    .data_mut(|d| d.remove::<PanelState>(egui::Id::new("controls_panel")));
             } else {
                 self.migrate_settle = Some(n + 1);
             }
@@ -741,14 +734,7 @@ impl GuiApp {
     /// their defaults next frame.
     pub(crate) fn reset_layout(&mut self, ctx: &egui::Context) {
         use egui::containers::panel::PanelState;
-        for id in [
-            "fr_panel",
-            "spectrum_panel",
-            "effects_panel",
-            "devices_panel",
-        ] {
-            ctx.data_mut(|d| d.remove::<PanelState>(egui::Id::new(id)));
-        }
+        ctx.data_mut(|d| d.remove::<PanelState>(egui::Id::new("controls_panel")));
         self.set_status("layout reset");
     }
 

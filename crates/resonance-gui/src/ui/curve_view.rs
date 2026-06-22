@@ -7,6 +7,12 @@ use crate::state::{GAIN_LIMIT, Q_LIMIT};
 use crate::ui::widgets::{contrast_color, gain_color};
 use eframe::egui;
 use resonance_ipc::{BandType, Command, DaemonState};
+use std::time::Instant;
+
+/// Spectrum envelope time constants: bars snap up, glide down (drawn behind the
+/// response curve so silence shows no fill — never a separate black panel).
+const SPECTRUM_ATTACK_TAU: f32 = 0.020;
+const SPECTRUM_DECAY_TAU: f32 = 0.20;
 
 impl GuiApp {
     // ── EQ response curve (draggable nodes) ─────────────────────────────────
@@ -161,6 +167,58 @@ impl GuiApp {
                     egui::FontId::monospace(9.0),
                     label_col,
                 );
+            }
+        }
+
+        // Live spectrum as a translucent fill BEHIND the response curve (the
+        // FabFilter/LSP idiom): ambient context on its own magnitude axis off the
+        // bottom edge, so it never competes with the curve — and silence simply
+        // shows no fill instead of a separate black panel.
+        {
+            let bins = &state.spectrum;
+            let n = bins.len();
+            if self.spectrum_display.len() != n {
+                self.spectrum_display = vec![0.0; n];
+            }
+            let dt = self.last_anim.elapsed().as_secs_f32().min(0.1);
+            self.last_anim = Instant::now();
+            for (disp, &raw) in self.spectrum_display.iter_mut().zip(bins.iter()) {
+                let target = raw.clamp(0.0, 1.0);
+                let tau = if target > *disp {
+                    SPECTRUM_ATTACK_TAU
+                } else {
+                    SPECTRUM_DECAY_TAU
+                };
+                *disp += (target - *disp) * (1.0 - (-dt / tau).exp());
+            }
+            let n = self.spectrum_display.len();
+            if n > 0 {
+                let range = curve::LOG_MAX - curve::LOG_MIN;
+                let [r, g, b, _] = pal.accent.to_array();
+                let fill = egui::Color32::from_rgba_unmultiplied(r, g, b, 42);
+                let base = plot.bottom();
+                // Bins are log-spaced over 20 Hz–20 kHz; map each bin's edges
+                // through x_of so the fill aligns with the log axis (and clips
+                // correctly when the view is zoomed).
+                for (i, &v) in self.spectrum_display.iter().enumerate() {
+                    let v = v.clamp(0.0, 1.0);
+                    if v <= 0.005 {
+                        continue;
+                    }
+                    let lo = curve::LOG_MIN + i as f64 / n as f64 * range;
+                    let hi = curve::LOG_MIN + (i + 1) as f64 / n as f64 * range;
+                    let x0 = x_of(lo).max(plot.left());
+                    let x1 = x_of(hi).min(plot.right());
+                    if x1 <= x0 {
+                        continue;
+                    }
+                    let h = v * plot.height() * 0.92;
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(egui::pos2(x0, base - h), egui::pos2(x1, base)),
+                        0.0,
+                        fill,
+                    );
+                }
             }
         }
 
