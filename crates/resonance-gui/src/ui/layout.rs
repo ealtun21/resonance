@@ -141,40 +141,33 @@ impl GuiApp {
         });
     }
 
-    /// Wide layout: three columns — Effects | EQ bands (widest) | Devices/Profiles
-    /// — capped to a max width and centred so an ultra-wide window leaves neutral
-    /// surface margins (libadwaita `AdwClamp` idiom) instead of stretching cards
-    /// across voids. Manual columns (not side panels) so the cluster can centre.
+    /// Wide layout: three columns — Effects | EQ bands (flexible centre) |
+    /// Devices/Profiles — that FILL the width like a native desktop app's panes
+    /// (thin splitter rules between them). EQ bands takes all the slack so its
+    /// table grows into the space rather than leaving a centred island.
     fn lower_columns(&mut self, ui: &mut egui::Ui, state: &Option<DaemonState>) {
-        const CAP: f32 = 1200.0;
-        const GAP: f32 = 10.0;
-        let avail = ui.available_width();
-        let w = avail.min(CAP);
-        let side_pad = ((avail - w) / 2.0).max(0.0);
-        let bands_w = (w - EFFECTS_W - DEVICES_W - 2.0 * GAP).max(240.0);
-        let h = ui.available_height();
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = GAP;
-            ui.add_space(side_pad);
-            ui.allocate_ui(egui::vec2(EFFECTS_W, h), |ui| {
+        egui::Panel::left("effects_col")
+            .resizable(false)
+            .exact_size(EFFECTS_W)
+            .show_inside(ui, |ui| {
                 if let Some(s) = state {
                     padded_scroll(ui, "effects_scroll", |ui| {
                         section(ui, "Effects", |ui| self.effects_section(ui, s))
                     });
                 }
             });
-            ui.separator();
-            ui.allocate_ui(egui::vec2(bands_w, h), |ui| {
-                if let Some(s) = state {
-                    padded_scroll(ui, "bands_scroll", |ui| {
-                        section(ui, "EQ bands", |ui| self.bands_section(ui, s))
-                    });
-                }
-            });
-            ui.separator();
-            ui.allocate_ui(egui::vec2(DEVICES_W, h), |ui| {
+        egui::Panel::right("devices_col")
+            .resizable(false)
+            .exact_size(DEVICES_W)
+            .show_inside(ui, |ui| {
                 padded_scroll(ui, "side", |ui| self.devices_profiles(ui));
             });
+        egui::CentralPanel::default().show_inside(ui, |ui| {
+            if let Some(s) = state {
+                padded_scroll(ui, "bands_scroll", |ui| {
+                    section(ui, "EQ bands", |ui| self.bands_section(ui, s))
+                });
+            }
         });
     }
 
