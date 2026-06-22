@@ -3,7 +3,7 @@
 //! lower area).
 
 use crate::app::{GuiApp, ServiceAction, ServiceFn};
-use crate::ui::widgets::{accordion, padded_scroll, section_card};
+use crate::ui::widgets::{accordion, padded_scroll, section};
 use eframe::egui;
 use resonance_ipc::{DaemonState, service};
 
@@ -159,17 +159,19 @@ impl GuiApp {
             ui.allocate_ui(egui::vec2(EFFECTS_W, h), |ui| {
                 if let Some(s) = state {
                     padded_scroll(ui, "effects_scroll", |ui| {
-                        section_card(ui, "Effects", |ui| self.effects_section(ui, s))
+                        section(ui, "Effects", |ui| self.effects_section(ui, s))
                     });
                 }
             });
+            ui.separator();
             ui.allocate_ui(egui::vec2(bands_w, h), |ui| {
                 if let Some(s) = state {
                     padded_scroll(ui, "bands_scroll", |ui| {
-                        section_card(ui, "EQ bands", |ui| self.bands_section(ui, s))
+                        section(ui, "EQ bands", |ui| self.bands_section(ui, s))
                     });
                 }
             });
+            ui.separator();
             ui.allocate_ui(egui::vec2(DEVICES_W, h), |ui| {
                 padded_scroll(ui, "side", |ui| self.devices_profiles(ui));
             });

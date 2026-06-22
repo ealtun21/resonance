@@ -405,10 +405,11 @@ impl GuiApp {
         cc.egui_ctx.set_visuals(theme.visuals());
         // Compact, consistent button sizing so controls stay usable when the
         // window is narrow (set once; set_visuals doesn't touch spacing).
+        // Denser, desktop-native metrics (tighter than egui's airy defaults).
         cc.egui_ctx.global_style_mut(|s| {
-            s.spacing.button_padding = egui::vec2(10.0, 5.0);
-            s.spacing.interact_size.y = 24.0;
-            s.spacing.item_spacing = egui::vec2(8.0, 7.0);
+            s.spacing.button_padding = egui::vec2(8.0, 4.0);
+            s.spacing.interact_size.y = 22.0;
+            s.spacing.item_spacing = egui::vec2(7.0, 5.0);
             s.spacing.menu_margin = egui::Margin::same(6);
         });
         let (cmd_tx, ipc_rx) = std::sync::mpsc::channel::<WorkerCmd>();

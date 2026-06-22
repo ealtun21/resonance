@@ -2,7 +2,7 @@
 
 use crate::app::GuiApp;
 use crate::state::Confirm;
-use crate::ui::widgets::{centered, section_card};
+use crate::ui::widgets::{centered, section};
 use eframe::egui;
 use resonance_ipc::{Command, DaemonState};
 
@@ -10,11 +10,11 @@ impl GuiApp {
     // ── Right column: devices → profiles + profile list ─────────────────────
 
     pub(crate) fn devices_profiles(&mut self, ui: &mut egui::Ui) {
-        section_card(ui, "Device Profile Mapping", |ui| {
+        section(ui, "Device Profile Mapping", |ui| {
             self.device_mapping_section(ui)
         });
-        ui.add_space(10.0);
-        section_card(ui, "Profiles", |ui| self.profiles_panel(ui));
+        ui.add_space(12.0);
+        section(ui, "Profiles", |ui| self.profiles_panel(ui));
     }
 
     /// Device → profile mapping table: every output device we've ever seen, each

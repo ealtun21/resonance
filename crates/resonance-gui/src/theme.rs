@@ -62,7 +62,7 @@ impl Theme {
 
     pub fn label(self) -> &'static str {
         match self {
-            Theme::System => "System dark",
+            Theme::System => "Native",
             Theme::BreezeDark => "Breeze Dark",
             Theme::Gruvbox => "Gruvbox",
             Theme::Nord => "Nord",
@@ -75,15 +75,7 @@ impl Theme {
     /// Hard-coded palette for this theme (Matugen falls back to dark if no file).
     pub fn palette(self) -> Palette {
         match self {
-            Theme::System => Palette {
-                accent: rgb(80, 200, 255),
-                boost: rgb(70, 200, 90),
-                cut: rgb(225, 80, 80),
-                neutral: rgb(150, 150, 160),
-                graph_bg: rgb(20, 22, 26),
-                grid: rgb(70, 74, 82),
-                highlight: Color32::YELLOW,
-            },
+            Theme::System => native_palette(),
             Theme::BreezeDark => Palette {
                 accent: rgb(61, 174, 233), // breeze blue
                 boost: rgb(39, 174, 96),
@@ -137,6 +129,7 @@ impl Theme {
     pub(crate) fn is_light(self) -> bool {
         match self {
             Theme::Light => true,
+            Theme::System => !system_is_dark(),
             Theme::Matugen => matugen_is_light(),
             _ => false,
         }
@@ -182,10 +175,12 @@ impl Theme {
         v.selection.stroke = egui::Stroke::new(1.0, p.accent);
         v.hyperlink_color = p.accent;
 
-        // Rounded chrome throughout (softer, less utilitarian).
-        let rc = egui::CornerRadius::same(6);
-        v.window_corner_radius = rc;
-        v.menu_corner_radius = rc;
+        // Platform-appropriate corner radius: KDE Breeze is subtle (~3px); macOS
+        // and Windows 11 are a touch rounder. Keeps controls feeling native.
+        let r = native_radius();
+        v.window_corner_radius = egui::CornerRadius::same(r);
+        v.menu_corner_radius = egui::CornerRadius::same(r);
+        let wr = egui::CornerRadius::same(r.saturating_sub(1).max(2));
         for w in [
             &mut v.widgets.noninteractive,
             &mut v.widgets.inactive,
@@ -193,7 +188,7 @@ impl Theme {
             &mut v.widgets.active,
             &mut v.widgets.open,
         ] {
-            w.corner_radius = egui::CornerRadius::same(5);
+            w.corner_radius = wr;
         }
 
         // Faint borders so panels/cards/inputs read as distinct surfaces.
@@ -241,6 +236,211 @@ fn blend(a: Color32, b: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
     let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t) as u8;
     Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
+}
+
+// ── Platform-native accent + light/dark detection ───────────────────────────
+//
+// The "Native" theme adopts the host desktop's accent colour and light/dark
+// preference so the app reads as a native KDE / Windows / macOS app rather than
+// a generic toolkit window. These are queried occasionally (on theme load), not
+// per frame, so a file read / short subprocess is fine.
+
+/// Build the Native palette from the system accent + light/dark, flat and
+/// accent-led the way the host toolkits are.
+fn native_palette() -> Palette {
+    // Breeze blue is the sensible fallback when no accent can be read.
+    let accent = system_accent().unwrap_or_else(|| rgb(61, 174, 233));
+    if system_is_dark() {
+        Palette {
+            accent,
+            boost: rgb(80, 200, 120),
+            cut: rgb(230, 90, 95),
+            neutral: rgb(150, 152, 160),
+            graph_bg: rgb(24, 25, 28),
+            grid: rgb(60, 62, 68),
+            highlight: lighten(accent, 1.45),
+        }
+    } else {
+        Palette {
+            accent,
+            boost: rgb(40, 160, 80),
+            cut: rgb(200, 60, 60),
+            neutral: rgb(110, 112, 120),
+            graph_bg: rgb(248, 249, 251),
+            grid: rgb(206, 209, 215),
+            highlight: darken(accent, 1.15),
+        }
+    }
+}
+
+/// The host desktop's accent colour, if discoverable.
+fn system_accent() -> Option<Color32> {
+    #[cfg(target_os = "linux")]
+    {
+        kde_accent()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows_accent()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_accent()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+/// Native control corner radius for the host platform (KDE Breeze is subtle;
+/// macOS/Windows 11 are slightly rounder).
+pub(crate) fn native_radius() -> u8 {
+    // KDE Breeze is subtle; macOS / Windows 11 are a touch rounder.
+    if cfg!(target_os = "linux") { 3 } else { 6 }
+}
+
+/// Whether the host desktop is in dark mode (defaults to dark when unknown).
+fn system_is_dark() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        kde_is_dark().unwrap_or(true)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows_is_dark().unwrap_or(true)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_is_dark().unwrap_or(true)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    {
+        true
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn kde_globals() -> Option<String> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
+        })?;
+    std::fs::read_to_string(base.join("kdeglobals")).ok()
+}
+
+/// Pull a `key=R,G,B` value from an INI-style `[section]` in kdeglobals.
+#[cfg(target_os = "linux")]
+fn kde_color(text: &str, section: &str, key: &str) -> Option<Color32> {
+    let start = text.find(&format!("[{section}]"))?;
+    let rest = &text[start..];
+    let end = rest[1..].find('[').map(|i| i + 1).unwrap_or(rest.len());
+    for line in rest[..end].lines() {
+        if let Some(v) = line.trim().strip_prefix(&format!("{key}=")) {
+            let c: Vec<u8> = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+            if c.len() >= 3 {
+                return Some(rgb(c[0], c[1], c[2]));
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn kde_accent() -> Option<Color32> {
+    let t = kde_globals()?;
+    // Plasma 5.23+ stores a user accent here; otherwise fall back to the colour
+    // scheme's selection background (the colour KDE highlights with).
+    kde_color(&t, "General", "AccentColor")
+        .or_else(|| kde_color(&t, "Colors:Selection", "BackgroundNormal"))
+}
+
+#[cfg(target_os = "linux")]
+fn kde_is_dark() -> Option<bool> {
+    let t = kde_globals()?;
+    let bg = kde_color(&t, "Colors:Window", "BackgroundNormal")?;
+    Some((bg.r() as u32 + bg.g() as u32 + bg.b() as u32) / 3 < 128)
+}
+
+/// Read a `HKCU` registry value via `reg query`, returning the raw token (the
+/// last whitespace field of the matching line). `CREATE_NO_WINDOW` keeps the
+/// GUI-subsystem process from flashing a console.
+#[cfg(target_os = "windows")]
+fn reg_query(path: &str, value: &str) -> Option<String> {
+    use std::os::windows::process::CommandExt;
+    let out = std::process::Command::new("reg")
+        .args(["query", path, "/v", value])
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    s.lines()
+        .find(|l| l.contains(value))
+        .and_then(|l| l.split_whitespace().last())
+        .map(str::to_owned)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_accent() -> Option<Color32> {
+    let v = reg_query(r"HKCU\Software\Microsoft\Windows\DWM", "AccentColor")?;
+    let n = u32::from_str_radix(v.trim_start_matches("0x"), 16).ok()?;
+    // DWM AccentColor is 0xAABBGGRR.
+    Some(rgb(
+        (n & 0xFF) as u8,
+        ((n >> 8) & 0xFF) as u8,
+        ((n >> 16) & 0xFF) as u8,
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_is_dark() -> Option<bool> {
+    let v = reg_query(
+        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        "AppsUseLightTheme",
+    )?;
+    let n = u32::from_str_radix(v.trim_start_matches("0x"), 16).ok()?;
+    Some(n == 0)
+}
+
+#[cfg(target_os = "macos")]
+fn defaults_global(key: &str) -> Option<String> {
+    let out = std::process::Command::new("defaults")
+        .args(["read", "-g", key])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_accent() -> Option<Color32> {
+    // AppleAccentColor: -1 graphite, 0 red, 1 orange, 2 yellow, 3 green, 4 blue,
+    // 5 purple, 6 pink. The key is absent when the user keeps the default blue.
+    let idx = defaults_global("AppleAccentColor")
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(4);
+    Some(match idx {
+        -1 => rgb(140, 140, 148),
+        0 => rgb(255, 82, 89),
+        1 => rgb(247, 143, 42),
+        2 => rgb(245, 200, 50),
+        3 => rgb(98, 189, 62),
+        5 => rgb(150, 90, 225),
+        6 => rgb(245, 100, 170),
+        _ => rgb(10, 110, 235),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_is_dark() -> Option<bool> {
+    Some(
+        defaults_global("AppleInterfaceStyle")
+            .map(|s| s.eq_ignore_ascii_case("Dark"))
+            .unwrap_or(false),
+    )
 }
 
 // ── matugen / pywal palette loading ─────────────────────────────────────────
