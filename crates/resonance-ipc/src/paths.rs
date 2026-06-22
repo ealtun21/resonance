@@ -238,23 +238,18 @@ mod tests {
     }
 
     #[test]
-    fn default_socket_path_filename_matches_const() {
+    fn socket_path_default_then_env_override() {
+        // Both assertions live in ONE test so the `RESONANCE_SOCKET` mutation
+        // can't race a sibling test reading the default — env is process-global
+        // and the harness runs #[test]s on parallel threads. Assert the default
+        // first (env unset), then the override.
         let p = default_socket_path();
         assert_eq!(
             p.file_name().and_then(|s| s.to_str()),
             Some(crate::DEFAULT_SOCKET_FILENAME)
         );
-    }
-
-    #[test]
-    fn socket_path_env_var_takes_precedence() {
-        // Mutating env in tests is racy across threads — but Rust's test
-        // harness runs each #[test] in its own thread and the env mutation
-        // here is short-lived and isolated to this single test, so the
-        // window for races is essentially zero in practice. Keep it minimal.
-        // SAFETY: set_var/remove_var must be serialized in multithreaded
-        // tests; this single mutation/read pair is the only thing in this
-        // test touching the var so it's not racy with itself.
+        // SAFETY: this is the only test touching SOCKET_PATH_ENV, and it sets
+        // then removes the var within this single thread, so it isn't racy.
         unsafe {
             std::env::set_var(crate::SOCKET_PATH_ENV, "/tmp/test-resonance.sock");
         }
