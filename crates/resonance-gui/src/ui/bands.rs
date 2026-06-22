@@ -73,7 +73,10 @@ impl GuiApp {
 
                     let mut on = b.enabled;
                     if kit::toggle(ui, &mut on) {
-                        self.queue_edit(Command::SetBandEnabled { index: i, enabled: on });
+                        self.queue_edit(Command::SetBandEnabled {
+                            index: i,
+                            enabled: on,
+                        });
                     }
 
                     if show_type {
@@ -100,8 +103,15 @@ impl GuiApp {
                     let mut freq = b.freq;
                     let mut gain = b.gain_db;
                     let mut q = b.q;
-                    let fc =
-                        kit::num_field(ui, 58.0, egui::Id::new(("f", i)), &mut freq, 20.0..=20000.0, 0, 2.0);
+                    let fc = kit::num_field(
+                        ui,
+                        58.0,
+                        egui::Id::new(("f", i)),
+                        &mut freq,
+                        20.0..=20000.0,
+                        0,
+                        2.0,
+                    );
                     let gc = kit::num_field(
                         ui,
                         54.0,
@@ -111,8 +121,15 @@ impl GuiApp {
                         1,
                         0.1,
                     );
-                    let qc =
-                        kit::num_field(ui, 50.0, egui::Id::new(("q", i)), &mut q, 0.1..=Q_LIMIT, 2, 0.02);
+                    let qc = kit::num_field(
+                        ui,
+                        50.0,
+                        egui::Id::new(("q", i)),
+                        &mut q,
+                        0.1..=Q_LIMIT,
+                        2,
+                        0.02,
+                    );
                     if fc || gc || qc {
                         self.queue_edit(Command::SetBand {
                             index: i,
@@ -138,7 +155,7 @@ impl GuiApp {
             });
 
         ui.add_space(kit::SP_S);
-        if kit::button(ui, "✚  Add band", false) {
+        if kit::button(ui, "✚  Add band", false, true) {
             self.queue_edit(Command::AddBand {
                 band_type: BandType::Peaking,
                 freq: 1000.0,

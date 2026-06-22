@@ -67,7 +67,8 @@ pub(crate) fn header(ui: &mut egui::Ui, title: &str) {
             .color(t.accent),
     );
     ui.add_space(SP_XS);
-    let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    let (r, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
     ui.painter().rect_filled(r, 0.0, t.line);
     ui.add_space(SP_S);
 }
@@ -139,7 +140,11 @@ pub(crate) fn slider(
     } else {
         x0
     };
-    let (fa, fb) = if hx >= zero_x { (zero_x, hx) } else { (hx, zero_x) };
+    let (fa, fb) = if hx >= zero_x {
+        (zero_x, hx)
+    } else {
+        (hx, zero_x)
+    };
     p.rect_filled(
         egui::Rect::from_min_max(egui::pos2(fa, cy - 2.5), egui::pos2(fb, cy + 2.5)),
         2.5,
@@ -351,16 +356,24 @@ pub(crate) fn icon_button(ui: &mut egui::Ui, glyph: &str) -> bool {
 }
 
 /// A bespoke text button, sized to its label. `accent` fills it (e.g. primary
-/// actions); otherwise it sits in a `well`.
-pub(crate) fn button(ui: &mut egui::Ui, label: &str, accent: bool) -> bool {
+/// actions); otherwise it sits in a `well`. `enabled == false` dims it and
+/// ignores clicks.
+pub(crate) fn button(ui: &mut egui::Ui, label: &str, accent: bool, enabled: bool) -> bool {
     let t = tokens(ui);
     let font = egui::FontId::proportional(T_BODY);
     let galley = ui
         .painter()
         .layout_no_wrap(label.to_owned(), font.clone(), t.text);
     let w = galley.size().x + 24.0;
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 26.0), egui::Sense::click());
-    let (bg, fg) = if accent {
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 26.0), sense);
+    let (bg, fg) = if !enabled {
+        (t.well, t.dim)
+    } else if accent {
         (
             if resp.hovered() {
                 t.accent
@@ -377,5 +390,5 @@ pub(crate) fn button(ui: &mut egui::Ui, label: &str, accent: bool) -> bool {
     ui.painter().rect_filled(rect, 5.0, bg);
     ui.painter()
         .text(rect.center(), egui::Align2::CENTER_CENTER, label, font, fg);
-    resp.clicked()
+    enabled && resp.clicked()
 }

@@ -7,6 +7,7 @@ use crate::app::{GuiApp, ServiceAction, ServiceFn};
 use crate::browser::Browser;
 use crate::state::{Dialog, SaveDialog};
 use crate::theme::Theme;
+use crate::ui::kit;
 use crate::ui::widgets::ellipsize;
 use eframe::egui;
 use resonance_ipc::{Command, DaemonState, service};
@@ -95,23 +96,16 @@ impl GuiApp {
 
     fn tb_preamp(&mut self, ui: &mut egui::Ui, state: &Option<DaemonState>) {
         ui.label("Preamp");
-        // Fixed rail width: deriving it from the row's remaining space inside a
-        // wrapped layout changes the wrap point and oscillates.
-        ui.spacing_mut().slider_width = 140.0;
         if let Some(s) = state {
             let mut db = s.preamp_db;
-            if ui
-                .add(
-                    egui::Slider::new(&mut db, -20.0..=20.0)
-                        .suffix(" dB")
-                        .fixed_decimals(1),
-                )
-                .changed()
-            {
+            if kit::slider(ui, 150.0, &mut db, -20.0..=20.0) {
                 self.queue_edit(Command::SetPreamp { db });
             }
+            kit::value_chip(ui, 60.0, &format!("{db:+.1} dB"));
         } else {
-            ui.add_enabled(false, egui::Slider::new(&mut 0.0, -20.0..=20.0));
+            let mut z = 0.0;
+            kit::slider(ui, 150.0, &mut z, -20.0..=20.0);
+            kit::value_chip(ui, 60.0, "—");
         }
     }
 
@@ -124,55 +118,43 @@ impl GuiApp {
     }
 
     fn output_combo(&mut self, ui: &mut egui::Ui, s: &DaemonState) {
-        // Sentinel for the "follow the OS default output" choice.
-        const AUTO: &str = "\u{0}auto";
-        let following = s.preferred_output.is_none();
-        let current = if following {
-            AUTO.to_string()
-        } else {
-            s.preferred_output.clone().unwrap_or_default()
-        };
-        let mut sel = current.clone();
         // When following the system, show the device it's currently on.
-        let selected_text = if following {
+        let current_label = if s.preferred_output.is_none() {
             match &s.active_output {
                 Some(d) => format!("Auto · {}", ellipsize(&s.sink_label(d), 16)),
                 None => "Automatic".to_string(),
             }
         } else {
-            ellipsize(&s.sink_label(&sel), 24)
+            ellipsize(
+                &s.sink_label(s.preferred_output.as_deref().unwrap_or("")),
+                22,
+            )
         };
-        egui::ComboBox::from_id_salt("toolbar_sink")
-            .selected_text(selected_text)
-            .width(180.0)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut sel, AUTO.to_string(), "Automatic (follow system)");
-                ui.separator();
-                for sink in &s.available_sinks {
-                    let label = s.sink_label(sink);
-                    ui.selectable_value(&mut sel, sink.clone(), label);
-                }
-            });
-        if sel != current {
-            if sel == AUTO {
+        // Index 0 = follow the OS default; the rest map 1:1 to available_sinks.
+        let mut opts = vec!["Automatic (follow system)".to_string()];
+        opts.extend(s.available_sinks.iter().map(|sink| s.sink_label(sink)));
+        let opt_refs: Vec<&str> = opts.iter().map(String::as_str).collect();
+        if let Some(sel) = kit::dropdown(
+            ui,
+            190.0,
+            egui::Id::new("toolbar_sink"),
+            &current_label,
+            &opt_refs,
+        ) {
+            if sel == 0 {
                 self.queue(Command::FollowSystemOutput);
-            } else if !sel.is_empty() {
-                self.queue(Command::SetOutputTarget { node_name: sel });
+            } else {
+                let node = s.available_sinks[sel - 1].clone();
+                self.queue(Command::SetOutputTarget { node_name: node });
             }
         }
     }
 
     fn tb_history(&mut self, ui: &mut egui::Ui) {
-        if ui
-            .add_enabled(!self.undo_stack.is_empty(), egui::Button::new("Undo"))
-            .clicked()
-        {
+        if kit::button(ui, "Undo", false, !self.undo_stack.is_empty()) {
             self.undo();
         }
-        if ui
-            .add_enabled(!self.redo_stack.is_empty(), egui::Button::new("Redo"))
-            .clicked()
-        {
+        if kit::button(ui, "Redo", false, !self.redo_stack.is_empty()) {
             self.redo();
         }
     }

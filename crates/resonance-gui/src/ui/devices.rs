@@ -2,6 +2,7 @@
 
 use crate::app::GuiApp;
 use crate::state::Confirm;
+use crate::ui::kit;
 use crate::ui::widgets::{centered, section};
 use eframe::egui;
 use resonance_ipc::{Command, DaemonState};
@@ -45,10 +46,8 @@ impl GuiApp {
                     .hint_text("new profile name…")
                     .desired_width(NAME_W),
             );
-            let save = ui
-                .button("Save")
-                .on_hover_text("save current chain as a new profile");
-            let go = save.clicked()
+            let save_clicked = kit::button(ui, "Save", true, true);
+            let go = save_clicked
                 || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
             if go && !self.profile_name.trim().is_empty() {
                 let name = self.profile_name.trim().to_string();
@@ -76,11 +75,7 @@ impl GuiApp {
                 let active = current.as_deref() == Some(name.as_str());
                 let editing = matches!(&self.rename, Some((from, _)) if from == name);
 
-                if ui
-                    .add(egui::Button::new("Load").small())
-                    .on_hover_text("load this profile (A/B)")
-                    .clicked()
-                {
+                if kit::button(ui, "Load", false, true) {
                     self.queue(Command::LoadProfile { name: name.clone() });
                 }
 
@@ -115,11 +110,7 @@ impl GuiApp {
                     self.rename = None;
                 }
 
-                if ui
-                    .add(egui::Button::new("✕").small())
-                    .on_hover_text("delete profile")
-                    .clicked()
-                {
+                if kit::icon_button(ui, "✕") {
                     self.confirm = Some(Confirm::DeleteProfile(name.clone()));
                 }
             });
@@ -168,37 +159,29 @@ impl GuiApp {
                     });
                     ui.label(s.sink_label(node)).on_hover_text(node.as_str());
 
-                    let cur: Option<&str> = map.get(node).map(String::as_str);
-                    let mut sel: Option<String> = cur.map(str::to_owned);
-                    let cur_text = sel.clone().unwrap_or_else(|| "—".to_string());
-                    egui::ComboBox::from_id_salt(("devmap", node))
-                        .selected_text(cur_text)
-                        .width(120.0)
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut sel, None, "—");
-                            for p in &profiles {
-                                ui.selectable_value(&mut sel, Some(p.clone()), p);
-                            }
-                        });
-                    let new = sel.as_deref();
-                    if new != cur {
-                        match new {
-                            Some(p) => self.queue(Command::MapOutputFor {
+                    // Profile picker: index 0 = "—" (unmapped), the rest map 1:1
+                    // to the profiles list.
+                    let cur_text = map.get(node).cloned().unwrap_or_else(|| "—".to_string());
+                    let mut opts = vec!["—".to_string()];
+                    opts.extend(profiles.iter().cloned());
+                    let refs: Vec<&str> = opts.iter().map(String::as_str).collect();
+                    if let Some(idx) =
+                        kit::dropdown(ui, 120.0, egui::Id::new(("devmap", node)), &cur_text, &refs)
+                    {
+                        if idx == 0 {
+                            self.queue(Command::UnmapOutputFor {
                                 node_name: node.clone(),
-                                profile: p.to_string(),
-                            }),
-                            None => self.queue(Command::UnmapOutputFor {
+                            });
+                        } else {
+                            self.queue(Command::MapOutputFor {
                                 node_name: node.clone(),
-                            }),
+                                profile: profiles[idx - 1].clone(),
+                            });
                         }
                         self.needs_meta = true;
                     }
 
-                    if ui
-                        .button("✕")
-                        .on_hover_text("forget device (re-adds when next connected)")
-                        .clicked()
-                    {
+                    if kit::icon_button(ui, "✕") {
                         self.queue(Command::ForgetSink {
                             node_name: node.clone(),
                         });
