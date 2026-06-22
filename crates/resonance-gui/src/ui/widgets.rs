@@ -105,30 +105,6 @@ pub(crate) fn padded_scroll(ui: &mut egui::Ui, salt: &str, add: impl FnOnce(&mut
         });
 }
 
-/// Centre `add`'s content horizontally by its own measured width, so the
-/// content keeps its natural size and only the side padding grows/shrinks as
-/// the column resizes. Pads from *last frame's* measured width (kept in egui
-/// memory) to avoid a layout feedback loop — so nothing inside `add` may size
-/// itself to `ui.available_width()`, or the width would never settle.
-pub(crate) fn centered<R>(
-    ui: &mut egui::Ui,
-    id_src: &str,
-    add: impl FnOnce(&mut egui::Ui) -> R,
-) -> R {
-    let id = egui::Id::new(("centered", id_src));
-    let avail = ui.available_width();
-    let prev = ui.ctx().data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
-    let pad = ((avail - prev) * 0.5).max(0.0);
-    let outer = ui.horizontal(|ui| {
-        ui.add_space(pad);
-        ui.vertical(add)
-    });
-    let inner = outer.inner;
-    ui.ctx()
-        .data_mut(|d| d.insert_temp(id, inner.response.rect.width()));
-    inner.inner
-}
-
 /// A colour that contrasts strongly with `bg`: near-white on dark backgrounds,
 /// near-black on light ones. Used for UI guides that must read on any theme.
 pub(crate) fn contrast_color(bg: egui::Color32) -> egui::Color32 {
@@ -157,10 +133,10 @@ pub(crate) fn gain_color(db: f64, pal: &Palette) -> egui::Color32 {
     lerp_color(pal.accent, target, t)
 }
 
-/// Paint a centre-out gain bar in a fixed-size cell: a centre tick with the bar
+/// Paint a centre-out gain bar in a `width`×14 cell: a centre tick with the bar
 /// growing right for boosts and left for cuts, scaled to ±`DB_RANGE`.
-pub(crate) fn gain_bar(ui: &mut egui::Ui, db: f64, pal: &Palette) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(96.0, 14.0), egui::Sense::hover());
+pub(crate) fn gain_bar(ui: &mut egui::Ui, width: f32, db: f64, pal: &Palette) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width.max(40.0), 14.0), egui::Sense::hover());
     let painter = ui.painter_at(rect);
     let cx = rect.center().x;
     // Centre tick.

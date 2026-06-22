@@ -172,23 +172,23 @@ impl GuiApp {
     fn overflow_menu(&mut self, ui: &mut egui::Ui) {
         let label_color = kit::tokens(ui).text;
         kit::menu_button(ui, "☰", label_color, egui::Id::new("overflow_pop"), |ui| {
-            ui.label(egui::RichText::new("Theme").small().weak());
-            let ctx = ui.ctx().clone();
-            for t in Theme::ALL {
-                if ui.selectable_label(self.theme == t, t.label()).clicked() {
-                    self.set_theme(&ctx, t);
-                }
-            }
-            ui.separator();
-            if ui.button("Load…").clicked() {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            if kit::menu_item(ui, "Load preset…", false) {
                 self.open_load_dialog();
             }
-            if ui.button("Export…").clicked() {
+            if kit::menu_item(ui, "Export profile…", false) {
                 self.open_export_dialog();
             }
-            ui.separator();
-            if ui.button("Reset layout").clicked() {
+            if kit::menu_item(ui, "Reset layout", false) {
                 self.reset_layout(ui.ctx());
+            }
+            ui.add_space(kit::SP_XS);
+            kit::menu_caption(ui, "Theme");
+            let ctx = ui.ctx().clone();
+            for t in Theme::ALL {
+                if kit::menu_item(ui, t.label(), self.theme == t) {
+                    self.set_theme(&ctx, t);
+                }
             }
         });
     }

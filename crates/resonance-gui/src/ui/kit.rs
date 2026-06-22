@@ -428,3 +428,45 @@ pub(crate) fn menu_button(
         .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
         .show(|ui| add(ui));
 }
+
+/// A row inside a kit popup menu: full-width, hover-highlit, with an accent bar +
+/// accent text when `checked` (e.g. the active theme). Returns true on click.
+pub(crate) fn menu_item(ui: &mut egui::Ui, label: &str, checked: bool) -> bool {
+    let t = tokens(ui);
+    let w = ui.available_width().max(186.0);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 27.0), egui::Sense::click());
+    if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, 4.0, t.accent.gamma_multiply(0.22));
+    }
+    if checked {
+        ui.painter().rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(rect.left() + 3.0, rect.top() + 6.0),
+                egui::pos2(rect.left() + 6.0, rect.bottom() - 6.0),
+            ),
+            1.5,
+            t.accent,
+        );
+    }
+    ui.painter().text(
+        egui::pos2(rect.left() + 14.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(T_BODY),
+        if checked { t.accent } else { t.text },
+    );
+    resp.clicked()
+}
+
+/// A small caption label for grouping rows inside a kit popup menu.
+pub(crate) fn menu_caption(ui: &mut egui::Ui, text: &str) {
+    let t = tokens(ui);
+    ui.add_space(SP_XS);
+    ui.label(
+        egui::RichText::new(text.to_uppercase())
+            .size(T_CAPTION - 0.5)
+            .color(t.dim),
+    );
+    ui.add_space(SP_XS / 2.0);
+}

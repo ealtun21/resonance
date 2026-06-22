@@ -3,7 +3,7 @@
 use crate::app::GuiApp;
 use crate::state::Confirm;
 use crate::ui::kit;
-use crate::ui::widgets::{centered, section};
+use crate::ui::widgets::{ellipsize, section};
 use eframe::egui;
 use resonance_ipc::{Command, DaemonState};
 
@@ -23,7 +23,7 @@ impl GuiApp {
     pub(crate) fn device_mapping_section(&mut self, ui: &mut egui::Ui) {
         let state = self.state.clone();
         if let Some(s) = &state {
-            centered(ui, "dev_body", |ui| self.device_table(ui, s));
+            self.device_table(ui, s);
         } else {
             ui.weak("(no daemon)");
         }
@@ -31,20 +31,22 @@ impl GuiApp {
 
     /// Saved profiles list (the save/load/rename rows).
     pub(crate) fn profiles_panel(&mut self, ui: &mut egui::Ui) {
-        centered(ui, "profiles_body", |ui| self.profiles_section(ui));
+        self.profiles_section(ui);
     }
 
-    /// Profiles list: a fixed-width save row plus one row per profile — Load
-    /// (A/B), an inline-editable name (type + Enter to rename), and delete.
-    /// Widths are fixed (not `available_width`) so the block centres cleanly.
+    /// Profiles list: a save row plus one row per profile — Load (A/B), an
+    /// inline-editable name (type + Enter to rename), and delete. The name fields
+    /// flex to fill the column width so the block isn't a squished fixed island.
     pub(crate) fn profiles_section(&mut self, ui: &mut egui::Ui) {
-        const NAME_W: f32 = 200.0;
+        let full_w = ui.available_width();
+        let save_name_w = (full_w - 72.0).max(120.0);
+        let row_name_w = (full_w - 96.0).max(100.0);
 
         ui.horizontal(|ui| {
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut self.profile_name)
                     .hint_text("new profile name…")
-                    .desired_width(NAME_W),
+                    .desired_width(save_name_w),
             );
             let save_clicked = kit::button(ui, "Save", true, true);
             let go = save_clicked
@@ -87,7 +89,7 @@ impl GuiApp {
                 };
                 let mut edit = egui::TextEdit::singleline(&mut buf)
                     .id_salt(("pname", name))
-                    .desired_width(NAME_W)
+                    .desired_width(row_name_w)
                     .hint_text("name");
                 if active && !editing {
                     edit = edit.text_color(self.palette.accent);
@@ -136,59 +138,71 @@ impl GuiApp {
             return;
         }
 
-        egui::Grid::new("device_map_grid")
-            .num_columns(3)
-            .striped(true)
-            .spacing([8.0, 4.0])
-            .show(ui, |ui| {
-                for (node, _desc) in &s.sink_descriptions {
-                    let here = present.contains(node.as_str());
-                    let is_active = active == Some(node.as_str());
-                    // Status dot: green = active, dim green = present, grey = absent.
-                    let (dot, col) = if is_active {
-                        ("●", self.palette.boost)
-                    } else if here {
-                        ("●", self.palette.neutral)
-                    } else {
-                        ("○", self.palette.grid)
-                    };
-                    ui.colored_label(col, dot).on_hover_text(if here {
-                        "connected"
-                    } else {
-                        "remembered (absent)"
-                    });
-                    ui.label(s.sink_label(node)).on_hover_text(node.as_str());
-
-                    // Profile picker: index 0 = "—" (unmapped), the rest map 1:1
-                    // to the profiles list.
-                    let cur_text = map.get(node).cloned().unwrap_or_else(|| "—".to_string());
-                    let mut opts = vec!["—".to_string()];
-                    opts.extend(profiles.iter().cloned());
-                    let refs: Vec<&str> = opts.iter().map(String::as_str).collect();
-                    if let Some(idx) =
-                        kit::dropdown(ui, 120.0, egui::Id::new(("devmap", node)), &cur_text, &refs)
-                    {
-                        if idx == 0 {
-                            self.queue(Command::UnmapOutputFor {
-                                node_name: node.clone(),
-                            });
-                        } else {
-                            self.queue(Command::MapOutputFor {
-                                node_name: node.clone(),
-                                profile: profiles[idx - 1].clone(),
-                            });
-                        }
-                        self.needs_meta = true;
-                    }
-
-                    if kit::icon_button(ui, "✕") {
-                        self.queue(Command::ForgetSink {
+        // Manual rows so the device-name column FILLS the width (a Grid would
+        // hug content and strand empty space to the right). Each row: status dot,
+        // flexible name, profile dropdown, forget ✕.
+        const DD_W: f32 = 132.0;
+        let full_w = ui.available_width();
+        let name_w = (full_w - 16.0 - DD_W - 26.0 - 3.0 * kit::SP_S).max(70.0);
+        for (node, _desc) in &s.sink_descriptions {
+            let here = present.contains(node.as_str());
+            let is_active = active == Some(node.as_str());
+            let col = if is_active {
+                self.palette.boost
+            } else if here {
+                self.palette.neutral
+            } else {
+                self.palette.grid
+            };
+            ui.horizontal(|ui| {
+                ui.set_min_height(26.0);
+                ui.spacing_mut().item_spacing.x = kit::SP_S;
+                // Status dot: filled when present/active, hollow when remembered.
+                let (dr, _) = ui.allocate_exact_size(egui::vec2(12.0, 22.0), egui::Sense::hover());
+                if is_active || here {
+                    ui.painter().circle_filled(dr.center(), 4.0, col);
+                } else {
+                    ui.painter()
+                        .circle_stroke(dr.center(), 3.5, egui::Stroke::new(1.3, col));
+                }
+                // Flexible device name (ellipsised to its cell).
+                let text = kit::tokens(ui).text;
+                let (lr, _) =
+                    ui.allocate_exact_size(egui::vec2(name_w, 22.0), egui::Sense::hover());
+                ui.painter().text(
+                    egui::pos2(lr.left(), lr.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    ellipsize(&s.sink_label(node), (name_w / 7.0) as usize),
+                    egui::FontId::proportional(kit::T_BODY),
+                    text,
+                );
+                // Profile picker: index 0 = "—" (unmapped), the rest map 1:1.
+                let cur_text = map.get(node).cloned().unwrap_or_else(|| "—".to_string());
+                let mut opts = vec!["—".to_string()];
+                opts.extend(profiles.iter().cloned());
+                let refs: Vec<&str> = opts.iter().map(String::as_str).collect();
+                if let Some(idx) =
+                    kit::dropdown(ui, DD_W, egui::Id::new(("devmap", node)), &cur_text, &refs)
+                {
+                    if idx == 0 {
+                        self.queue(Command::UnmapOutputFor {
                             node_name: node.clone(),
                         });
-                        self.needs_meta = true;
+                    } else {
+                        self.queue(Command::MapOutputFor {
+                            node_name: node.clone(),
+                            profile: profiles[idx - 1].clone(),
+                        });
                     }
-                    ui.end_row();
+                    self.needs_meta = true;
+                }
+                if kit::icon_button(ui, "✕") {
+                    self.queue(Command::ForgetSink {
+                        node_name: node.clone(),
+                    });
+                    self.needs_meta = true;
                 }
             });
+        }
     }
 }
