@@ -197,10 +197,12 @@ impl GuiApp {
                 let base = plot.bottom();
                 // Bins are log-spaced over 20 Hz–20 kHz; map each bin's edges
                 // through x_of so the fill aligns with the log axis (and clips
-                // correctly when the view is zoomed). Per bin: a gradient fill
-                // (brighter toward the peak) plus a bright contour along the tops
-                // so it clearly reads as a spectrum analyzer. Silence collapses to
-                // a faint flat line on the floor.
+                // correctly when the view is zoomed). Per bin: a filled column
+                // (brighter toward the peak) plus a bold contour along the tops so
+                // it always reads as a spectrum analyzer. A small minimum body +
+                // floor alpha keep a faint analyzer band visible even in silence,
+                // so the spectrum never looks "gone" — it just lights up with audio.
+                const MIN_BODY: f32 = 0.018;
                 let mut tops: Vec<egui::Pos2> = Vec::with_capacity(n);
                 for (i, &v) in self.spectrum_display.iter().enumerate() {
                     let v = v.clamp(0.0, 1.0);
@@ -211,20 +213,19 @@ impl GuiApp {
                     if x1 <= x0 {
                         continue;
                     }
-                    let top_y = base - v * plot.height() * 0.94;
-                    if v > 0.01 {
-                        let col = lerp_color(pal.accent, pal.highlight, v);
-                        let [r, g, b, _] = col.to_array();
-                        let a = (55.0 + 130.0 * v) as u8;
-                        painter.rect_filled(
-                            egui::Rect::from_min_max(egui::pos2(x0, top_y), egui::pos2(x1, base)),
-                            0.0,
-                            egui::Color32::from_rgba_unmultiplied(r, g, b, a),
-                        );
-                    }
+                    let body = (v * 0.92 + MIN_BODY).min(1.0);
+                    let top_y = base - body * plot.height();
+                    let col = lerp_color(pal.accent, pal.highlight, v);
+                    let [r, g, b, _] = col.to_array();
+                    let a = (45.0 + 175.0 * v).min(225.0) as u8;
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(egui::pos2(x0, top_y), egui::pos2(x1, base)),
+                        0.0,
+                        egui::Color32::from_rgba_unmultiplied(r, g, b, a),
+                    );
                     tops.push(egui::pos2((x0 + x1) * 0.5, top_y));
                 }
-                let contour = egui::Stroke::new(1.3, pal.accent.gamma_multiply(0.85));
+                let contour = egui::Stroke::new(1.8, pal.accent);
                 for w in tops.windows(2) {
                     painter.line_segment([w[0], w[1]], contour);
                 }

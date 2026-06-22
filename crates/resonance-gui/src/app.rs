@@ -722,6 +722,7 @@ impl eframe::App for GuiApp {
         self.export_dialog(&ctx);
         self.confirm_dialog(&ctx);
         self.help_dialog(&ctx);
+        self.status_toast(&ctx);
 
         // Drive ~144 fps repaint so spectrum/curve stay smooth.
         ctx.request_repaint_after(FRAME_INTERVAL);
@@ -737,6 +738,24 @@ impl GuiApp {
         use egui::containers::panel::PanelState;
         ctx.data_mut(|d| d.remove::<PanelState>(egui::Id::new("controls_panel")));
         self.set_status("layout reset");
+    }
+
+    /// A transient status toast floated at the bottom-centre of the window (e.g.
+    /// "layout reset", "undo"), instead of cluttering the toolbar with a status
+    /// label. Auto-hides once `status` is cleared by its TTL (see `ui`).
+    fn status_toast(&self, ctx: &egui::Context) {
+        if self.status.is_empty() {
+            return;
+        }
+        egui::Area::new(egui::Id::new("status_toast"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -18.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(&self.status);
+                });
+            });
     }
 
     /// Write the current chain to `path` as a `.toml` profile (round-trips via
