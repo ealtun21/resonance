@@ -170,41 +170,25 @@ impl GuiApp {
     /// that don't need to be one-click, kept out of the main row to stay tidy on
     /// small windows.
     fn overflow_menu(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button("☰", |ui| {
-            ui.menu_button("Theme", |ui| {
-                let ctx = ui.ctx().clone();
-                for t in Theme::ALL {
-                    if ui.selectable_label(self.theme == t, t.label()).clicked() {
-                        self.set_theme(&ctx, t);
-                        ui.close();
-                    }
+        let label_color = kit::tokens(ui).text;
+        kit::menu_button(ui, "☰", label_color, egui::Id::new("overflow_pop"), |ui| {
+            ui.label(egui::RichText::new("Theme").small().weak());
+            let ctx = ui.ctx().clone();
+            for t in Theme::ALL {
+                if ui.selectable_label(self.theme == t, t.label()).clicked() {
+                    self.set_theme(&ctx, t);
                 }
-            });
+            }
             ui.separator();
-            if ui
-                .button("Load…")
-                .on_hover_text("import a .fac / APO .txt / Resonance .toml file")
-                .clicked()
-            {
+            if ui.button("Load…").clicked() {
                 self.open_load_dialog();
-                ui.close();
             }
-            if ui
-                .button("Export…")
-                .on_hover_text("save the current chain as a Resonance .toml profile")
-                .clicked()
-            {
+            if ui.button("Export…").clicked() {
                 self.open_export_dialog();
-                ui.close();
             }
             ui.separator();
-            if ui
-                .button("Reset layout")
-                .on_hover_text("restore default panel sizes")
-                .clicked()
-            {
+            if ui.button("Reset layout").clicked() {
                 self.reset_layout(ui.ctx());
-                ui.close();
             }
         });
     }
@@ -250,8 +234,11 @@ impl GuiApp {
         } else {
             ("○", self.palette.cut)
         };
-        ui.menu_button(
-            egui::RichText::new(format!("{dot} Daemon")).color(color),
+        kit::menu_button(
+            ui,
+            &format!("{dot} Daemon"),
+            color,
+            egui::Id::new("daemon_pop"),
             |ui| {
                 ui.label(format!(
                     "{}  ·  autostart {}",

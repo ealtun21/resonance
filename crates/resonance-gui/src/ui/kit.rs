@@ -392,3 +392,39 @@ pub(crate) fn button(ui: &mut egui::Ui, label: &str, accent: bool, enabled: bool
         .text(rect.center(), egui::Align2::CENTER_CENTER, label, font, fg);
     enabled && resp.clicked()
 }
+
+/// A bespoke menu button: a kit chip that opens a popup of menu content.
+/// `label_color` lets callers tint the label (e.g. the daemon status dot).
+pub(crate) fn menu_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    label_color: Color32,
+    popup_id: egui::Id,
+    add: impl FnOnce(&mut egui::Ui),
+) {
+    let t = tokens(ui);
+    let font = egui::FontId::proportional(T_BODY);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font.clone(), label_color);
+    let w = galley.size().x + 22.0;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 26.0), egui::Sense::click());
+    let open = egui::Popup::is_id_open(ui.ctx(), popup_id);
+    let bg = if resp.hovered() || open {
+        lerp_color(t.well, t.accent, 0.20)
+    } else {
+        t.well
+    };
+    ui.painter().rect_filled(rect, 5.0, bg);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        font,
+        label_color,
+    );
+    egui::Popup::menu(&resp)
+        .id(popup_id)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+        .show(|ui| add(ui));
+}

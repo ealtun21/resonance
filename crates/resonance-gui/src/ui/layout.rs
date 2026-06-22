@@ -118,27 +118,44 @@ impl GuiApp {
         }
         let state = self.state.clone();
         let mode = layout_mode(ui.ctx(), ui.available_width());
-        // Controls default to ~40% of the height (clamped), leaving the rest to
-        // the graph; the splitter lets the user trade one for the other.
-        let controls_h = (ui.available_height() * 0.4).clamp(150.0, 340.0);
-        egui::Panel::bottom("controls_panel")
-            .resizable(true)
-            .default_size(controls_h)
-            .min_size(72.0)
-            .show_inside(ui, |ui| match mode {
-                LayoutMode::Wide => self.lower_columns(ui, &state),
-                LayoutMode::Narrow => {
+        match mode {
+            // Wide: graph is the elastic CentralPanel (full-bleed hero); the three
+            // control columns sit in a resizable bottom strip.
+            LayoutMode::Wide => {
+                let controls_h = (ui.available_height() * 0.4).clamp(150.0, 340.0);
+                egui::Panel::bottom("controls_panel")
+                    .resizable(true)
+                    .default_size(controls_h)
+                    .min_size(80.0)
+                    .show_inside(ui, |ui| self.lower_columns(ui, &state));
+                egui::CentralPanel::default().show_inside(ui, |ui| {
+                    if let Some(s) = &state {
+                        self.eq_curve(ui, s);
+                    }
+                });
+            }
+            // Narrow: graph on top (resizable, with a floor so it stays usable),
+            // the accordion of sections scrolls in the central area below — open
+            // sections fill it; the splitter trades graph height for controls.
+            LayoutMode::Narrow => {
+                let gh = (ui.available_height() * 0.5).max(180.0);
+                egui::Panel::top("graph_narrow")
+                    .resizable(true)
+                    .default_size(gh)
+                    .min_size(150.0)
+                    .show_inside(ui, |ui| {
+                        if let Some(s) = &state {
+                            self.eq_curve(ui, s);
+                        }
+                    });
+                egui::CentralPanel::default().show_inside(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .id_salt("controls_scroll")
                         .auto_shrink([false, false])
                         .show(ui, |ui| self.accordion_stack(ui, &state));
-                }
-            });
-        egui::CentralPanel::default().show_inside(ui, |ui| {
-            if let Some(s) = &state {
-                self.eq_curve(ui, s);
+                });
             }
-        });
+        }
     }
 
     /// Wide layout: three columns — Effects | EQ bands (flexible centre) |
@@ -171,33 +188,29 @@ impl GuiApp {
         });
     }
 
-    /// Narrow layout: the lower sections stacked as collapsible cards inside one
-    /// scroll area, so every section stays reachable without horizontal crowding.
+    /// Narrow layout: the lower sections stacked as collapsible cards. No scroll
+    /// area of its own — the caller wraps it in one (sized so the controls panel
+    /// hugs this content and the graph fills the rest).
     fn accordion_stack(&mut self, ui: &mut egui::Ui, state: &Option<DaemonState>) {
-        egui::ScrollArea::vertical()
-            .id_salt("accordion")
-            .auto_shrink([false, false])
+        egui::Frame::default()
+            .inner_margin(egui::Margin::symmetric(8, 6))
             .show(ui, |ui| {
-                egui::Frame::default()
-                    .inner_margin(egui::Margin::symmetric(8, 6))
-                    .show(ui, |ui| {
-                        accordion(ui, "acc_fx_v2", "Effects", true, |ui| {
-                            if let Some(s) = state {
-                                self.effects_section(ui, s);
-                            }
-                        });
-                        accordion(ui, "acc_bands_v2", "EQ bands", true, |ui| {
-                            if let Some(s) = state {
-                                self.bands_section(ui, s);
-                            }
-                        });
-                        accordion(ui, "acc_map_v2", "Device Mapping", false, |ui| {
-                            self.device_mapping_section(ui)
-                        });
-                        accordion(ui, "acc_prof_v2", "Profiles", false, |ui| {
-                            self.profiles_panel(ui)
-                        });
-                    });
+                accordion(ui, "acc_fx_v3", "Effects", true, |ui| {
+                    if let Some(s) = state {
+                        self.effects_section(ui, s);
+                    }
+                });
+                accordion(ui, "acc_bands_v3", "EQ bands", true, |ui| {
+                    if let Some(s) = state {
+                        self.bands_section(ui, s);
+                    }
+                });
+                accordion(ui, "acc_map_v3", "Device Mapping", false, |ui| {
+                    self.device_mapping_section(ui)
+                });
+                accordion(ui, "acc_prof_v3", "Profiles", false, |ui| {
+                    self.profiles_panel(ui)
+                });
             });
     }
 }
