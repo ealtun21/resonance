@@ -189,3 +189,193 @@ pub(crate) fn value_chip(ui: &mut egui::Ui, width: f32, text: &str) {
         t.text,
     );
 }
+
+/// A bespoke editable number: a monospace chip you drag horizontally to change,
+/// or double-click to type into. Text entry uses a transient `TextEdit` (the one
+/// place a platform text widget is unavoidable); the resting state is custom.
+/// Returns true when the value changes.
+pub(crate) fn num_field(
+    ui: &mut egui::Ui,
+    width: f32,
+    id: egui::Id,
+    value: &mut f64,
+    range: std::ops::RangeInclusive<f64>,
+    decimals: usize,
+    speed: f64,
+) -> bool {
+    let edit_key = id.with("editing");
+    let mut changed = false;
+    let editing: Option<String> = ui.data(|d| d.get_temp(edit_key));
+    if let Some(mut buf) = editing {
+        let out = ui.add_sized(
+            [width, 22.0],
+            egui::TextEdit::singleline(&mut buf)
+                .id(id)
+                .margin(egui::Margin::symmetric(6, 2))
+                .horizontal_align(egui::Align::Center),
+        );
+        out.request_focus();
+        if out.lost_focus() {
+            if let Ok(v) = buf.trim().parse::<f64>() {
+                let nv = v.clamp(*range.start(), *range.end());
+                if (nv - *value).abs() > f64::EPSILON {
+                    *value = nv;
+                    changed = true;
+                }
+            }
+            ui.data_mut(|d| d.remove::<String>(edit_key));
+        } else {
+            ui.data_mut(|d| d.insert_temp(edit_key, buf));
+        }
+    } else {
+        let t = tokens(ui);
+        let (rect, resp) =
+            ui.allocate_exact_size(egui::vec2(width, 22.0), egui::Sense::click_and_drag());
+        let bg = if resp.hovered() {
+            lerp_color(t.well, t.accent, 0.14)
+        } else {
+            t.well
+        };
+        ui.painter().rect_filled(rect, 4.0, bg);
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            format!("{:.*}", decimals, *value),
+            egui::FontId::monospace(T_VALUE),
+            t.text,
+        );
+        if resp.hovered() || resp.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        if resp.dragged() {
+            let dx = resp.drag_delta().x as f64;
+            if dx != 0.0 {
+                let nv = (*value + dx * speed).clamp(*range.start(), *range.end());
+                if (nv - *value).abs() > f64::EPSILON {
+                    *value = nv;
+                    changed = true;
+                }
+            }
+        }
+        if resp.double_clicked() {
+            ui.data_mut(|d| d.insert_temp(edit_key, format!("{:.*}", decimals, *value)));
+        }
+    }
+    changed
+}
+
+/// A bespoke select: a chip showing the current option + a caret, opening a
+/// custom popup list. Returns `Some(index)` when an option is chosen.
+pub(crate) fn dropdown(
+    ui: &mut egui::Ui,
+    width: f32,
+    popup_id: egui::Id,
+    current: &str,
+    options: &[&str],
+) -> Option<usize> {
+    let t = tokens(ui);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 22.0), egui::Sense::click());
+    let open = egui::Popup::is_id_open(ui.ctx(), popup_id);
+    let bg = if resp.hovered() || open {
+        lerp_color(t.well, t.accent, 0.16)
+    } else {
+        t.well
+    };
+    ui.painter().rect_filled(rect, 4.0, bg);
+    ui.painter().text(
+        egui::pos2(rect.left() + 7.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        current,
+        egui::FontId::proportional(T_VALUE),
+        t.text,
+    );
+    // Custom caret (the icon font lacks ▾, so draw it).
+    let cx = rect.right() - 9.0;
+    let cy = rect.center().y;
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(cx - 3.0, cy - 1.5),
+            egui::pos2(cx + 3.0, cy - 1.5),
+            egui::pos2(cx, cy + 2.5),
+        ],
+        t.dim,
+        egui::Stroke::NONE,
+    ));
+    let mut sel = None;
+    egui::Popup::menu(&resp)
+        .id(popup_id)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+        .show(|ui| {
+            ui.set_min_width(width.max(110.0));
+            let tk = tokens(ui);
+            for (i, opt) in options.iter().enumerate() {
+                let (r, rr) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 22.0),
+                    egui::Sense::click(),
+                );
+                if rr.hovered() {
+                    ui.painter()
+                        .rect_filled(r, 3.0, tk.accent.gamma_multiply(0.30));
+                }
+                ui.painter().text(
+                    egui::pos2(r.left() + 7.0, r.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    *opt,
+                    egui::FontId::proportional(T_BODY),
+                    tk.text,
+                );
+                if rr.clicked() {
+                    sel = Some(i);
+                }
+            }
+        });
+    sel
+}
+
+/// A small square icon button (✕, ✚, …). Returns true on click.
+pub(crate) fn icon_button(ui: &mut egui::Ui, glyph: &str) -> bool {
+    let t = tokens(ui);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
+    if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, 4.0, lerp_color(t.well, t.accent, 0.30));
+    }
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        egui::FontId::proportional(13.0),
+        if resp.hovered() { t.text } else { t.dim },
+    );
+    resp.clicked()
+}
+
+/// A bespoke text button, sized to its label. `accent` fills it (e.g. primary
+/// actions); otherwise it sits in a `well`.
+pub(crate) fn button(ui: &mut egui::Ui, label: &str, accent: bool) -> bool {
+    let t = tokens(ui);
+    let font = egui::FontId::proportional(T_BODY);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font.clone(), t.text);
+    let w = galley.size().x + 24.0;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 26.0), egui::Sense::click());
+    let (bg, fg) = if accent {
+        (
+            if resp.hovered() {
+                t.accent
+            } else {
+                t.accent.gamma_multiply(0.88)
+            },
+            egui::Color32::WHITE,
+        )
+    } else if resp.hovered() {
+        (lerp_color(t.well, t.accent, 0.22), t.text)
+    } else {
+        (t.well, t.text)
+    };
+    ui.painter().rect_filled(rect, 5.0, bg);
+    ui.painter()
+        .text(rect.center(), egui::Align2::CENTER_CENTER, label, font, fg);
+    resp.clicked()
+}
