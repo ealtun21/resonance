@@ -188,20 +188,20 @@ impl GuiApp {
                 egui::Frame::default()
                     .inner_margin(egui::Margin::symmetric(8, 6))
                     .show(ui, |ui| {
-                        accordion(ui, "acc_fx", "Effects", true, |ui| {
+                        accordion(ui, "acc_fx_v2", "Effects", true, |ui| {
                             if let Some(s) = state {
                                 self.effects_section(ui, s);
                             }
                         });
-                        accordion(ui, "acc_bands", "EQ bands", true, |ui| {
+                        accordion(ui, "acc_bands_v2", "EQ bands", true, |ui| {
                             if let Some(s) = state {
                                 self.bands_section(ui, s);
                             }
                         });
-                        accordion(ui, "acc_map", "Device Mapping", false, |ui| {
+                        accordion(ui, "acc_map_v2", "Device Mapping", false, |ui| {
                             self.device_mapping_section(ui)
                         });
-                        accordion(ui, "acc_prof", "Profiles", false, |ui| {
+                        accordion(ui, "acc_prof_v2", "Profiles", false, |ui| {
                             self.profiles_panel(ui)
                         });
                     });

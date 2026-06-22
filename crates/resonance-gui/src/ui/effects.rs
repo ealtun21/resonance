@@ -1,58 +1,60 @@
-//! Effects section: the FxSound effect toggles + intensity sliders.
+//! Effects section: the FxSound effect toggles + intensity sliders, drawn with
+//! the bespoke kit so every row aligns (toggle · name · slider · value).
 
 use crate::app::GuiApp;
-use crate::ui::widgets::centered;
+use crate::ui::kit;
 use eframe::egui;
 use resonance_ipc::{Command, DaemonState, FxEffectId};
 
 impl GuiApp {
     pub(crate) fn effects_section(&mut self, ui: &mut egui::Ui, state: &DaemonState) {
-        centered(ui, "effects_body", |ui| {
-            egui::Grid::new("effects_grid")
-                .num_columns(3)
-                .spacing([12.0, 6.0])
-                .show(ui, |ui| {
-                    for id in FxEffectId::ALL {
-                        let name = id.label();
-                        let (mut intensity, mut on) = state.effects.get(id);
-                        let min = id.min();
+        const NAME_W: f32 = 100.0;
+        const VALUE_W: f32 = 52.0;
+        for id in FxEffectId::ALL {
+            let (mut intensity, mut on) = state.effects.get(id);
+            let min = id.min();
+            ui.horizontal(|ui| {
+                ui.set_min_height(kit::ROW_H);
+                ui.spacing_mut().item_spacing.x = kit::SP_S;
+                ui.add_space(kit::SP_XS);
 
-                        if ui.checkbox(&mut on, "").changed() {
-                            self.queue_edit(Command::SetEffectEnabled {
-                                effect: id,
-                                enabled: on,
-                            });
-                        }
-                        ui.label(name);
-                        // Slider is always interactive — dragging it auto-enables the
-                        // effect so you can set a value without first ticking the box.
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut intensity, min..=1.0)
-                                    .custom_formatter(|v, _| format!("{:+.0}%", v * 100.0))
-                                    .custom_parser(|s| {
-                                        s.trim_end_matches('%')
-                                            .parse::<f64>()
-                                            .ok()
-                                            .map(|v| v / 100.0)
-                                    }),
-                            )
-                            .changed()
-                        {
-                            if !on {
-                                self.queue_edit(Command::SetEffectEnabled {
-                                    effect: id,
-                                    enabled: true,
-                                });
-                            }
-                            self.queue_edit(Command::SetEffectIntensity {
-                                effect: id,
-                                value: intensity,
-                            });
-                        }
-                        ui.end_row();
+                if kit::toggle(ui, &mut on) {
+                    self.queue_edit(Command::SetEffectEnabled {
+                        effect: id,
+                        enabled: on,
+                    });
+                }
+
+                // Name (dimmed while the effect is off) in a fixed column so the
+                // sliders below it all start at the same x.
+                let t = kit::tokens(ui);
+                let (lr, _) =
+                    ui.allocate_exact_size(egui::vec2(NAME_W, kit::ROW_H), egui::Sense::hover());
+                ui.painter().text(
+                    egui::pos2(lr.left(), lr.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    id.label(),
+                    egui::FontId::proportional(kit::T_BODY),
+                    if on { t.text } else { t.dim },
+                );
+
+                // Slider fills the gap to the value chip. Dragging it also enables
+                // the effect, so you can set a value without ticking first.
+                let slider_w = (ui.available_width() - VALUE_W - kit::SP_S).max(60.0);
+                if kit::slider(ui, slider_w, &mut intensity, min..=1.0) {
+                    if !on {
+                        self.queue_edit(Command::SetEffectEnabled {
+                            effect: id,
+                            enabled: true,
+                        });
                     }
-                });
-        });
+                    self.queue_edit(Command::SetEffectIntensity {
+                        effect: id,
+                        value: intensity,
+                    });
+                }
+                kit::value_chip(ui, VALUE_W, &format!("{:+.0}%", intensity * 100.0));
+            });
+        }
     }
 }
