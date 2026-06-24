@@ -25,6 +25,15 @@
 //!   256× oversampling) keeps THD+N far below audibility — see the resampler
 //!   tests in `resonance-dsp`.
 
+// TODO(rubato 3.0): upgrade from 0.16.2 to 3.x. It's a full API rewrite, not a
+// bump: `SincFixedIn::new(...)` → `Async::new_sinc(ratio, max_rel, &params,
+// chunk, channels, FixedAsync::Input)`, and `process_into_buffer` now takes the
+// `audioadapter`/`audioadapter_buffers` buffer-abstraction traits (`&dyn
+// Adapter` / `&mut dyn AdapterMut`, which can wrap interleaved slices directly —
+// could drop the manual de/interleave below) plus an `Indexing` arg. It also
+// pulls in a heavier dep tree (audioadapter, audioadapter_buffers, audio_core).
+// 0.16.2 is functionally identical for our use, so deferred. When upgrading,
+// re-run the rate tests + verify on all three backends.
 use rubato::{
     Resampler, Sample, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
     WindowFunction,

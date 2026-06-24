@@ -40,6 +40,7 @@ use anyhow::{Context, Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, Host, SampleFormat, StreamConfig};
 use resonance_dsp::chain::ProcessorChain;
+use resonance_dsp::resample::StreamResampler;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -200,15 +201,11 @@ fn run_streams(
             out_default.sample_format()
         ));
     }
-    // Pin the ENTIRE chain (real output + cable + our streams) to one rate so
-    // nothing resamples. Must equal VB-CABLE's NATIVE internal rate (44100) —
-    // its WASAPI shared format can be set higher, but its actual stream runs at
-    // 44.1k (dshow confirms), so a 48k shared format just makes Windows resample
-    // at the cable boundary and roll off the highs. Match the cable's real rate
-    // everywhere, including the physical output, so OG and through-us are equal.
-    const CHAIN_RATE: u32 = 48_000;
-    super::win_devices::set_endpoint_rate(&render_name, CHAIN_RATE);
-    let sample_rate = CHAIN_RATE;
+    // Follow the render endpoint's own shared-mode rate instead of pinning to a
+    // constant, so a hi-res Windows DAC (96/192 kHz) runs natively. The chain and
+    // the capture→render resampler below both bind to this rate.
+    let sample_rate = out_default.sample_rate();
+    super::win_devices::set_endpoint_rate(&render_name, sample_rate);
     let out_cfg = StreamConfig {
         channels: out_default.channels(),
         sample_rate,
@@ -237,19 +234,26 @@ fn run_streams(
         super::win_devices::match_cable_endpoints_to(sample_rate);
     }
 
-    // Capture endpoint's actual shared-mix rate (same reasoning as render: don't
-    // trust cpal's default config). The resampler uses the known capture:render
-    // ratio as its base.
+    // Capture endpoint's actual native shared-mix rate (don't trust cpal's
+    // default config). The capture stream resamples this to the render rate with
+    // rubato, bypassing when they already match (e.g. a cable matched above), so
+    // there's no hidden WASAPI resample on the capture side.
     let capture_cfg = if capture_loopback {
         capture_dev.default_output_config()
     } else {
         capture_dev.default_input_config()
     }
     .with_context(|| "capture device config")?;
-    // Cable was just matched to CHAIN_RATE (= sample_rate), so capture runs at
-    // the same rate → base_ratio is exactly 1.0 (bit-exact, no resampling).
-    let capture_rate = sample_rate;
+    let capture_rate = capture_cfg.sample_rate();
     let render_rate = sample_rate as f64;
+
+    // Publish rates for `status` (the GUI/CLI flag resampling when capture native
+    // ≠ render). On Windows the chain binds once at setup, so set both here.
+    {
+        let s = shared.lock().unwrap();
+        s.meters.set_capture_rate(capture_rate as f64);
+        s.meters.set_sample_rate(sample_rate as f64);
+    }
 
     info!(
         "WASAPI formats: capture {:?} @ {capture_rate} Hz ({} ch), render {:?} @ {sample_rate} Hz ({} ch)",
@@ -268,6 +272,7 @@ fn run_streams(
         &capture_dev,
         capture_loopback,
         capture_rate,
+        sample_rate,
         ring_tx,
         Arc::clone(&stream_err),
     )
@@ -280,7 +285,10 @@ fn run_streams(
         &render_dev,
         &out_cfg,
         out_channels,
-        capture_rate as f64,
+        // The ring is already at the render rate (the capture stream resampled to
+        // it), so the output reads it 1:1 — base ratio 1.0, bit-exact, with the
+        // drift slip below only correcting capture/render clock drift.
+        render_rate,
         render_rate,
         ring_rx,
         Arc::clone(&shared),
@@ -341,6 +349,7 @@ fn build_capture_input(
     device: &Device,
     loopback: bool,
     rate: u32,
+    target_rate: u32,
     ring_tx: rtrb::Producer<f32>,
     err_flag: Arc<AtomicBool>,
 ) -> Result<cpal::Stream> {
@@ -354,8 +363,9 @@ fn build_capture_input(
             .with_context(|| "default_input_config for capture")?
     };
     let in_channels = cfg.channels().max(1) as usize;
-    // Open at the endpoint's true shared-mix rate (passed in), not cpal's
-    // default-config rate, so WASAPI doesn't resample the capture.
+    // Open at the endpoint's true native shared-mix rate, not cpal's default-
+    // config rate, so WASAPI doesn't resample the capture — we resample to the
+    // render rate ourselves (rubato, high quality) below.
     let stream_cfg = StreamConfig {
         channels: cfg.channels(),
         sample_rate: rate,
@@ -370,20 +380,28 @@ fn build_capture_input(
         }
     };
 
-    // Downmix arbitrary channel layout → stereo, push interleaved into the ring.
-    // Dropped samples (ring full) are acceptable: the render side zero-pads on
-    // underrun, so transient overruns degrade to brief glitches, not crashes.
+    // Downmix arbitrary channel layout → stereo, resample native → render rate
+    // (bypasses to a direct copy when equal — the common cable-matched case stays
+    // bit-exact), then push interleaved into the ring. Dropped samples (ring full)
+    // are acceptable: the render side zero-pads on underrun, so transient overruns
+    // degrade to brief glitches, not crashes.
     let stream = match cfg.sample_format() {
         SampleFormat::F32 => {
             let mut tx = ring_tx;
+            let mut rs = StreamResampler::<f32>::new(rate as f64, target_rate as f64, 2);
+            let mut scratch: Vec<f32> = Vec::with_capacity(8192 * 2);
             device.build_input_stream(
                 &stream_cfg,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    scratch.clear();
                     for frame in data.chunks(in_channels) {
                         let l = frame.first().copied().unwrap_or(0.0);
                         let r = if in_channels >= 2 { frame[1] } else { l };
-                        let _ = tx.push(l);
-                        let _ = tx.push(r);
+                        scratch.push(l);
+                        scratch.push(r);
+                    }
+                    for &s in rs.process(&scratch) {
+                        let _ = tx.push(s);
                     }
                 },
                 err_cb,
@@ -392,10 +410,13 @@ fn build_capture_input(
         }
         SampleFormat::I16 => {
             let mut tx = ring_tx;
+            let mut rs = StreamResampler::<f32>::new(rate as f64, target_rate as f64, 2);
+            let mut scratch: Vec<f32> = Vec::with_capacity(8192 * 2);
             device.build_input_stream(
                 &stream_cfg,
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
                     const INV: f32 = 1.0 / 32768.0;
+                    scratch.clear();
                     for frame in data.chunks(in_channels) {
                         let l = frame.first().copied().unwrap_or(0) as f32 * INV;
                         let r = if in_channels >= 2 {
@@ -403,8 +424,11 @@ fn build_capture_input(
                         } else {
                             l
                         };
-                        let _ = tx.push(l);
-                        let _ = tx.push(r);
+                        scratch.push(l);
+                        scratch.push(r);
+                    }
+                    for &s in rs.process(&scratch) {
+                        let _ = tx.push(s);
                     }
                 },
                 err_cb,
