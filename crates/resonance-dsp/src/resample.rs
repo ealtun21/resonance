@@ -13,37 +13,26 @@
 //! - **Bypass when rates match.** [`StreamResampler::is_bypass`] is true when
 //!   `from == to`; callers should skip conversion entirely on the common 48 k
 //!   path so it costs nothing.
-//! - **RT-safe steady state.** All staging buffers are pre-allocated for a
-//!   bounded input block; [`StreamResampler::process`] does no heap allocation
-//!   once the buffers have settled (the output staging Vec reaches its high-water
-//!   mark within the first few blocks and then only ever clears, keeping
-//!   capacity).
-//! - **Interleaved in, interleaved out.** rubato works on per-channel planar
-//!   slices; the interleave/deinterleave happens here so backends keep their
-//!   interleaved buffers.
+//! - **RT-safe steady state.** The input accumulator and interleaved output
+//!   buffer are pre-allocated for a bounded input block; [`StreamResampler::process`]
+//!   does no heap allocation once the buffers have reached their high-water mark.
+//! - **Interleaved in, interleaved out.** rubato 3.x's `audioadapter` buffer
+//!   traits wrap interleaved slices directly (`InterleavedSlice`), so there's no
+//!   manual de/interleave — the accumulator and output are plain interleaved Vecs.
 //! - **Quality.** A windowed-sinc interpolator (Blackman-Harris, 256-tap,
 //!   256× oversampling) keeps THD+N far below audibility — see the resampler
 //!   tests in `resonance-dsp`.
 
-// TODO(rubato 3.0): upgrade from 0.16.2 to 3.x. It's a full API rewrite, not a
-// bump: `SincFixedIn::new(...)` → `Async::new_sinc(ratio, max_rel, &params,
-// chunk, channels, FixedAsync::Input)`, and `process_into_buffer` now takes the
-// `audioadapter`/`audioadapter_buffers` buffer-abstraction traits (`&dyn
-// Adapter` / `&mut dyn AdapterMut`, which can wrap interleaved slices directly —
-// could drop the manual de/interleave below) plus an `Indexing` arg. It also
-// pulls in a heavier dep tree (audioadapter, audioadapter_buffers, audio_core).
-// 0.16.2 is functionally identical for our use, so deferred. When upgrading,
-// re-run the rate tests + verify on all three backends.
+use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{
-    Resampler, Sample, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
-    WindowFunction,
+    Async, FixedAsync, Indexing, Resampler, Sample, SincInterpolationParameters,
+    SincInterpolationType, WindowFunction, calculate_cutoff,
 };
 
-/// Input frames consumed per internal rubato call. A fixed-input resampler
-/// requires exactly this many frames per `process`, so input is buffered to
-/// this boundary. Smaller → lower buffering latency (`chunk / from_hz`),
-/// more per-call overhead. 256 frames ≈ 5.3 ms at 48 kHz — a good balance for
-/// a live EQ path.
+/// Input frames consumed per internal rubato chunk. A fixed-input resampler
+/// requires this many frames per step, so input is buffered to this boundary.
+/// Smaller → lower buffering latency (`chunk / from_hz`), more per-call overhead.
+/// 256 frames ≈ 5.3 ms at 48 kHz — a good balance for a live EQ path.
 const CHUNK: usize = 256;
 
 /// Upper bound on the interleaved input length a single [`StreamResampler::process`]
@@ -51,15 +40,18 @@ const CHUNK: usize = 256;
 /// callback; 8192 is generous headroom so staging never reallocates.
 const MAX_INPUT_FRAMES: usize = 8192;
 
-/// High-quality windowed-sinc parameters. `f_cutoff` is auto-scaled by rubato
-/// for downsampling ratios (anti-aliasing), so 0.95 is the upsampling cutoff.
+/// High-quality windowed-sinc parameters. `calculate_cutoff` derives the optimal
+/// anti-alias cutoff for the window + length; rubato scales it further for
+/// downsampling ratios internally.
 fn sinc_params() -> SincInterpolationParameters {
+    let sinc_len = 256;
+    let window = WindowFunction::BlackmanHarris2;
     SincInterpolationParameters {
-        sinc_len: 256,
-        f_cutoff: 0.95,
+        sinc_len,
+        f_cutoff: calculate_cutoff(sinc_len, window),
         interpolation: SincInterpolationType::Linear,
         oversampling_factor: 256,
-        window: WindowFunction::BlackmanHarris2,
+        window,
     }
 }
 
@@ -73,20 +65,18 @@ pub struct StreamResampler<T: Sample> {
     to_hz: f64,
     channels: usize,
     inner: Option<Inner<T>>,
-    /// Interleaved output produced by the most recent `process` call. Reused
-    /// across calls (cleared, capacity retained) so steady state is alloc-free.
-    out_inter: Vec<T>,
 }
 
 struct Inner<T: Sample> {
-    rs: SincFixedIn<T>,
-    /// Interleaved input not yet consumed into a full [`CHUNK`] (always
-    /// `< CHUNK * channels` samples between calls).
+    rs: Async<T>,
+    /// Output rate / input rate — used to bound the per-call output buffer.
+    ratio: f64,
+    /// Interleaved input not yet consumed into a full [`CHUNK`] (carried between
+    /// calls; always `< CHUNK * channels` samples after a call returns).
     in_acc: Vec<T>,
-    /// Per-channel deinterleaved staging for one chunk (`channels × CHUNK`).
-    in_planar: Vec<Vec<T>>,
-    /// Per-channel output staging (`channels × output_frames_max`).
-    out_planar: Vec<Vec<T>>,
+    /// Interleaved output produced by the most recent `process` call. Reused
+    /// across calls (capacity retained) so steady state is alloc-free.
+    out_inter: Vec<T>,
 }
 
 impl<T: Sample> StreamResampler<T> {
@@ -104,26 +94,25 @@ impl<T: Sample> StreamResampler<T> {
             let ratio = to_hz / from_hz;
             // max_relative_ratio 2.0 leaves room to nudge the ratio later for
             // clock-drift tracking without rebuilding the resampler.
-            let rs = SincFixedIn::<T>::new(ratio, 2.0, sinc_params(), CHUNK, channels)
-                .expect("valid resampler ratio");
+            let rs = Async::<T>::new_sinc(
+                ratio,
+                2.0,
+                &sinc_params(),
+                CHUNK,
+                channels,
+                FixedAsync::Input,
+            )
+            .expect("valid resampler ratio");
             let out_max = rs.output_frames_max();
-            let in_planar = vec![vec![T::zero(); CHUNK]; channels];
-            let out_planar = vec![vec![T::zero(); out_max]; channels];
-            let mut in_acc = Vec::with_capacity((CHUNK + MAX_INPUT_FRAMES) * channels);
-            in_acc.clear();
+            // Worst case per call: ceil(MAX_INPUT_FRAMES / CHUNK) + 1 chunks, each
+            // producing ≤ out_max frames. Pre-size so steady state never grows.
+            let out_cap = (MAX_INPUT_FRAMES / CHUNK + 2) * out_max * channels;
             Some(Inner {
                 rs,
-                in_acc,
-                in_planar,
-                out_planar,
+                ratio,
+                in_acc: Vec::with_capacity((CHUNK + MAX_INPUT_FRAMES) * channels),
+                out_inter: Vec::with_capacity(out_cap),
             })
-        };
-
-        // Worst case per call: ceil(MAX_INPUT_FRAMES / CHUNK) + 1 chunks, each
-        // producing ≤ out_max frames. Pre-size so steady state never grows.
-        let out_cap = match &inner {
-            Some(i) => (MAX_INPUT_FRAMES / CHUNK + 2) * i.rs.output_frames_max() * channels,
-            None => MAX_INPUT_FRAMES * channels,
         };
 
         Self {
@@ -131,7 +120,6 @@ impl<T: Sample> StreamResampler<T> {
             to_hz,
             channels,
             inner,
-            out_inter: Vec::with_capacity(out_cap),
         }
     }
 
@@ -171,51 +159,80 @@ impl<T: Sample> StreamResampler<T> {
     ///
     /// On bypass this returns `input` unchanged (no copy).
     pub fn process<'a>(&'a mut self, input: &'a [T]) -> &'a [T] {
+        let ch = self.channels;
         let Some(inner) = self.inner.as_mut() else {
             return input;
         };
-        let channels = self.channels;
-        self.out_inter.clear();
 
         inner.in_acc.extend_from_slice(input);
-        let chunk_samples = CHUNK * channels;
-
-        while inner.in_acc.len() >= chunk_samples {
-            // Deinterleave the leading chunk into planar per-channel buffers.
-            for (ch, plane) in inner.in_planar.iter_mut().enumerate() {
-                for (frame, slot) in plane.iter_mut().enumerate() {
-                    *slot = inner.in_acc[frame * channels + ch];
-                }
-            }
-
-            let (_in_used, out_n) = inner
-                .rs
-                .process_into_buffer(&inner.in_planar, &mut inner.out_planar, None)
-                .expect("resampler chunk");
-
-            // Interleave the produced output frames.
-            for frame in 0..out_n {
-                for plane in inner.out_planar.iter() {
-                    self.out_inter.push(plane[frame]);
-                }
-            }
-
-            // Drop the consumed chunk from the front of the accumulator.
-            inner.in_acc.copy_within(chunk_samples.., 0);
-            let new_len = inner.in_acc.len() - chunk_samples;
-            inner.in_acc.truncate(new_len);
+        let total_in = inner.in_acc.len() / ch;
+        let chunk = inner.rs.input_frames_next();
+        if total_in < chunk {
+            // Not enough buffered for a full chunk yet.
+            inner.out_inter.clear();
+            return &inner.out_inter;
         }
 
-        &self.out_inter
+        // Upper bound on this call's output frames; size the output buffer so the
+        // interleaved adapter has room and rubato never reports "buffer too short".
+        let max_out =
+            (total_in as f64 * inner.ratio).ceil() as usize + inner.rs.output_frames_max() + 1;
+        inner.out_inter.clear();
+        inner.out_inter.resize(max_out * ch, T::zero());
+
+        // Split into disjoint &mut field borrows so the input adapter (&in_acc),
+        // the output adapter (&mut out_inter), and the resampler (&mut rs) don't
+        // alias.
+        let Inner {
+            rs,
+            in_acc,
+            out_inter,
+            ..
+        } = inner;
+        let in_adapter =
+            InterleavedSlice::new(&in_acc[..], ch, total_in).expect("interleaved input");
+        let mut out_adapter =
+            InterleavedSlice::new_mut(&mut out_inter[..], ch, max_out).expect("interleaved output");
+
+        let mut indexing = Indexing {
+            input_offset: 0,
+            output_offset: 0,
+            partial_len: None,
+            active_channels_mask: None,
+        };
+        let mut in_left = total_in;
+        let mut next = rs.input_frames_next();
+        let mut total_out = 0usize;
+        while in_left >= next {
+            let (nbr_in, nbr_out) = rs
+                .process_into_buffer(&in_adapter, &mut out_adapter, Some(&indexing))
+                .expect("resampler chunk");
+            indexing.input_offset += nbr_in;
+            indexing.output_offset += nbr_out;
+            in_left -= nbr_in;
+            total_out += nbr_out;
+            next = rs.input_frames_next();
+        }
+        let consumed = indexing.input_offset * ch;
+
+        // The adapters' borrows of `in_acc` / `out_inter` end here at their last
+        // use (the loop above), so the buffers are free to mutate below.
+        // Drop the consumed frames from the front of the accumulator.
+        in_acc.copy_within(consumed.., 0);
+        let new_len = in_acc.len() - consumed;
+        in_acc.truncate(new_len);
+        // Keep only the frames actually produced.
+        out_inter.truncate(total_out * ch);
+        &out_inter[..]
     }
 
     /// Drop any buffered input and reset the resampler's internal history.
     pub fn reset(&mut self) {
         if let Some(inner) = self.inner.as_mut() {
             inner.in_acc.clear();
+            inner.out_inter.clear();
             inner.rs.reset();
         }
-        self.out_inter.clear();
     }
 }
 
