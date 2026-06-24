@@ -13,10 +13,15 @@
 //! single public entry point. `main.rs` calls `audio::spawn(...)`; the right
 //! backend is selected at compile time.
 
-use crate::meters::AtomicMeters;
 use crate::state::AudioCommand;
-use anyhow::Result;
 use resonance_dsp::chain::ProcessorChain;
+// Only the `BackendCtx`/`spawn` path (absent on Windows — the APO owns the DSP)
+// needs these; `apply_command` and the consts below don't.
+#[cfg(not(target_os = "windows"))]
+use crate::meters::AtomicMeters;
+#[cfg(not(target_os = "windows"))]
+use anyhow::Result;
+#[cfg(not(target_os = "windows"))]
 use std::{sync::Arc, thread::JoinHandle};
 
 /// Channel count the daemon negotiates with the system audio graph.
@@ -44,14 +49,16 @@ mod system_tap;
 #[cfg(target_os = "macos")]
 use coreaudio as backend;
 
-#[cfg(target_os = "windows")]
-mod wasapi;
+// Windows has NO daemon-side audio backend: the in-engine APO (`resonance-apo`,
+// loaded into audiodg.exe) owns the DSP, and the daemon is the control plane
+// (see `main.rs`). Only the MMDevice helpers + the loopback *measurement*
+// diagnostic live here.
 #[cfg(target_os = "windows")]
 pub(crate) mod win_devices;
 #[cfg(target_os = "windows")]
-use wasapi as backend;
+mod win_measure;
 #[cfg(target_os = "windows")]
-pub use wasapi::measure_loopback;
+pub use win_measure::measure_loopback;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 mod stub;
@@ -62,6 +69,10 @@ use stub as backend;
 /// chain, and the shared meter handle. Bundled into one named type so the
 /// backend contract is a single edit point instead of seven positional
 /// arguments duplicated across every platform's `spawn`.
+///
+/// Not defined on Windows: there's no daemon-side backend there (the APO owns
+/// the DSP), so nothing constructs or spawns it.
+#[cfg(not(target_os = "windows"))]
 pub struct BackendCtx {
     /// IPC → RT: chain-mutating commands.
     pub cmd_rx: rtrb::Consumer<AudioCommand>,
@@ -81,7 +92,9 @@ pub struct BackendCtx {
 
 /// Spawn the audio backend on its own dedicated real-time thread.
 ///
-/// Returns a `JoinHandle` so the daemon's `main` can wait on shutdown.
+/// Returns a `JoinHandle` so the daemon's `main` can wait on shutdown. Not
+/// present on Windows (the APO owns the DSP; `main.rs` skips it there).
+#[cfg(not(target_os = "windows"))]
 pub fn spawn(ctx: BackendCtx) -> Result<JoinHandle<()>> {
     backend::spawn(ctx)
 }
