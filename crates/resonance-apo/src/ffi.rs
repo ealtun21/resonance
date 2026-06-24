@@ -410,3 +410,161 @@ pub extern "C" fn resonance_apo_destroy(p: *mut ApoEngine) {
         eng.shared.stop.store(true, Ordering::Release);
     }));
 }
+
+#[cfg(test)]
+mod hires_harness {
+    //! Drives the REAL APO exports (create → lock → process → unlock → destroy)
+    //! at a spread of fixed + pseudo-random sample rates, with no Windows audio
+    //! endpoint/audiodg involved. Publishes a known chain — one +12 dB peak band
+    //! at 1 kHz — then, for each rate, feeds a 1 kHz tone through the APO and
+    //! asserts:
+    //!   * the band still boosts 1 kHz by ~+12 dB  → the chain was built at the
+    //!     correct rate (a rate bug would move the band off 1 kHz, dropping the
+    //!     gain), and
+    //!   * the output peak is still at 1 kHz        → no pitch shift.
+    //! This is the on-VM stand-in for a real >48 kHz Windows endpoint (which the
+    //! emulated HD-Audio codec can't provide): it exercises the exact shipping
+    //! APO code path at hi-res.
+    use super::{
+        resonance_apo_create, resonance_apo_destroy, resonance_apo_lock, resonance_apo_process,
+        resonance_apo_unlock,
+    };
+    use crate::state::{ApoStateWriter, default_state_path};
+    use resonance_dsp::chain::ProcessorChain;
+    use resonance_dsp::filter::{ApoFilter, FilterType};
+    use rustfft::{FftPlanner, num_complex::Complex};
+    use std::f64::consts::PI;
+
+    /// Deterministic LCG — reproducible "random" rates across runs/CI.
+    fn next_rand(s: &mut u64) -> u64 {
+        *s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *s >> 33
+    }
+
+    /// Run a `tone_hz` sine through the APO at `rate`; return `(gain_db, peak_hz)`.
+    fn measure(rate: f64, tone_hz: f64) -> (f64, f64) {
+        let max_frames = 1024u32;
+        let p = resonance_apo_create();
+        assert!(!p.is_null(), "create returned null");
+        resonance_apo_lock(p, 2, rate, max_frames);
+
+        let frames = (rate * 0.5) as usize;
+        let amp = 0.2f64; // +12 dB → 0.2·3.98 ≈ 0.8 peak, no clipping
+        let w = 2.0 * PI * tone_hz / rate;
+        let mut buf: Vec<f32> = Vec::with_capacity(frames * 2);
+        for i in 0..frames {
+            let s = (amp * (w * i as f64).sin()) as f32;
+            buf.push(s);
+            buf.push(s);
+        }
+        let mut off = 0usize;
+        while off < frames {
+            let n = (frames - off).min(max_frames as usize);
+            resonance_apo_process(p, buf[off * 2..].as_mut_ptr(), n as u32, 2);
+            off += n;
+        }
+
+        // Steady-state mono (channel 0); skip the filter's settling transient.
+        let skip = frames / 4;
+        let mono: Vec<f64> = (skip..frames).map(|i| buf[i * 2] as f64).collect();
+        let in_rms = amp / 2f64.sqrt();
+        let out_rms = (mono.iter().map(|x| x * x).sum::<f64>() / mono.len() as f64).sqrt();
+        let gain_db = 20.0 * (out_rms / in_rms).log10();
+
+        // FFT peak (largest pow2 fitting the steady-state, capped) + parabolic
+        // interpolation for sub-bin accuracy regardless of rate.
+        let mut fft_n = 1usize;
+        while fft_n * 2 <= mono.len().min(65536) {
+            fft_n *= 2;
+        }
+        let seg = &mono[mono.len() - fft_n..];
+        let mut planner = FftPlanner::new();
+        let fft = planner.plan_fft_forward(fft_n);
+        let mut c: Vec<Complex<f64>> = seg
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| {
+                let win = 0.5 * (1.0 - (2.0 * PI * i as f64 / fft_n as f64).cos());
+                Complex::new(x * win, 0.0)
+            })
+            .collect();
+        fft.process(&mut c);
+        let half = fft_n / 2;
+        let (mut bb, mut bm) = (1usize, 0.0f64);
+        for (k, v) in c.iter().enumerate().take(half).skip(1) {
+            let m = v.norm();
+            if m > bm {
+                bm = m;
+                bb = k;
+            }
+        }
+        let mut peak = bb as f64;
+        if bb >= 1 && bb + 1 < half {
+            let (a, b, cc) = (c[bb - 1].norm(), c[bb].norm(), c[bb + 1].norm());
+            let denom = a - 2.0 * b + cc;
+            if denom.abs() > f64::EPSILON {
+                let d = 0.5 * (a - cc) / denom;
+                if d.abs() <= 1.0 {
+                    peak += d;
+                }
+            }
+        }
+        let peak_hz = peak * rate / fft_n as f64;
+
+        resonance_apo_unlock(p);
+        resonance_apo_destroy(p);
+        (gain_db, peak_hz)
+    }
+
+    #[test]
+    fn apo_eq_rate_correct_across_many_rates() {
+        // Publish a known chain: one +12 dB peak band at 1 kHz, nothing else.
+        let band = ApoFilter::builder()
+            .filter_type(FilterType::Peaking)
+            .freq(1000.0)
+            .gain_db(12.0)
+            .q(4.0)
+            .enabled(true)
+            .channels(2)
+            .sample_rate(48_000.0)
+            .build()
+            .unwrap();
+        let chain = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48_000.0)
+            .add_filter(band)
+            .build();
+        {
+            let mut w = ApoStateWriter::create(&default_state_path()).expect("state writer");
+            w.publish(&chain);
+        }
+
+        let mut rates: Vec<f64> = vec![
+            16_000.0, 22_050.0, 32_000.0, 44_100.0, 48_000.0, 88_200.0, 96_000.0, 176_400.0,
+            192_000.0,
+        ];
+        // 8 pseudo-random rates in [8000, 384000] — arbitrary rates stress the
+        // rate-agnostic chain build (w0 = 2π·f/sr for any sr).
+        let mut seed = 0x1234_5678_9abc_def0u64;
+        for _ in 0..8 {
+            rates.push(8_000.0 + (next_rand(&mut seed) % 376_001) as f64);
+        }
+
+        const TONE: f64 = 1_000.0;
+        for r in rates {
+            assert!(TONE < r / 2.0 - 200.0, "tone must sit below Nyquist for {r}");
+            let (gain_db, peak_hz) = measure(r, TONE);
+            assert!(
+                (gain_db - 12.0).abs() < 1.5,
+                "rate {r:.0}: 1 kHz gain {gain_db:.2} dB (want +12) — band shifted off 1 kHz \
+                 (rate bug)?"
+            );
+            assert!(
+                (peak_hz - TONE).abs() < 8.0,
+                "rate {r:.0}: output peak {peak_hz:.1} Hz (want {TONE}) — pitch shift?"
+            );
+        }
+    }
+}
