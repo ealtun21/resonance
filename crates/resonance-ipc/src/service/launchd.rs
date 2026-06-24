@@ -123,6 +123,19 @@ fn check_launchctl(out: std::process::Output, what: &str) -> io::Result<()> {
     }
     let err = String::from_utf8_lossy(&out.stderr);
     let err = err.trim().to_string();
+    // Idempotent transitions: launchctl reports a non-zero status when the
+    // requested state already holds. "No such process" / "Could not find …"
+    // (errno 3/113) is the success case for `stop`/`bootout` on an already-
+    // stopped service; "already loaded" (errno 37) is the success case for
+    // `bootstrap` on a loaded one. Treating these as failures made a redundant
+    // Stop (or a stop on a never-started daemon) surface a spurious error.
+    let low = err.to_ascii_lowercase();
+    if low.contains("no such process")
+        || low.contains("could not find")
+        || low.contains("already loaded")
+    {
+        return Ok(());
+    }
     Err(io::Error::other(if err.is_empty() {
         format!("launchctl {what} failed")
     } else {
@@ -254,10 +267,11 @@ pub fn start() -> io::Result<()> {
     if !is_loaded() {
         install()?;
     }
-    check_launchctl(
-        launchctl(&["kickstart", "-k", &service_target()])?,
-        "kickstart",
-    )
+    // Plain `kickstart` (no `-k`): start the daemon if it's stopped, and leave an
+    // already-running daemon alone. `-k` would kill and immediately relaunch it,
+    // so clicking "Start" while it's already up would needlessly interrupt live
+    // audio — the reported "Start does an odd restart". Only `restart()` kills.
+    check_launchctl(launchctl(&["kickstart", &service_target()])?, "kickstart")
 }
 
 pub fn stop() -> io::Result<()> {
@@ -279,12 +293,11 @@ pub fn restart() -> io::Result<()> {
 /// (re)bootstrap it, then kickstart so the daemon is running immediately.
 pub fn enable() -> io::Result<()> {
     install_with(true)?;
-    // `-k` kills any existing instance and (re)starts, so enable always leaves
-    // the daemon running now, not just autostarting at next login.
-    check_launchctl(
-        launchctl(&["kickstart", "-k", &service_target()])?,
-        "kickstart",
-    )
+    // `install_with` already booted the agent out and back in with RunAtLoad=true
+    // (which starts it), so a plain `kickstart` just guarantees it's running now.
+    // Avoid `-k` here: toggling autostart on shouldn't kill-restart a daemon that
+    // the rebootstrap already brought up.
+    check_launchctl(launchctl(&["kickstart", &service_target()])?, "kickstart")
 }
 
 /// Disable autostart AND stop now (mirrors systemd `disable --now` / xdg

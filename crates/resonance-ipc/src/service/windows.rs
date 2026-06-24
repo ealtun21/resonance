@@ -108,7 +108,13 @@ fn spawn_daemon() -> io::Result<()> {
 }
 
 pub fn start() -> io::Result<()> {
-    // The daemon's pidfile guard makes a redundant spawn a no-op.
+    // Idempotent: if the daemon already answers IPC, don't spawn a second
+    // `resonanced.exe` that would just bail on the pidfile guard (a momentary
+    // ghost process, and on a locked-down box an unnecessary launch that can
+    // trip security/AV prompts). The pidfile guard still backstops a race.
+    if is_active() {
+        return Ok(());
+    }
     spawn_daemon()
 }
 
