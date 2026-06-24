@@ -281,7 +281,13 @@ pub struct DaemonState {
     pub bands: Vec<BandState>,
     pub effects: EffectsState,
     pub current_preset: Option<String>,
+    /// The live DSP/playback sample rate the audio path is running at (Hz).
     pub sample_rate: f64,
+    /// The capture-side sample rate (Hz). Differs from `sample_rate` only when a
+    /// backend is resampling the capture clock to the DSP/output clock (e.g. a
+    /// macOS tap clocked differently from the output device). Equal to
+    /// `sample_rate` on the no-resample path (Linux/PipeWire in-graph filter).
+    pub capture_rate: f64,
     pub channels: usize,
     /// 16 spectrum bins (20 Hz–20 kHz, log-spaced), values 0.0–1.0 peak-normalised
     pub spectrum: Vec<f32>,
@@ -535,6 +541,7 @@ mod tests {
             },
             current_preset: Some("x.fac".into()),
             sample_rate: 48000.0,
+            capture_rate: 48000.0,
             channels: 2,
             spectrum: vec![0.1, 0.2, 0.3],
             active_output: Some("alsa_output.pci".into()),

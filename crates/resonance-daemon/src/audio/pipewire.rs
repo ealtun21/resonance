@@ -657,6 +657,30 @@ unsafe extern "C" fn filter_process_cb(data: *mut c_void, position: *mut spa_io_
             return;
         }
 
+        // Follow the graph's negotiated sample rate. `clock.rate` is the seconds-
+        // per-tick fraction {num, denom}, so the rate in Hz is denom/num (the
+        // common case is {1, 48000}). If the graph runs off-48k — a 44.1 kHz DAC,
+        // a `default.clock.rate` override, a device that forces its own rate — the
+        // biquad + effect coefficients were computed for the wrong rate, landing
+        // every EQ band at the wrong frequency. Rebind to the live rate.
+        //
+        // `rebind_sample_rate` is a no-op when unchanged, so the steady state pays
+        // nothing. It reallocates effect state on an actual change (rare: startup
+        // off-48k, or a graph rate renegotiation), which can cost one block —
+        // acceptable versus a whole session of wrong-rate audio.
+        let rate = (*position).clock.rate;
+        if rate.num > 0 {
+            let sr = rate.denom as f64 / rate.num as f64;
+            if sr > 0.0 {
+                fd.chain.rebind_sample_rate(sr);
+            }
+        }
+        // Publish the live rate for `status` (cheap relaxed store every block).
+        // The in-graph filter captures and plays at the same graph rate, so no
+        // resampling happens here — capture == DSP.
+        fd.meters.set_sample_rate(fd.chain.sample_rate);
+        fd.meters.set_capture_rate(fd.chain.sample_rate);
+
         let in0 = pw_sys::pw_filter_get_dsp_buffer(fd.in_ports[0], n as u32) as *mut f32;
         let in1 = pw_sys::pw_filter_get_dsp_buffer(fd.in_ports[1], n as u32) as *mut f32;
         let out0 = pw_sys::pw_filter_get_dsp_buffer(fd.out_ports[0], n as u32) as *mut f32;

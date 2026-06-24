@@ -477,7 +477,7 @@ impl GuiApp {
     /// (monospace, padded) so values change in place without nudging the layout —
     /// and so [`meters_min_width`](Self::meters_min_width) can measure the block
     /// regardless of the current levels. Shared by the renderer and the fit check.
-    fn meters_items(&self, s: &DaemonState) -> [(egui::Color32, String); 4] {
+    fn meters_items(&self, s: &DaemonState) -> Vec<(egui::Color32, String)> {
         let m = &s.meters;
         let db = |lin: f32| {
             let s = if lin <= 1e-6 {
@@ -506,7 +506,27 @@ impl GuiApp {
         } else {
             (egui::Color32::GRAY, " OK ")
         };
-        [
+        // Sample-rate segment (leftmost). Shows the live DSP/playback rate; when a
+        // backend is resampling (capture rate ≠ DSP rate) it reads "in→out" in
+        // amber so the conversion is visible at a glance.
+        let khz = |hz: f64| {
+            if ((hz / 1000.0).fract()).abs() < 0.05 {
+                format!("{:.0}k", hz / 1000.0)
+            } else {
+                format!("{:.1}k", hz / 1000.0)
+            }
+        };
+        let resampling = (s.capture_rate - s.sample_rate).abs() > 1.0;
+        let (rate_col, rate_txt) = if resampling {
+            (
+                egui::Color32::from_rgb(220, 200, 80),
+                format!("{}→{}", khz(s.capture_rate), khz(s.sample_rate)),
+            )
+        } else {
+            (egui::Color32::GRAY, khz(s.sample_rate))
+        };
+        vec![
+            (rate_col, rate_txt),
             (lvl_color, format!("I {} dB", db(m.in_peak))),
             (lvl_color, format!("O {} dB", db(m.out_peak))),
             (dsp_color, format!("DSP {:>3.0}%", m.dsp_load * 100.0)),
@@ -532,8 +552,11 @@ impl GuiApp {
             })
             .sum();
         let gap = ui.spacing().item_spacing.x;
-        // 4 labels + 3 separators ⇒ 7 widgets / 6 gaps, plus the leading RTL pad.
-        text + 3.0 * 8.0 + 7.0 * gap + kit::SP_M
+        // N labels + (N−1) separators ⇒ (2N−1) widgets / (2N−2) gaps, plus the
+        // leading RTL pad. Derived from the item count so adding a segment (e.g.
+        // the sample-rate readout) keeps the fit check correct.
+        let n = self.meters_items(s).len() as f32;
+        text + (n - 1.0) * 8.0 + (2.0 * n - 1.0) * gap + kit::SP_M
     }
 
     fn meters_widget(&self, ui: &mut egui::Ui, s: &DaemonState) {

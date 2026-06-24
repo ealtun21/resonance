@@ -369,12 +369,16 @@ fn print_state(p: &Paint, s: &resonance_ipc::DaemonState) {
         s.current_preset.as_deref().unwrap_or("none")
     );
     println!("{}{:+.1} dB", label("preamp"), s.preamp_db);
-    println!(
-        "{}{:.0} Hz · {}ch",
-        label("format"),
-        s.sample_rate,
-        s.channels
-    );
+    let resampling = (s.capture_rate - s.sample_rate).abs() > 1.0;
+    let rate = if resampling {
+        format!(
+            "{:.0} Hz · {}ch  (resampling {:.0}→{:.0} Hz)",
+            s.sample_rate, s.channels, s.capture_rate, s.sample_rate
+        )
+    } else {
+        format!("{:.0} Hz · {}ch", s.sample_rate, s.channels)
+    };
+    println!("{}{}", label("format"), rate);
 
     // Live meters.
     let m = &s.meters;

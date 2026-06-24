@@ -24,6 +24,7 @@ use objc2_core_audio_types::{
     kLinearPCMFormatFlagIsFloat, kLinearPCMFormatFlagIsNonInterleaved,
     kLinearPCMFormatFlagIsPacked,
 };
+use resonance_dsp::resample::StreamResampler;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::Arc;
@@ -48,25 +49,48 @@ pub struct HalInputStream {
     /// IOProc invocations whose input buffer contained at least one
     /// non-zero sample — distinguishes "tap silent" from "tap not firing".
     pub nonzero_blocks: Arc<AtomicU64>,
+    /// The tap's capture sample rate (Hz). Surfaced so the supervisor can report
+    /// it for `status` (and tell whether the IOProc is resampling).
+    pub capture_rate: f64,
 }
 
 struct IoState {
-    /// SPSC ring producer the DSP thread reads from.
+    /// SPSC ring producer the DSP thread reads from. Carries samples at the
+    /// **output device rate** (post-resample), so the output callback can pop
+    /// them 1:1 without a pitch shift.
     ring_tx: rtrb::Producer<f32>,
     /// Format the aggregate device reports (sample rate, channel count,
     /// interleaved vs. planar). Captured at open time and used by the
     /// IOProc to decode the buffer layout.
     format: AudioStreamBasicDescription,
+    /// Converts the tap capture rate (`format.mSampleRate`) to the output
+    /// device rate. Bypasses when the two already match. Stereo (the IOProc
+    /// always emits L/R pairs). Without this, a tap clocked differently from
+    /// the output device plays back at the wrong pitch.
+    resampler: StreamResampler<f32>,
+    /// Interleaved stereo f32 scratch the IOProc assembles before resampling —
+    /// pre-allocated so the audio thread never allocates.
+    in_scratch: Vec<f32>,
     callback_count: Arc<AtomicU64>,
     nonzero_blocks: Arc<AtomicU64>,
 }
 
 impl HalInputStream {
     /// Register an IOProc on the given aggregate device and start it.
-    pub fn open(device_id: AudioObjectID, ring_tx: rtrb::Producer<f32>) -> Result<Self> {
+    ///
+    /// `output_rate` is the sample rate the playback side (and the DSP chain)
+    /// runs at. The IOProc resamples the tap's capture rate to this rate before
+    /// pushing into the ring, so capture/playback rate mismatches (BT codecs,
+    /// 44.1 kHz DACs) don't shift pitch.
+    pub fn open(
+        device_id: AudioObjectID,
+        ring_tx: rtrb::Producer<f32>,
+        output_rate: f64,
+    ) -> Result<Self> {
         let format = query_input_format(device_id)?;
         info!(
-            "tap aggregate input format: {} Hz, {} ch, {} bytes/frame, flags=0x{:x}",
+            "tap aggregate input format: {} Hz, {} ch, {} bytes/frame, flags=0x{:x}; \
+             resampling capture → {output_rate} Hz",
             format.mSampleRate,
             format.mChannelsPerFrame,
             format.mBytesPerFrame,
@@ -76,9 +100,13 @@ impl HalInputStream {
         let callback_count = Arc::new(AtomicU64::new(0));
         let nonzero_blocks = Arc::new(AtomicU64::new(0));
 
+        // Stereo resampler: the IOProc always emits L/R pairs into the ring.
+        let resampler = StreamResampler::<f32>::new(format.mSampleRate, output_rate, 2);
         let state = Box::new(IoState {
             ring_tx,
             format,
+            resampler,
+            in_scratch: Vec::with_capacity(MAX_FRAMES_PER_CYCLE * 2),
             callback_count: Arc::clone(&callback_count),
             nonzero_blocks: Arc::clone(&nonzero_blocks),
         });
@@ -127,6 +155,7 @@ impl HalInputStream {
             _state: state_box,
             callback_count,
             nonzero_blocks,
+            capture_rate: format.mSampleRate,
         })
     }
 }
@@ -200,6 +229,11 @@ unsafe extern "C-unwind" fn io_proc(
     let mbuf_ptr = bufs.mBuffers.as_ptr();
     let mut any_nonzero = false;
 
+    // Assemble this block as interleaved stereo into the reusable scratch, then
+    // resample (capture rate → output rate) and push the result into the ring.
+    let scratch = &mut state.in_scratch;
+    scratch.clear();
+
     if is_planar {
         // Planar: one AudioBuffer per channel, each carrying nframes
         // mono f32 samples.
@@ -216,8 +250,8 @@ unsafe extern "C-unwind" fn io_proc(
                 if v != 0.0 {
                     any_nonzero = true;
                 }
-                let _ = state.ring_tx.push(v);
-                let _ = state.ring_tx.push(v);
+                scratch.push(v);
+                scratch.push(v);
             }
         } else {
             // Stereo planar: buffers[0]=L, buffers[1]=R.
@@ -235,8 +269,8 @@ unsafe extern "C-unwind" fn io_proc(
                 if l != 0.0 || r != 0.0 {
                     any_nonzero = true;
                 }
-                let _ = state.ring_tx.push(l);
-                let _ = state.ring_tx.push(r);
+                scratch.push(l);
+                scratch.push(r);
             }
         }
     } else {
@@ -259,15 +293,27 @@ unsafe extern "C-unwind" fn io_proc(
             if l != 0.0 || r != 0.0 {
                 any_nonzero = true;
             }
-            let _ = state.ring_tx.push(l);
-            let _ = state.ring_tx.push(r);
+            scratch.push(l);
+            scratch.push(r);
         }
     }
 
     if any_nonzero {
         state.nonzero_blocks.fetch_add(1, Ordering::Relaxed);
     }
-    let _ = MAX_FRAMES_PER_CYCLE; // bound documentation; not enforced here
+
+    // Resample capture → output rate (bypasses to a direct copy when equal) and
+    // forward to the ring. Split the borrow so `process` (which returns a slice
+    // borrowing the resampler) and the scratch input don't alias `state` whole.
+    let IoState {
+        resampler,
+        in_scratch,
+        ring_tx,
+        ..
+    } = state;
+    for &s in resampler.process(in_scratch) {
+        let _ = ring_tx.push(s);
+    }
 
     0
 }

@@ -210,6 +210,8 @@ impl SharedState {
             effects.set(id, intensity, enabled);
         }
 
+        let dsp_rate = inner.meters.sample_rate().unwrap_or(chain.sample_rate);
+
         DaemonState {
             enabled: chain.enabled,
             preamp_db: chain.preamp_db,
@@ -217,7 +219,11 @@ impl SharedState {
             bands,
             effects,
             current_preset: inner.current_preset.clone(),
-            sample_rate: chain.sample_rate,
+            // Prefer the live rate the RT thread reports (it follows device/graph
+            // renegotiation); fall back to the mirror chain before audio starts.
+            sample_rate: dsp_rate,
+            // Capture rate; equals the DSP rate unless a backend is resampling.
+            capture_rate: inner.meters.capture_rate().unwrap_or(dsp_rate),
             channels: chain.channels,
             spectrum: inner.spectrum.to_vec(),
             active_output: inner.active_output.clone(),

@@ -27,9 +27,46 @@ pub struct AtomicMeters {
     clip: AtomicBool,
     dsp_load: AtomicU32,
     dsp_frame_us: AtomicU32,
+    /// The live DSP sample rate the RT thread is actually running at, in Hz
+    /// (rounded). 0 until the backend reports one. Lets `status` show the rate
+    /// the audio path negotiated — which may differ from the daemon's mirror
+    /// chain after a device/graph rate change — so the pitch bug is diagnosable.
+    live_sample_rate: AtomicU32,
+    /// The live capture-side rate in Hz (pre-resample). Equal to
+    /// `live_sample_rate` when no resampling is happening; differs when a backend
+    /// converts the capture clock to the DSP/output clock (e.g. a macOS tap).
+    live_capture_rate: AtomicU32,
 }
 
 impl AtomicMeters {
+    /// Record the live DSP sample rate (RT thread). Cheap relaxed store.
+    pub fn set_sample_rate(&self, hz: f64) {
+        self.live_sample_rate
+            .store(hz.round().max(0.0) as u32, Ordering::Relaxed);
+    }
+
+    /// The live DSP sample rate in Hz, or `None` if no backend has reported one.
+    pub fn sample_rate(&self) -> Option<f64> {
+        match self.live_sample_rate.load(Ordering::Relaxed) {
+            0 => None,
+            hz => Some(hz as f64),
+        }
+    }
+
+    /// Record the live capture-side rate (RT thread / stream setup).
+    pub fn set_capture_rate(&self, hz: f64) {
+        self.live_capture_rate
+            .store(hz.round().max(0.0) as u32, Ordering::Relaxed);
+    }
+
+    /// The live capture rate in Hz, or `None` if no backend has reported one.
+    pub fn capture_rate(&self) -> Option<f64> {
+        match self.live_capture_rate.load(Ordering::Relaxed) {
+            0 => None,
+            hz => Some(hz as f64),
+        }
+    }
+
     /// Publish a block's measurements (RT thread). Clip latches until read.
     pub fn store(&self, s: Sample) {
         self.in_peak.store(s.in_peak.to_bits(), Ordering::Relaxed);

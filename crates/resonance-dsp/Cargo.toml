@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 biquad = { workspace = true }
 rustfft = { workspace = true }
+rubato = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

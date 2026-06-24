@@ -140,7 +140,14 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
     let sr = app
         .state
         .as_ref()
-        .map(|s| format!("{:.0} Hz", s.sample_rate))
+        .map(|s| {
+            if (s.capture_rate - s.sample_rate).abs() > 1.0 {
+                // Resampling: show capture→DSP rate.
+                format!("{:.0}→{:.0} Hz", s.capture_rate, s.sample_rate)
+            } else {
+                format!("{:.0} Hz", s.sample_rate)
+            }
+        })
         .unwrap_or_default();
 
     let preamp_db = app.state.as_ref().map(|s| s.preamp_db).unwrap_or(0.0);

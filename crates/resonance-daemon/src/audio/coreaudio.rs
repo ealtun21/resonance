@@ -216,8 +216,15 @@ fn run_streams(
 
     // Raw HAL IOProc on the aggregate-tap device — bypasses cpal/AUHAL,
     // which doesn't reliably surface the tap stream and was reading silence.
-    let hal_input = HalInputStream::open(tap_aggregate_id, ring_tx)
+    let hal_input = HalInputStream::open(tap_aggregate_id, ring_tx, sample_rate as f64)
         .with_context(|| "open HAL input on tap aggregate")?;
+    // Publish the capture rate so `status` can show whether the IOProc is
+    // resampling (tap rate ≠ output rate).
+    shared
+        .lock()
+        .unwrap()
+        .meters
+        .set_capture_rate(hal_input.capture_rate);
     let input_callbacks = Arc::clone(&hal_input.callback_count);
     let input_nonzero = Arc::clone(&hal_input.nonzero_blocks);
 
@@ -346,6 +353,9 @@ fn build_output_stream(
         while let Ok(cmd) = s.cmd_rx.pop() {
             apply_command(&mut s.chain, cmd);
         }
+        // Publish the live DSP rate for `status` (the chain was rebound to the
+        // output device rate at stream setup).
+        s.meters.set_sample_rate(s.chain.sample_rate);
 
         let (in_peak, in_rms) = peak_rms_f32(buf);
 
