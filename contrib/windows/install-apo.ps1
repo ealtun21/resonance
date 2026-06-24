@@ -91,16 +91,17 @@ if (-not (Test-Path $audioKey)) { New-Item -Path $audioKey -Force | Out-Null }
 $priorDpadg = (Get-ItemProperty -Path $audioKey -Name 'DisableProtectedAudioDG' -EA SilentlyContinue).DisableProtectedAudioDG
 Set-ItemProperty -Path $audioKey -Name 'DisableProtectedAudioDG' -Value 1 -Type DWord
 
-# --- 4) attach to each render endpoint, ONE mode per endpoint ---
-# CRITICAL: do NOT write all five FX slots. The audio engine instantiates the
-# APO once per populated slot, so writing legacy (LFX ,1 / GFX ,2) AND modern
-# (SFX ,5 / MFX ,6 / EFX ,7) cascades the effect 2+ times and, on some endpoints
-# (e.g. a headphone jack), produces an invalid mix-graph the engine bypasses
-# entirely (audio plays, APO sees silence, no EQ). Mirror EqualizerAPO: pick a
-# single mode per endpoint - modern default is SFX(5)+EFX(7); a driver that only
-# ships legacy APOs gets LFX(1)+GFX(2); a combined/Bluetooth endpoint gets
-# SFX(5)+MFX(6) (EFX doesn't apply to combined streams). Slots not in the chosen
-# mode are DELETED (also cleans up the old all-five pollution from <=0.5.2).
+# --- 4) attach to each render endpoint, ONE slot per endpoint ---
+# CRITICAL: write exactly ONE FX slot. The audio engine instantiates + runs the
+# APO once per populated slot, and our chain is a FULL effects/EQ pipeline — so
+# any two populated slots apply the whole chain TWICE to the same stream (e.g.
+# SFX before the mixer + EFX after it), doubling every gain (+15 dB bass becomes
+# +30 dB → clipping/clicks) and mis-shaping the EQ. (Earlier <=0.5.3 wrote the
+# *pair* SFX+EFX thinking of it as one "mode"; that double-processed.) Pick a
+# single slot by what the driver provides: modern endpoints get EFX(7) — the
+# endpoint/post-mix effect, applied exactly once to the final mix (best for the
+# limiter); a combined/Bluetooth endpoint (no EFX) gets MFX(6); a legacy-only
+# driver gets GFX(2). Every other slot is DELETED (also cleans up old pollution).
 $renderSub = 'SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render'
 $render = "HKLM:\$renderSub"
 $fx   = '{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D}'   # PKEY_FX_*  ,1/,2 legacy  ,5/,6/,7 SFX/MFX/EFX
@@ -139,9 +140,11 @@ Get-ChildItem $render -EA SilentlyContinue | ForEach-Object {
     $hasLegacy = ($null -ne $cur."$fx,1") -or ($null -ne $cur."$fx,2")
     $hasModern = ($null -ne $cur."$fx,5") -or ($null -ne $cur."$fx,6") -or ($null -ne $cur."$fx,7")
     $combined = $null -ne (Get-ItemProperty -Path "$render\$g\Properties" -Name $combinedName -EA SilentlyContinue).$combinedName
-    if ($hasLegacy -and -not $hasModern) { $writeSlots = '1','2' }
-    elseif ($combined)                   { $writeSlots = '5','6' }
-    else                                 { $writeSlots = '5','7' }
+    # Exactly ONE slot (leading comma forces a single-element array so
+    # `-contains` / `[0]` below behave). Two slots would double-process.
+    if ($hasLegacy -and -not $hasModern) { $writeSlots = , '2' }   # GFX (legacy, post-mix)
+    elseif ($combined)                   { $writeSlots = , '6' }   # MFX (combined; EFX N/A)
+    else                                 { $writeSlots = , '7' }   # EFX (endpoint, post-mix)
 
     foreach ($slot in $allSlots) {
       $name = "$fx,$slot"
