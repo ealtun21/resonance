@@ -8,7 +8,7 @@
 
 #define AppName "Resonance"
 #ifndef AppVersion
-  #define AppVersion "0.5.3"
+  #define AppVersion "0.5.4"
 #endif
 #define AppPublisher "Resonance"
 #define AppExe "resonance-gui.exe"
