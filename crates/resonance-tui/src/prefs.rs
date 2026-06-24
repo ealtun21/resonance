@@ -20,7 +20,12 @@ fn default_fps() -> u64 {
     144
 }
 fn default_refresh_ms() -> u64 {
-    250
+    // ~30 Hz. The daemon poll carries the meters and spectrum, which animate, so
+    // this is effectively the perceived frame rate of the live readouts — not a
+    // background-only refresh. 250 ms (4 Hz) made the meters/spectrum visibly
+    // step and read as "low fps"; 33 ms matches the GUI's proven state poll and
+    // stays cheap (the snapshot round-trip is sub-millisecond on a local socket).
+    33
 }
 fn default_confirm() -> bool {
     true
