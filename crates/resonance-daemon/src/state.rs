@@ -151,6 +151,11 @@ impl SharedState {
                     dsp_frame_us: 0,
                 });
             }
+        } else {
+            // Gate closed (no client watching): clear the cached spectrum so a
+            // client that reconnects starts from silence rather than the frozen
+            // last frame held in SharedState.
+            inner.spectrum.fill(0.0);
         }
     }
 

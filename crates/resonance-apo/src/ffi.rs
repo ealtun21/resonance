@@ -91,6 +91,14 @@ fn worker_loop(weak: Weak<Shared>) {
     let mut envelope = [0.0f32; TELEMETRY_BINS];
     let mut scratch = vec![Complex::new(0.0f32, 0.0); FFT_SIZE];
     let mut logged_open_err = false;
+    // Spectrum-freeze guards (mirror the Linux `spectrum::run` task):
+    //   `prev_want`    — clear the envelope once when the watch gate closes.
+    //   `last_ring_pos`/`starved_ticks` — detect the APO process callback no
+    //                    longer feeding the ring (endpoint change, audiodg
+    //                    recycle) so we decay instead of re-FFTing a stale window.
+    let mut prev_want = false;
+    let mut last_ring_pos: usize = 0;
+    let mut starved_ticks: u32 = 0;
 
     loop {
         std::thread::sleep(Duration::from_millis(25));
@@ -163,9 +171,38 @@ fn worker_loop(weak: Weak<Shared>) {
 
         // Telemetry only while watched.
         if !want {
+            // Gate just closed: clear the smoothed envelope so a client that
+            // reconnects starts from silence rather than the last frame.
+            if prev_want {
+                envelope.fill(0.0);
+            }
+            prev_want = false;
             continue;
         }
-        let bins = compute_spectrum(&shared, &fft, &window, &edges, &mut envelope, &mut scratch);
+        prev_want = true;
+
+        // Decay toward silence when the ring has stalled (the APO process
+        // callback stopped feeding it) instead of re-FFTing a frozen window.
+        // Debounced past any realistic callback gap.
+        const STARVE_TICKS: u32 = 16; // ~400 ms at the 25 ms worker tick
+        let ring_pos = shared.ring_pos.load(Ordering::Acquire);
+        if ring_pos == last_ring_pos {
+            starved_ticks = starved_ticks.saturating_add(1);
+        } else {
+            starved_ticks = 0;
+            last_ring_pos = ring_pos;
+        }
+        let bins = if starved_ticks >= STARVE_TICKS {
+            for e in envelope.iter_mut() {
+                *e *= 0.7;
+                if *e < 1e-4 {
+                    *e = 0.0;
+                }
+            }
+            envelope
+        } else {
+            compute_spectrum(&shared, &fft, &window, &edges, &mut envelope, &mut scratch)
+        };
         f.write_telemetry(
             f32::from_bits(shared.in_peak.load(Ordering::Relaxed)),
             f32::from_bits(shared.out_peak.load(Ordering::Relaxed)),
@@ -554,7 +591,10 @@ mod hires_harness {
 
         const TONE: f64 = 1_000.0;
         for r in rates {
-            assert!(TONE < r / 2.0 - 200.0, "tone must sit below Nyquist for {r}");
+            assert!(
+                TONE < r / 2.0 - 200.0,
+                "tone must sit below Nyquist for {r}"
+            );
             let (gain_db, peak_hz) = measure(r, TONE);
             assert!(
                 (gain_db - 12.0).abs() < 1.5,

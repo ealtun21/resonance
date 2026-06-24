@@ -380,14 +380,6 @@ fn build_output_stream(
                 *dst = *src as f32;
             }
 
-            // Spectrum: mono mix of the post-DSP signal.
-            let cap = s.spectrum_tx.slots();
-            let push_n = frames.min(cap);
-            for i in 0..push_n {
-                let m = (buf[i * 2] + buf[i * 2 + 1]) * 0.5;
-                let _ = s.spectrum_tx.push(m);
-            }
-
             let sr = s.chain.sample_rate;
             let budget = frames as f64 / sr;
             let load = if budget > 0.0 {
@@ -415,6 +407,18 @@ fn build_output_stream(
                 dsp_load: 0.0,
                 dsp_frame_us: 0,
             });
+        }
+
+        // Feed the spectrum ring from the OUTPUT (`buf`) in both branches: the
+        // post-DSP signal when enabled, the passthrough signal when bypassed
+        // (power off) — `buf` already holds whatever we render. Doing this
+        // outside the `enabled` check keeps the analyzer tracking live audio
+        // when power is off instead of freezing on the last processed frame.
+        let cap = s.spectrum_tx.slots();
+        let push_n = frames.min(cap);
+        for i in 0..push_n {
+            let m = (buf[i * 2] + buf[i * 2 + 1]) * 0.5;
+            let _ = s.spectrum_tx.push(m);
         }
         drop(s);
 

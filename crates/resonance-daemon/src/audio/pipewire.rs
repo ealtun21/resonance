@@ -714,6 +714,15 @@ unsafe extern "C" fn filter_process_cb(data: *mut c_void, position: *mut spa_io_
                 std::ptr::write_bytes(out1, 0, n * std::mem::size_of::<f32>());
                 fd.meters.store(Sample::default());
             }
+            // Keep the spectrum ring fed even while bypassed (power off) or with
+            // no input: read the output we just wrote — the live passthrough
+            // signal, or the silence we zeroed. Without this the ring starves,
+            // the FFT task re-runs on its last full buffer forever, and the
+            // analyzer freezes on the frame captured the instant power went off.
+            let sn = n.min(fd.spectrum_tx.slots());
+            for i in 0..sn {
+                let _ = fd.spectrum_tx.push((*out0.add(i) + *out1.add(i)) * 0.5);
+            }
             return;
         }
 
