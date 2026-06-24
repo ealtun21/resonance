@@ -45,16 +45,27 @@ fn main() -> eframe::Result<()> {
     // bar is colour-themed at runtime via DWM (see app::native_titlebar). The
     // old custom client-side titlebar was removed — a decoration-less winit
     // window had unreliable client-area input (clicks/drags landing off-target).
+    let viewport = egui::ViewportBuilder::default()
+        .with_title("Resonance")
+        .with_decorations(true)
+        .with_inner_size([1240.0, 760.0])
+        // Small-window friendly: below ~1000px the lower sections collapse to
+        // a single-column accordion and the toolbar wraps, so a low floor is
+        // fine — no runtime min-width computation needed.
+        .with_min_inner_size([360.0, 420.0])
+        .with_icon(std::sync::Arc::new(app_icon()));
+    // macOS: a unified title bar — the content (our toolbar) draws under a
+    // transparent title bar so the window chrome blends into the app instead of
+    // showing a separate grey bar. The traffic-light buttons float over the
+    // toolbar, which reserves space for them (see `toolbar()`). Windows blends
+    // its title bar via DWM caption colours instead (see app::native_titlebar).
+    #[cfg(target_os = "macos")]
+    let viewport = viewport
+        .with_fullsize_content_view(true)
+        .with_titlebar_shown(false)
+        .with_title_shown(false);
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Resonance")
-            .with_decorations(true)
-            .with_inner_size([1240.0, 760.0])
-            // Small-window friendly: below ~1000px the lower sections collapse to
-            // a single-column accordion and the toolbar wraps, so a low floor is
-            // fine — no runtime min-width computation needed.
-            .with_min_inner_size([360.0, 420.0])
-            .with_icon(std::sync::Arc::new(app_icon())),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(

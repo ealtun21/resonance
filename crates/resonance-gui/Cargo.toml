@@ -25,3 +25,17 @@ anyhow = { workspace = true }
 # crate is already pulled in transitively by eframe; depending on its
 # `png` feature directly costs nothing in binary size.
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+# macOS: reposition the native traffic-light buttons so they centre vertically in
+# our (taller, unified) toolbar. Reuses the objc2 stack winit already compiles —
+# no new crates are downloaded; we just enable the classes we message.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSResponder",
+    "NSWindow",
+    "NSView",
+    "NSControl",
+    "NSButton",
+] }

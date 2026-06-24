@@ -144,6 +144,52 @@ mod native_titlebar {
     }
 }
 
+/// macOS: vertically centre the window's traffic-light buttons within our
+/// toolbar. With the unified (transparent) title bar the toolbar is taller than
+/// the standard title bar AppKit lays the buttons out for, so they sit high and
+/// look top-aligned; we nudge them to the toolbar's vertical centre. Re-applied
+/// each frame because AppKit re-lays them out on resize. Best-effort: any missing
+/// piece just leaves the buttons where AppKit put them.
+#[cfg(target_os = "macos")]
+mod traffic_lights {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSWindowButton};
+
+    pub fn center(toolbar_h: f64) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let app = NSApplication::sharedApplication(mtm);
+        // Single-window process; the key window is ours (fall back to main when
+        // unfocused — AppKit doesn't re-lay-out then, so doing nothing is fine).
+        let Some(window) = app.keyWindow().or_else(|| app.mainWindow()) else {
+            return;
+        };
+        for kind in [
+            NSWindowButton::CloseButton,
+            NSWindowButton::MiniaturizeButton,
+            NSWindowButton::ZoomButton,
+        ] {
+            let Some(btn) = window.standardWindowButton(kind) else {
+                continue;
+            };
+            // SAFETY: read-only access to the button's superview on the main thread.
+            let Some(sv) = (unsafe { btn.superview() }) else {
+                continue;
+            };
+            let frame = btn.frame();
+            // The superview's top edge is pinned to the window top (whether it's
+            // the full theme-frame or a short title-bar container), so placing the
+            // button's centre `toolbar_h/2` down from that top centres it in the
+            // toolbar regardless of which view hosts it.
+            let svh = sv.frame().size.height;
+            let mut nf = frame;
+            nf.origin.y = svh - toolbar_h / 2.0 - frame.size.height / 2.0;
+            btn.setFrame(nf);
+        }
+    }
+}
+
 pub struct GuiApp {
     /// Channel to the IPC worker thread — the UI thread never does IPC itself,
     /// so a stopped/restarting daemon can't block or freeze the window.
@@ -712,7 +758,12 @@ impl eframe::App for GuiApp {
             }
         }
 
-        egui::Panel::top("toolbar").show_inside(ui, |ui| self.toolbar(ui));
+        let toolbar = egui::Panel::top("toolbar").show_inside(ui, |ui| self.toolbar(ui));
+        // macOS: keep the traffic lights centred in the toolbar (see module docs).
+        #[cfg(target_os = "macos")]
+        traffic_lights::center(toolbar.response.rect.height() as f64);
+        #[cfg(not(target_os = "macos"))]
+        let _ = toolbar;
 
         self.shell(ui);
 
@@ -736,7 +787,13 @@ impl GuiApp {
     /// their defaults next frame.
     pub(crate) fn reset_layout(&mut self, ctx: &egui::Context) {
         use egui::containers::panel::PanelState;
-        ctx.data_mut(|d| d.remove::<PanelState>(egui::Id::new("controls_panel")));
+        // Clear both resizable splitters (wide bottom strip + narrow top graph) so
+        // the panels fall back to their 60/40 defaults regardless of which layout
+        // is active when reset is pressed.
+        ctx.data_mut(|d| {
+            d.remove::<PanelState>(egui::Id::new("controls_panel"));
+            d.remove::<PanelState>(egui::Id::new("graph_narrow"));
+        });
         self.set_status("layout reset");
     }
 
@@ -753,7 +810,9 @@ impl GuiApp {
             .interactable(false)
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.label(&self.status);
+                    // Extend (don't wrap): the anchored area starts near-zero width,
+                    // which otherwise breaks "layout reset" into one glyph per line.
+                    ui.add(egui::Label::new(&self.status).wrap_mode(egui::TextWrapMode::Extend));
                 });
             });
     }

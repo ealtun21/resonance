@@ -198,12 +198,11 @@ impl GuiApp {
                 // Bins are log-spaced over 20 Hz–20 kHz; map each bin's edges
                 // through x_of so the fill aligns with the log axis (and clips
                 // correctly when the view is zoomed). Per bin: a filled column
-                // (brighter toward the peak) plus a bold contour along the tops so
-                // it always reads as a spectrum analyzer. A small minimum body +
-                // floor alpha keep a faint analyzer band visible even in silence,
-                // so the spectrum never looks "gone" — it just lights up with audio.
+                // (brighter toward the peak) so it always reads as a spectrum
+                // analyzer. A small minimum body + floor alpha keep a faint
+                // analyzer band visible even in silence, so the spectrum never
+                // looks "gone" — it just lights up with audio.
                 const MIN_BODY: f32 = 0.018;
-                let mut tops: Vec<egui::Pos2> = Vec::with_capacity(n);
                 for (i, &v) in self.spectrum_display.iter().enumerate() {
                     let v = v.clamp(0.0, 1.0);
                     let lo = curve::LOG_MIN + i as f64 / n as f64 * range;
@@ -223,11 +222,6 @@ impl GuiApp {
                         0.0,
                         egui::Color32::from_rgba_unmultiplied(r, g, b, a),
                     );
-                    tops.push(egui::pos2((x0 + x1) * 0.5, top_y));
-                }
-                let contour = egui::Stroke::new(1.8, pal.accent);
-                for w in tops.windows(2) {
-                    painter.line_segment([w[0], w[1]], contour);
                 }
             }
         }

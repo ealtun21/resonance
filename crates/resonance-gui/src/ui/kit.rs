@@ -22,6 +22,10 @@ pub(crate) const SP_L: f32 = 18.0;
 
 /// Standard interactive row height (one control + its label).
 pub(crate) const ROW_H: f32 = 30.0;
+/// Height for medium controls that share a list row — buttons, text fields and
+/// the right-column dropdowns/icon buttons — so they line up flush. The dense
+/// bands table uses smaller controls and passes its own heights.
+pub(crate) const CTRL_H: f32 = 26.0;
 /// Type scale.
 pub(crate) const T_CAPTION: f32 = 11.0;
 pub(crate) const T_BODY: f32 = 13.0;
@@ -269,17 +273,56 @@ pub(crate) fn num_field(
     changed
 }
 
+/// A single-line text input styled to match the kit: a flat `well` chip with no
+/// resting border, an accent focus ring, and the same 22 px height as the
+/// dropdown / value chip / number field so it lines up in a row. The one place
+/// (besides `num_field`'s typing mode) a platform text widget is unavoidable —
+/// scoped visuals make egui's `TextEdit` wear the kit's flat look. Returns its
+/// `Response` so callers handle focus/Enter/rename themselves.
+pub(crate) fn text_field(
+    ui: &mut egui::Ui,
+    width: f32,
+    id: egui::Id,
+    buf: &mut String,
+    hint: &str,
+    accent_text: bool,
+) -> egui::Response {
+    let t = tokens(ui);
+    ui.scope(|ui| {
+        let v = ui.visuals_mut();
+        // The frame fill comes from `extreme_bg_color`; point it at the kit well
+        // so the field matches the dropdown/chip surfaces instead of the deepest
+        // plot background. Border off at rest, accent ring on focus.
+        v.extreme_bg_color = t.well;
+        v.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+        v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, lerp_color(t.well, t.accent, 0.5));
+        v.widgets.active.bg_stroke = egui::Stroke::new(1.0, t.accent);
+        v.selection.stroke = egui::Stroke::new(1.0, t.accent);
+        let mut edit = egui::TextEdit::singleline(buf)
+            .id(id)
+            .hint_text(hint)
+            .margin(egui::Margin::symmetric(7, 3))
+            .desired_width(width);
+        if accent_text {
+            edit = edit.text_color(t.accent);
+        }
+        ui.add_sized([width, CTRL_H], edit)
+    })
+    .inner
+}
+
 /// A bespoke select: a chip showing the current option + a caret, opening a
 /// custom popup list. Returns `Some(index)` when an option is chosen.
 pub(crate) fn dropdown(
     ui: &mut egui::Ui,
     width: f32,
+    height: f32,
     popup_id: egui::Id,
     current: &str,
     options: &[&str],
 ) -> Option<usize> {
     let t = tokens(ui);
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 22.0), egui::Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
     let open = egui::Popup::is_id_open(ui.ctx(), popup_id);
     let bg = if resp.hovered() || open {
         lerp_color(t.well, t.accent, 0.16)
@@ -338,9 +381,9 @@ pub(crate) fn dropdown(
 }
 
 /// A small square icon button (✕, ✚, …). Returns true on click.
-pub(crate) fn icon_button(ui: &mut egui::Ui, glyph: &str) -> bool {
+pub(crate) fn icon_button(ui: &mut egui::Ui, glyph: &str, size: f32) -> bool {
     let t = tokens(ui);
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
     if resp.hovered() {
         ui.painter()
             .rect_filled(rect, 4.0, lerp_color(t.well, t.accent, 0.30));
@@ -370,7 +413,7 @@ pub(crate) fn button(ui: &mut egui::Ui, label: &str, accent: bool, enabled: bool
     } else {
         egui::Sense::hover()
     };
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 26.0), sense);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, CTRL_H), sense);
     let (bg, fg) = if !enabled {
         (t.well, t.dim)
     } else if accent {

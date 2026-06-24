@@ -12,13 +12,17 @@ use resonance_ipc::{DaemonState, service};
 /// never the one that squishes.
 pub(crate) const EFFECTS_W: f32 = 300.0;
 pub(crate) const DEVICES_W: f32 = 380.0;
+/// Minimum comfortable width for the central EQ-bands column in the 3-column
+/// layout — enough for the bands table's core columns plus a usable gain graph.
+pub(crate) const BANDS_MIN: f32 = 440.0;
 
 /// Width at/above which the lower area uses the 3-column layout; below it the
-/// sections stack into a single-column accordion. Chosen so the central EQ-bands
-/// table has room for its (responsively-collapsing) columns at the breakpoint. A
-/// 24px hysteresis band (kept in temp memory) stops a window parked near the
-/// threshold from flip-flopping.
-pub(crate) const WIDE_MIN: f32 = 1120.0;
+/// sections stack into a single-column accordion. Derived from the actual column
+/// widths (the two side panels + a comfortable centre) rather than a standalone
+/// magic number, so changing a column width moves the breakpoint with it instead
+/// of leaving a stale threshold. A 24px hysteresis band (kept in temp memory)
+/// stops a window parked near the threshold from flip-flopping.
+pub(crate) const WIDE_MIN: f32 = EFFECTS_W + DEVICES_W + BANDS_MIN;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LayoutMode {
@@ -122,7 +126,11 @@ impl GuiApp {
             // Wide: graph is the elastic CentralPanel (full-bleed hero); the three
             // control columns sit in a resizable bottom strip.
             LayoutMode::Wide => {
-                let controls_h = (ui.available_height() * 0.4).clamp(150.0, 340.0);
+                // 60/40 split: the graph hero keeps ~60% of the height, the
+                // controls strip ~40%, with only a usability floor — no upper cap,
+                // so a tall/maximised window honours the ratio instead of pinning
+                // the controls at a fixed height (and `reset_layout` lands here).
+                let controls_h = (ui.available_height() * 0.4).max(150.0);
                 egui::Panel::bottom("controls_panel")
                     .resizable(true)
                     .default_size(controls_h)

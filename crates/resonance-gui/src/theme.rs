@@ -29,7 +29,12 @@ pub struct Palette {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Theme {
+    /// Native accent + the OS's current light/dark preference (auto-follows).
     System,
+    /// Native accent forced dark, for users who want to pick it manually.
+    NativeDark,
+    /// Native accent forced light, for users who want to pick it manually.
+    NativeLight,
     BreezeDark,
     Gruvbox,
     Nord,
@@ -41,8 +46,10 @@ pub enum Theme {
 
 impl Theme {
     /// Every selectable theme, in menu order.
-    pub const ALL: [Theme; 7] = [
+    pub const ALL: [Theme; 9] = [
         Theme::System,
+        Theme::NativeDark,
+        Theme::NativeLight,
         Theme::BreezeDark,
         Theme::Gruvbox,
         Theme::Nord,
@@ -62,7 +69,9 @@ impl Theme {
 
     pub fn label(self) -> &'static str {
         match self {
-            Theme::System => "Native",
+            Theme::System => "Native (auto)",
+            Theme::NativeDark => "Native Dark",
+            Theme::NativeLight => "Native Light",
             Theme::BreezeDark => "Breeze Dark",
             Theme::Gruvbox => "Gruvbox",
             Theme::Nord => "Nord",
@@ -76,6 +85,8 @@ impl Theme {
     pub fn palette(self) -> Palette {
         match self {
             Theme::System => native_palette(),
+            Theme::NativeDark => native_palette_for(true),
+            Theme::NativeLight => native_palette_for(false),
             Theme::BreezeDark => Palette {
                 accent: rgb(61, 174, 233), // breeze blue
                 boost: rgb(39, 174, 96),
@@ -128,7 +139,7 @@ impl Theme {
     /// Whether this theme uses a light base (affects text contrast defaults).
     pub(crate) fn is_light(self) -> bool {
         match self {
-            Theme::Light => true,
+            Theme::Light | Theme::NativeLight => true,
             Theme::System => !system_is_dark(),
             Theme::Matugen => matugen_is_light(),
             _ => false,
@@ -136,10 +147,14 @@ impl Theme {
     }
 
     /// `(caption_fill, caption_text)` for theming the native Windows title bar so
-    /// it matches the app — the panel fill the toolbar sits on, and its text.
+    /// it blends into the app: the caption uses `panel_fill` — the exact colour
+    /// of the toolbar that sits directly beneath it — so there's no seam between
+    /// the title bar and the toolbar, with the toolbar's text colour for the
+    /// title.
     #[cfg(target_os = "windows")]
     pub(crate) fn native_caption_colors(self) -> (egui::Color32, egui::Color32) {
-        (self.visuals().window_fill, self.palette().neutral)
+        let v = self.visuals();
+        (v.panel_fill, v.text_color())
     }
 
     /// Build the full `egui::Visuals` for this theme.
@@ -248,9 +263,16 @@ fn blend(a: Color32, b: Color32, t: f32) -> Color32 {
 /// Build the Native palette from the system accent + light/dark, flat and
 /// accent-led the way the host toolkits are.
 fn native_palette() -> Palette {
+    native_palette_for(system_is_dark())
+}
+
+/// The Native palette built around the system accent, forced to a `dark` or
+/// light base. `Native (auto)` passes the detected OS mode; the manual
+/// `Native Dark` / `Native Light` variants force their own.
+fn native_palette_for(dark: bool) -> Palette {
     // Breeze blue is the sensible fallback when no accent can be read.
     let accent = system_accent().unwrap_or_else(|| rgb(61, 174, 233));
-    if system_is_dark() {
+    if dark {
         Palette {
             accent,
             boost: rgb(80, 200, 120),

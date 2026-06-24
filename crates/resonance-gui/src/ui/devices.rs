@@ -43,10 +43,15 @@ impl GuiApp {
         let row_name_w = (full_w - 96.0).max(100.0);
 
         ui.horizontal(|ui| {
-            let resp = ui.add(
-                egui::TextEdit::singleline(&mut self.profile_name)
-                    .hint_text("new profile name…")
-                    .desired_width(save_name_w),
+            ui.set_min_height(26.0);
+            ui.spacing_mut().item_spacing.x = kit::SP_S;
+            let resp = kit::text_field(
+                ui,
+                save_name_w,
+                egui::Id::new("new_profile_name"),
+                &mut self.profile_name,
+                "new profile name…",
+                false,
             );
             let save_clicked = kit::button(ui, "Save", true, true);
             let go = save_clicked
@@ -74,6 +79,8 @@ impl GuiApp {
         let current = self.state.as_ref().and_then(|s| s.current_preset.clone());
         for name in &profiles {
             ui.horizontal(|ui| {
+                ui.set_min_height(26.0);
+                ui.spacing_mut().item_spacing.x = kit::SP_S;
                 let active = current.as_deref() == Some(name.as_str());
                 let editing = matches!(&self.rename, Some((from, _)) if from == name);
 
@@ -87,14 +94,15 @@ impl GuiApp {
                     Some((from, b)) if from == name => b.clone(),
                     _ => name.clone(),
                 };
-                let mut edit = egui::TextEdit::singleline(&mut buf)
-                    .id_salt(("pname", name))
-                    .desired_width(row_name_w)
-                    .hint_text("name");
-                if active && !editing {
-                    edit = edit.text_color(self.palette.accent);
-                }
-                let resp = ui.add(edit).on_hover_text("rename: edit + Enter");
+                let resp = kit::text_field(
+                    ui,
+                    row_name_w,
+                    egui::Id::new(("pname", name)),
+                    &mut buf,
+                    "name",
+                    active && !editing,
+                )
+                .on_hover_text("rename: edit + Enter");
 
                 if resp.gained_focus() || resp.changed() {
                     self.rename = Some((name.clone(), buf.clone()));
@@ -112,7 +120,7 @@ impl GuiApp {
                     self.rename = None;
                 }
 
-                if kit::icon_button(ui, "✕") {
+                if kit::icon_button(ui, "✕", kit::CTRL_H) {
                     self.confirm = Some(Confirm::DeleteProfile(name.clone()));
                 }
             });
@@ -181,9 +189,14 @@ impl GuiApp {
                 let mut opts = vec!["—".to_string()];
                 opts.extend(profiles.iter().cloned());
                 let refs: Vec<&str> = opts.iter().map(String::as_str).collect();
-                if let Some(idx) =
-                    kit::dropdown(ui, DD_W, egui::Id::new(("devmap", node)), &cur_text, &refs)
-                {
+                if let Some(idx) = kit::dropdown(
+                    ui,
+                    DD_W,
+                    kit::CTRL_H,
+                    egui::Id::new(("devmap", node)),
+                    &cur_text,
+                    &refs,
+                ) {
                     if idx == 0 {
                         self.queue(Command::UnmapOutputFor {
                             node_name: node.clone(),
@@ -196,7 +209,7 @@ impl GuiApp {
                     }
                     self.needs_meta = true;
                 }
-                if kit::icon_button(ui, "✕") {
+                if kit::icon_button(ui, "✕", kit::CTRL_H) {
                     self.queue(Command::ForgetSink {
                         node_name: node.clone(),
                     });

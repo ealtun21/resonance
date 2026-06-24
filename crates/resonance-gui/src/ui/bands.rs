@@ -105,7 +105,7 @@ impl GuiApp {
                         b.band_type.full()
                     };
                     if let Some(sel) =
-                        kit::dropdown(ui, type_w, egui::Id::new(("bt", i)), cur, &labels)
+                        kit::dropdown(ui, type_w, 22.0, egui::Id::new(("bt", i)), cur, &labels)
                     {
                         self.queue_edit(Command::SetBandType {
                             index: i,
@@ -157,7 +157,7 @@ impl GuiApp {
                     gain_bar(ui, graph_w, b.gain_db, &self.palette);
                 }
 
-                if kit::icon_button(ui, "✕") {
+                if kit::icon_button(ui, "✕", 24.0) {
                     self.queue_edit(Command::RemoveBand { index: i });
                     // Keep the lock pins on the same band after the list shifts.
                     remap_pin_on_remove(&mut self.vlock, i);

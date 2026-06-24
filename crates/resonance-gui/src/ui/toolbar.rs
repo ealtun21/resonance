@@ -4,13 +4,15 @@
 //! order (meters → undo/redo → daemon → preamp detail → output), so the bar
 //! always reads as one clean row at every width — never a jittering wrapped pile.
 //!
-//! Tiers (by available bar width):
-//!   ≥1140  full: power · preamp slider · output · undo/redo · daemon · ☰ · meters
-//!   ≥ 980  drop meters
-//!   ≥ 840  drop undo/redo (→ ☰)
-//!   ≥ 660  drop daemon (→ ☰)
-//!   ≥ 470  preamp collapses to a compact drag-value; output still inline
-//!   < 470  output drops (→ ☰): power · compact preamp · ☰
+//! Breakpoints are NOT fixed pixels: each tier's threshold is the summed,
+//! *measured* width of the controls that must fit at that tier (text laid out at
+//! the live font), so the bar collapses at the right point regardless of the
+//! machine's font size or zoom — fixed pixels overlapped/clipped when the font
+//! differed. Collapse order (widest-hungriest first to drop):
+//!   meters → undo/redo → daemon → preamp detail → output
+//! The far-right meters go a step further: they're shown only when the space the
+//! left controls actually leave fits their measured width (see `toolbar`), so the
+//! right-aligned block can never draw on top of the left controls.
 
 use crate::app::{GuiApp, ServiceAction, ServiceFn};
 use crate::browser::Browser;
@@ -32,21 +34,72 @@ struct Overflow {
     daemon: bool,
 }
 
+/// Width a string occupies at `font`, measured against the live fonts — so the
+/// toolbar's collapse points track the real text size on any machine (different
+/// default font, zoom) instead of assuming fixed pixel widths.
+fn text_width(ui: &egui::Ui, font: egui::FontId, s: &str) -> f32 {
+    ui.painter()
+        .layout_no_wrap(s.to_owned(), font, egui::Color32::WHITE)
+        .rect
+        .width()
+}
+
 impl GuiApp {
     pub(crate) fn toolbar(&mut self, ui: &mut egui::Ui) {
         let state = self.state.clone();
-        let w = ui.available_width();
-        // Width tiers — secondary controls collapse into ☰ as the bar narrows.
-        let out_inline = w >= 470.0;
-        let preamp_full = w >= 660.0;
-        let daemon_inline = w >= 840.0 && service::manager_available();
-        let history_inline = w >= 980.0;
-        let meters_inline = w >= 1140.0;
+        // macOS reserves the far-left of the toolbar for the traffic-light buttons
+        // (unified titlebar); elsewhere just a small inset. That space isn't usable
+        // by the controls, so discount it from the width the collapse thresholds
+        // reason about — otherwise the bar thinks it has the full width and
+        // collapses too late (the macOS-only "late collapse" bug). Same value is
+        // used for the actual leading space below, so the two can't drift.
+        let lead = if cfg!(target_os = "macos") {
+            72.0
+        } else {
+            kit::SP_XS
+        };
+        let w = ui.available_width() - lead;
+        let gap = kit::SP_S;
+
+        // Collapse points are the *measured* widths of the actual controls, summed
+        // in the order they reappear as the bar widens — not fixed pixel
+        // breakpoints — so a machine with larger text (or zoom) collapses the bar
+        // at proportionally larger widths instead of overlapping or clipping.
+        let body = egui::TextStyle::Body.resolve(ui.style());
+        let kf = egui::FontId::proportional(kit::T_BODY);
+        // One separator + its surrounding spacing, kept generous so a tier
+        // collapses a hair early rather than letting a control spill past the edge.
+        let unit = 1.0 + 2.0 * gap;
+        let w_power = 66.0; // power button min width
+        let w_pre_min = text_width(ui, body.clone(), "Pre") + gap + 58.0; // label + num field
+        let w_pre_full = text_width(ui, body.clone(), "Preamp") + gap + 150.0 + gap + 72.0;
+        let w_output = text_width(ui, body.clone(), "🔊") + gap + 190.0; // label + dropdown
+        let w_daemon = text_width(ui, kf.clone(), "● Daemon") + 22.0; // menu button
+        let w_history = (text_width(ui, kf.clone(), "Undo") + 24.0)
+            + gap
+            + (text_width(ui, kf.clone(), "Redo") + 24.0);
+        let w_overflow = text_width(ui, kf.clone(), "☰") + 22.0;
+
+        // Cumulative widths required, in widen order: output → preamp-full →
+        // daemon → history. Power, the compact preamp and ☰ are always present.
+        let base = w_power + w_pre_min + w_overflow + 3.0 * unit;
+        let req_output = base + w_output + unit;
+        let req_preamp_full = req_output + (w_pre_full - w_pre_min);
+        let req_daemon = req_preamp_full + w_daemon + unit;
+        let req_history = req_daemon + w_history + unit;
+
+        let out_inline = w >= req_output;
+        let preamp_full = w >= req_preamp_full;
+        let daemon_inline = w >= req_daemon && service::manager_available();
+        let history_inline = w >= req_history;
 
         ui.horizontal(|ui| {
             ui.set_min_height(36.0);
             ui.spacing_mut().item_spacing.x = kit::SP_S;
-            ui.add_space(kit::SP_XS);
+            // Leading inset (macOS: clears the traffic-light buttons under the
+            // transparent titlebar; elsewhere a small inset). Matches the `lead`
+            // discounted from the collapse-threshold width above.
+            ui.add_space(lead);
 
             self.tb_power(ui, &state);
 
@@ -80,9 +133,13 @@ impl GuiApp {
                 },
             );
 
-            // Meters pinned to the far right (informational; first to drop).
-            if meters_inline {
-                if let Some(s) = &state {
+            // Meters pinned to the far right (informational; first to drop). Shown
+            // only when the space the left controls actually left over fits them —
+            // measured per-frame — so the right-aligned block never draws on top of
+            // those controls (the fixed-breakpoint bug). `available_width()` here is
+            // exactly the gap between the last left control and the right edge.
+            if let Some(s) = &state {
+                if ui.available_width() >= self.meters_min_width(ui, s) {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(kit::SP_S);
                         ui.horizontal(|ui| self.meters_widget(ui, s));
@@ -177,7 +234,7 @@ impl GuiApp {
             if kit::slider(ui, 150.0, &mut db, -20.0..=20.0) {
                 self.queue_edit(Command::SetPreamp { db });
             }
-            kit::value_chip(ui, 60.0, &format!("{db:+.1} dB"));
+            kit::value_chip(ui, 72.0, &format!("{db:+.1} dB"));
         }
     }
 
@@ -209,6 +266,7 @@ impl GuiApp {
         if let Some(sel) = kit::dropdown(
             ui,
             190.0,
+            kit::CTRL_H,
             egui::Id::new("toolbar_sink"),
             &current_label,
             &opt_refs,
@@ -225,7 +283,11 @@ impl GuiApp {
     /// Output device list as menu rows (for the ☰ overflow when the inline combo
     /// has collapsed). The active choice is marked.
     fn output_menu_items(&mut self, ui: &mut egui::Ui, s: &DaemonState) {
-        if kit::menu_item(ui, "Automatic (follow system)", s.preferred_output.is_none()) {
+        if kit::menu_item(
+            ui,
+            "Automatic (follow system)",
+            s.preferred_output.is_none(),
+        ) {
             self.queue(Command::FollowSystemOutput);
         }
         for sink in &s.available_sinks {
@@ -411,9 +473,12 @@ impl GuiApp {
     /// right-to-left (right-pinned) sub-layout, so the readouts are added in
     /// REVERSE and the separators trail each — giving a left-to-right reading
     /// order of I │ O │ DSP │ CLIP against the right edge.
-    fn meters_widget(&self, ui: &mut egui::Ui, s: &DaemonState) {
+    /// The four meter segments `(colour, text)`. Each text is fixed-width
+    /// (monospace, padded) so values change in place without nudging the layout —
+    /// and so [`meters_min_width`](Self::meters_min_width) can measure the block
+    /// regardless of the current levels. Shared by the renderer and the fit check.
+    fn meters_items(&self, s: &DaemonState) -> [(egui::Color32, String); 4] {
         let m = &s.meters;
-        // Fixed-width, monospace readouts so values change without nudging the layout.
         let db = |lin: f32| {
             let s = if lin <= 1e-6 {
                 "-inf".to_string()
@@ -441,13 +506,38 @@ impl GuiApp {
         } else {
             (egui::Color32::GRAY, " OK ")
         };
-
-        let items: [(egui::Color32, String); 4] = [
+        [
             (lvl_color, format!("I {} dB", db(m.in_peak))),
             (lvl_color, format!("O {} dB", db(m.out_peak))),
             (dsp_color, format!("DSP {:>3.0}%", m.dsp_load * 100.0)),
             (clip_col, clip_txt.to_string()),
-        ];
+        ]
+    }
+
+    /// Width the inline meters need. We only draw them when the left controls
+    /// leave at least this much room (see `toolbar`), so the right-aligned block
+    /// can never overlap them — fixing the old fixed-breakpoint collision. The
+    /// galley widths are exact; the separator/spacing terms over-estimate so the
+    /// meters collapse a hair *before* they'd touch, never after.
+    fn meters_min_width(&self, ui: &egui::Ui, s: &DaemonState) -> f32 {
+        let font = egui::TextStyle::Monospace.resolve(ui.style());
+        let text: f32 = self
+            .meters_items(s)
+            .iter()
+            .map(|(_, t)| {
+                ui.painter()
+                    .layout_no_wrap(t.clone(), font.clone(), egui::Color32::WHITE)
+                    .rect
+                    .width()
+            })
+            .sum();
+        let gap = ui.spacing().item_spacing.x;
+        // 4 labels + 3 separators ⇒ 7 widgets / 6 gaps, plus the leading RTL pad.
+        text + 3.0 * 8.0 + 7.0 * gap + kit::SP_M
+    }
+
+    fn meters_widget(&self, ui: &mut egui::Ui, s: &DaemonState) {
+        let items = self.meters_items(s);
         // RTL: add reversed (CLIP first → rightmost), separator between each.
         for (i, (col, txt)) in items.iter().enumerate().rev() {
             ui.colored_label(*col, egui::RichText::new(txt).monospace());
