@@ -86,7 +86,14 @@ jobs:
               print ")"
               skip = 1; next
             }
-            skip && /^\)/ { skip = 0; next }
+            # End the skip at the array-closing paren. The in-repo PKGBUILD (and
+            # updpkgsums output) closes the array on the LAST hash line, e.g.
+            # "    \x27hash\x27)" — NOT a standalone ")". Matching only /^\)/ here
+            # therefore never fired, so skip stayed on and ate the rest of the
+            # file, including package() — yielding a 0-byte, binary-less package.
+            # Match any line ENDING in ")" (covers both styles); package() opens
+            # with "package() {" which ends in "{", so it is never swallowed.
+            skip && /\)[[:space:]]*$/ { skip = 0; next }
             skip { next }
             { print }
           ' dist/PKGBUILD > dist/PKGBUILD.tmp && mv dist/PKGBUILD.tmp dist/PKGBUILD
