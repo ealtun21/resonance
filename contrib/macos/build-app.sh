@@ -17,7 +17,24 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 APP_OUT="${APP_OUT:-$REPO_DIR/Resonance.app}"
-SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+
+# Signing identity. If the caller didn't pick one, prefer the persistent local
+# identity created by make-signing-cert.sh — signing with a stable certificate
+# keeps the bundle's designated requirement constant across rebuilds, so the
+# Audio Capture / Screen Recording TCC grant survives every rebuild. Falling
+# back to ad-hoc ("-") works but resets TCC on every build (new cdhash each
+# time), forcing a re-prompt. Run contrib/macos/make-signing-cert.sh once to
+# get the persistent identity.
+LOCAL_IDENTITY="Resonance Local Signing"
+if [[ -z "${SIGN_IDENTITY:-}" ]]; then
+    if security find-identity -p codesigning 2>/dev/null | grep -qF "$LOCAL_IDENTITY"; then
+        SIGN_IDENTITY="$LOCAL_IDENTITY"
+        echo ">> using persistent local signing identity '$LOCAL_IDENTITY' (TCC survives rebuilds)"
+    else
+        SIGN_IDENTITY="-"
+        echo ">> no persistent identity found — ad-hoc signing (run make-signing-cert.sh to stop TCC re-prompts)"
+    fi
+fi
 
 echo ">> building release binaries (daemon + GUI + TUI + CLI)"
 # All four binaries land in the bundle — the GUI is the user-facing
