@@ -27,7 +27,15 @@ const FRAME_INTERVAL: Duration = Duration::from_micros(6_944);
 const STATE_INTERVAL: Duration = Duration::from_millis(33);
 /// Profiles/mappings rarely change — poll them far less often than state.
 const META_INTERVAL: Duration = Duration::from_millis(1000);
-const RECONNECT_INTERVAL: Duration = Duration::from_millis(1000);
+/// How often the worker retries `connect()` while the daemon is unreachable.
+/// Snappy so a reconnect lands well inside `CONN_GRACE` after a daemon restart.
+const RECONNECT_INTERVAL: Duration = Duration::from_millis(500);
+/// Grace window: after the worker loses the daemon, the UI keeps showing the
+/// last-known state (with a subtle "reconnecting…" hint) for this long before
+/// falling back to the "No daemon connected" start screen. A daemon restart or
+/// a momentary stall reconnects well within this window, so the UI no longer
+/// flickers between connected and disconnected on every blip.
+const CONN_GRACE: Duration = Duration::from_millis(3000);
 /// Matugen colour-file mtime poll: snappy so the GUI recolours nearly as fast
 /// as other matugen-aware apps when the wallpaper/theme changes.
 const MATUGEN_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -197,6 +205,11 @@ pub struct GuiApp {
     /// Latest snapshot the IPC worker published (copied into fields each frame).
     pub(crate) shared: Arc<Mutex<GuiShared>>,
     pub(crate) state: Option<DaemonState>,
+    /// When the worker first lost the daemon while we still held a snapshot.
+    /// Drives the reconnect grace window (`CONN_GRACE`): we keep showing the
+    /// held-over state until it elapses, so a transient drop doesn't blank the
+    /// UI (the connect/disconnect flicker).
+    pub(crate) conn_lost_since: Option<Instant>,
     pub(crate) profiles: Vec<String>,
     pub(crate) mappings: Vec<(String, String)>,
     pub(crate) status: String,
@@ -408,22 +421,39 @@ fn spawn_ipc_worker(
                     }
                 }
 
-                // Meta (profiles + mappings) on a slow timer / on request.
-                if let Some(c) = ipc.as_mut()
-                    && (refresh_meta_now || last_meta.elapsed() >= META_INTERVAL)
-                {
-                    if let Ok(Response::PresetList(p)) = c.send_recv(Command::ListProfiles)
-                        && let Ok(mut s) = shared.lock()
-                    {
-                        s.profiles = p;
+                // Meta (profiles + mappings) on a slow timer / on request. A
+                // transport error here must tear the connection down — leaving a
+                // half-read framed reply on the socket would desync the next
+                // GetState and surface as a spurious disconnect.
+                if ipc.is_some() && (refresh_meta_now || last_meta.elapsed() >= META_INTERVAL) {
+                    let c = ipc.as_mut().unwrap();
+                    let mut ok = true;
+                    match c.send_recv(Command::ListProfiles) {
+                        Ok(Response::PresetList(p)) => {
+                            if let Ok(mut s) = shared.lock() {
+                                s.profiles = p;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(_) => ok = false,
                     }
-                    if let Ok(Response::Mappings(m)) = c.send_recv(Command::ListMappings)
-                        && let Ok(mut s) = shared.lock()
-                    {
-                        s.mappings = m;
+                    if ok {
+                        match c.send_recv(Command::ListMappings) {
+                            Ok(Response::Mappings(m)) => {
+                                if let Ok(mut s) = shared.lock() {
+                                    s.mappings = m;
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(_) => ok = false,
+                        }
                     }
-                    last_meta = Instant::now();
-                    refresh_meta_now = false;
+                    if ok {
+                        last_meta = Instant::now();
+                        refresh_meta_now = false;
+                    } else {
+                        ipc = None;
+                    }
                 }
 
                 std::thread::sleep(STATE_INTERVAL);
@@ -466,6 +496,7 @@ impl GuiApp {
             cmd_tx,
             shared,
             state: None,
+            conn_lost_since: None,
             profiles: Vec::new(),
             mappings: Vec::new(),
             status: String::new(),
@@ -598,7 +629,28 @@ impl GuiApp {
         {
             self.clip_until = Some(Instant::now() + Duration::from_millis(250));
         }
-        self.state = state;
+        // Connection hysteresis: a transient loss (daemon restart, a momentary
+        // stall) must NOT instantly blank the UI to the "No daemon connected"
+        // screen — that flip-flop is the connect/disconnect flicker. When the
+        // worker has a fresh snapshot, adopt it and clear the grace timer. When
+        // it doesn't, keep showing the last-known state for `CONN_GRACE`; only
+        // after sustained loss do we drop to the start screen.
+        match state {
+            Some(st) => {
+                self.state = Some(st);
+                self.conn_lost_since = None;
+            }
+            None => {
+                // Hold the last snapshot for the grace window; only drop to the
+                // start screen once the loss is sustained.
+                if self.state.is_some() {
+                    let since = *self.conn_lost_since.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= CONN_GRACE {
+                        self.state = None;
+                    }
+                }
+            }
+        }
         self.profiles = profiles;
         self.mappings = mappings;
         // Drop lock pins that no longer name a valid band — a profile load or

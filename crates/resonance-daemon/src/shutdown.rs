@@ -10,10 +10,34 @@ pub fn socket_path() -> PathBuf {
     resonance_ipc::paths::default_socket_path()
 }
 
-/// `<runtime_dir>/resonanced.pid` — single-instance lockfile.
+/// `<runtime_dir>/resonanced.pid` — records the live daemon's PID (for humans
+/// and `ps`). The authoritative single-instance guard is the lock file below;
+/// this is informational only.
 pub fn pidfile_path() -> PathBuf {
     resonance_ipc::paths::runtime_dir().join("resonanced.pid")
 }
+
+/// `<runtime_dir>/resonanced.lock` — the single-instance lock. Held for the
+/// whole process lifetime via an exclusive advisory lock (`flock`) so the
+/// kernel releases it automatically on exit/crash — no stale-PID reclaim race.
+pub fn lockfile_path() -> PathBuf {
+    resonance_ipc::paths::runtime_dir().join("resonanced.lock")
+}
+
+/// Outcome of trying to become the single live daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Singleton {
+    /// We hold the lock — proceed to bind the socket and run.
+    Acquired,
+    /// Another live daemon already holds it — the caller should exit cleanly.
+    AlreadyRunning,
+}
+
+// Hold the locked fd open for the entire process lifetime: dropping the `File`
+// closes the fd, which releases the `flock`. Stashing it here keeps the lock
+// alive without threading the handle through `main`.
+#[cfg(unix)]
+static LOCK_FILE: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
 
 /// Remove the IPC endpoint (Unix socket / Windows port file) and the pidfile.
 /// Idempotent; missing files are ignored.
@@ -25,25 +49,57 @@ pub fn cleanup() {
     let _ = std::fs::remove_file(pidfile_path());
 }
 
-/// Take the single-instance lock by writing our PID to the pidfile.
+/// Try to become the single live daemon.
 ///
-/// If the pidfile names a process that is still alive, refuse to start. A stale
-/// pidfile (process gone) is silently reclaimed.
-pub fn acquire_pidfile() -> Result<(), String> {
+/// Unix: take an exclusive, non-blocking advisory lock (`flock`) on the lock
+/// file and hold it for the process lifetime. If another daemon already holds
+/// it we return `AlreadyRunning` so the caller can exit *cleanly* (exit 0) —
+/// crucially NOT an error, so launchd's `KeepAlive { SuccessfulExit = false }`
+/// does not treat a duplicate-launch race as a crash and relaunch it in a loop.
+/// The kernel drops the lock when the fd closes (process exit/crash), so there
+/// is no stale-PID reclaim race: a dead daemon's lock is simply gone.
+///
+/// Windows has no `flock`; fall back to the PID-file liveness check there (the
+/// Windows daemon is the APO control plane, not a racy audio path).
+#[cfg(unix)]
+pub fn acquire_singleton() -> std::io::Result<Singleton> {
+    use std::os::unix::io::AsRawFd;
+    let path = lockfile_path();
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)?;
+    // SAFETY: `flock` takes a valid open fd; `LOCK_NB` makes it fail fast with
+    // `EWOULDBLOCK` instead of blocking when another daemon holds the lock.
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        return match err.raw_os_error() {
+            Some(libc::EWOULDBLOCK) => Ok(Singleton::AlreadyRunning),
+            _ => Err(err),
+        };
+    }
+    // We own it. Record our PID (best-effort, informational) and keep the locked
+    // fd alive for the whole process lifetime.
+    let _ = std::fs::write(pidfile_path(), std::process::id().to_string());
+    let _ = LOCK_FILE.set(file);
+    Ok(Singleton::Acquired)
+}
+
+#[cfg(windows)]
+pub fn acquire_singleton() -> std::io::Result<Singleton> {
     let path = pidfile_path();
     if let Ok(contents) = std::fs::read_to_string(&path) {
         if let Ok(pid) = contents.trim().parse::<u32>() {
             if pid != std::process::id() && process_alive(pid) {
-                return Err(format!(
-                    "another resonanced is already running (pid {pid}); \
-                     remove {} if this is wrong",
-                    path.display()
-                ));
+                return Ok(Singleton::AlreadyRunning);
             }
         }
     }
-    std::fs::write(&path, std::process::id().to_string())
-        .map_err(|e| format!("write pidfile {}: {e}", path.display()))
+    std::fs::write(&path, std::process::id().to_string())?;
+    Ok(Singleton::Acquired)
 }
 
 /// Whether a process with this PID currently exists.
@@ -51,7 +107,10 @@ pub fn acquire_pidfile() -> Result<(), String> {
 /// Unix: `kill(pid, 0)` — returns 0 if the signal could be sent (process is
 /// alive), `ESRCH` if no such process, `EPERM` if it exists but we can't signal
 /// it (still alive). Avoids the Linux-specific `/proc` probe.
-#[cfg(unix)]
+///
+/// Unix no longer uses this at runtime (the lock file is the single-instance
+/// guard); it is retained for the cross-platform liveness tests.
+#[cfg(all(unix, test))]
 fn process_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;

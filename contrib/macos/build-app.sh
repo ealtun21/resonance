@@ -116,10 +116,18 @@ codesign --force --sign "$SIGN_IDENTITY" --entitlements "$ENT" "$APP_OUT"
 # ── Install CLI symlinks so `resonance` + `resonance-tui` work in the
 #    terminal without typing the bundle path each time. We prefer
 #    ~/.local/bin (no sudo needed) and create it if missing.
+#
+# Point the symlinks at where the bundle will FINALLY live, not the build
+# output: the bundle is meant to be moved to /Applications after building, so
+# symlinking to APP_OUT (often a temp/build dir) leaves stale links — and the
+# service module canonicalises the CLI symlink to locate `resonanced`, so a
+# link into a vanished build dir breaks `resonance daemon …` and the launchd
+# plist. Override with INSTALL_PATH when building to a staging dir.
+INSTALL_PATH="${INSTALL_PATH:-$APP_OUT}"
 CLI_DIR="${CLI_DIR:-$HOME/.local/bin}"
 mkdir -p "$CLI_DIR"
 for c in resonance resonance-tui; do
-    ln -sf "$APP_OUT/Contents/MacOS/$c" "$CLI_DIR/$c"
+    ln -sf "$INSTALL_PATH/Contents/MacOS/$c" "$CLI_DIR/$c"
 done
 echo ">> CLI symlinks installed in $CLI_DIR (add to PATH if missing):"
 echo "     $CLI_DIR/resonance"

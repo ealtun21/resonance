@@ -40,6 +40,69 @@ pub fn unit_path() -> PathBuf {
         .join(format!("{UNIT_NAME}.plist"))
 }
 
+/// Stable, non-TCC-protected location the launchd agent runs the daemon from:
+/// `~/Library/Application Support/resonance/bin/resonanced`.
+fn staged_bin() -> PathBuf {
+    crate::paths::config_dir().join("bin").join("resonanced")
+}
+
+/// Whether `path` lives somewhere macOS guards with TCC, where a background
+/// launchd agent is denied read access — so exec'ing a binary there hangs in the
+/// loader's `open()` and the daemon never comes up. Covers the per-user
+/// protected folders plus the cloud-storage mount points.
+fn is_tcc_protected(path: &std::path::Path) -> bool {
+    let h = home();
+    let s = path.to_string_lossy();
+    ["Documents", "Desktop", "Downloads"]
+        .iter()
+        .any(|d| path.starts_with(h.join(d)))
+        || s.contains("/Library/Mobile Documents/") // iCloud Drive
+        || s.contains("/Library/CloudStorage/") // OneDrive / Dropbox / etc.
+}
+
+/// Resolve the path the launchd agent should run the daemon from, staging the
+/// binary into app-support first when (and only when) the resolved binary lives
+/// in a TCC-protected folder.
+///
+/// macOS denies a background launchd agent read access to `~/Documents`,
+/// `~/Desktop`, `~/Downloads` and cloud mounts. If `ExecStart` points into one
+/// — e.g. a dev build under `~/Documents/.../target/debug/resonanced` — the
+/// agent's `exec` blocks in the loader's `open()` forever and the daemon never
+/// comes up (no socket, no log). So we copy the binary out to app-support and
+/// point the plist there. The *client* does the copy, in the user's own
+/// file-access context, so it can read a source the agent could not.
+///
+/// A binary already in a readable location (a packaged install, or the
+/// `Resonance.app` bundle under `/Applications`) is left in place and run
+/// directly — no copy, so it keeps tracking its real binary across upgrades. On
+/// any copy error we fall back to the original path rather than failing the op.
+fn stage_binary() -> io::Result<PathBuf> {
+    let src = super::daemon_bin();
+    if !is_tcc_protected(&src) {
+        return Ok(src);
+    }
+    let dst = staged_bin();
+    if src == dst {
+        return Ok(dst);
+    }
+    if let Some(dir) = dst.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    // Copy to a sibling temp then atomically rename over the destination, so a
+    // running daemon (which keeps its own already-mapped inode) is never served
+    // a half-written file on its next relaunch.
+    let tmp = dst.with_extension("staging");
+    std::fs::copy(&src, &tmp)?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = std::fs::metadata(&tmp)?.permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&tmp, perm)?;
+    }
+    std::fs::rename(&tmp, &dst)?;
+    Ok(dst)
+}
+
 /// Render the LaunchAgent plist. `enabled` controls `RunAtLoad`: `true` makes
 /// the agent come up at login (matches systemd's `WantedBy=default.target`),
 /// `false` leaves it installed but not autostarting (matches systemd's
@@ -52,8 +115,7 @@ pub fn unit_path() -> PathBuf {
 /// only governs the initial start when the agent is (re)loaded at login — so a
 /// disabled agent (`RunAtLoad=false`) that the user manually starts still gets
 /// crash-restart from KeepAlive, but won't come back on its own after a reboot.
-fn plist_text(enabled: bool) -> String {
-    let exec = super::daemon_bin();
+fn plist_text(enabled: bool, exec: &std::path::Path) -> String {
     let log_dir = home().join("Library").join("Logs").join("resonance");
     let stdout_log = log_dir.join("resonanced.out.log");
     let stderr_log = log_dir.join("resonanced.err.log");
@@ -81,6 +143,8 @@ fn plist_text(enabled: bool) -> String {
         <key>SuccessfulExit</key>
         <false/>
     </dict>
+    <key>ThrottleInterval</key>
+    <integer>1</integer>
     <key>ProcessType</key>
     <string>Interactive</string>
     <key>StandardOutPath</key>
@@ -130,9 +194,12 @@ fn check_launchctl(out: std::process::Output, what: &str) -> io::Result<()> {
     // `bootstrap` on a loaded one. Treating these as failures made a redundant
     // Stop (or a stop on a never-started daemon) surface a spurious error.
     let low = err.to_ascii_lowercase();
+    // "No process to signal." is `launchctl kill`'s reply when the service is
+    // already stopped — the idempotent success case for a redundant Stop.
     if low.contains("no such process")
         || low.contains("could not find")
         || low.contains("already loaded")
+        || low.contains("no process to signal")
     {
         return Ok(());
     }
@@ -209,7 +276,10 @@ fn install_with(enabled: bool) -> io::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     ensure_log_dir()?;
-    std::fs::write(&path, plist_text(enabled))?;
+    // Run the agent from a readable, non-TCC-protected copy (see `stage_binary`);
+    // fall back to the resolved path if staging fails.
+    let exec = stage_binary().unwrap_or_else(|_| super::daemon_bin());
+    std::fs::write(&path, plist_text(enabled, &exec))?;
 
     // If a previous version is already loaded, bootout so the new plist is
     // honoured on re-bootstrap, then wait for the domain to actually drop the
@@ -282,6 +352,8 @@ pub fn restart() -> io::Result<()> {
     if !is_loaded() {
         install()?;
     }
+    // Refresh the staged binary so a rebuilt daemon is what comes back up.
+    let _ = stage_binary();
     check_launchctl(
         launchctl(&["kickstart", "-k", &service_target()])?,
         "kickstart -k",
@@ -338,8 +410,30 @@ mod tests {
     }
 
     #[test]
+    fn tcc_protected_paths_are_detected() {
+        let h = home();
+        // Dev build under ~/Documents (and the other guarded folders) → staged.
+        assert!(is_tcc_protected(
+            &h.join("Documents/resonance/target/debug/resonanced")
+        ));
+        assert!(is_tcc_protected(&h.join("Desktop/resonanced")));
+        assert!(is_tcc_protected(&h.join("Downloads/resonanced")));
+        assert!(is_tcc_protected(std::path::Path::new(
+            "/Users/x/Library/Mobile Documents/com~apple~CloudDocs/resonanced"
+        )));
+        // Readable locations → run in place, no staging.
+        assert!(!is_tcc_protected(std::path::Path::new(
+            "/Applications/Resonance.app/Contents/MacOS/resonanced"
+        )));
+        assert!(!is_tcc_protected(&h.join(".local/bin/resonanced")));
+        assert!(!is_tcc_protected(
+            &h.join("Library/Application Support/resonance/bin/resonanced")
+        ));
+    }
+
+    #[test]
     fn plist_contains_essential_keys() {
-        let xml = plist_text(true);
+        let xml = plist_text(true, std::path::Path::new("/usr/local/bin/resonanced"));
         // Verify the plist has the keys launchd needs and matches our label.
         for key in [
             "<key>Label</key>",
@@ -360,8 +454,9 @@ mod tests {
     #[test]
     fn plist_run_at_load_tracks_enabled_flag() {
         // enabled=true renders RunAtLoad <true/>, enabled=false renders <false/>.
-        let enabled = plist_text(true);
-        let disabled = plist_text(false);
+        let exec = std::path::Path::new("/usr/local/bin/resonanced");
+        let enabled = plist_text(true, exec);
+        let disabled = plist_text(false, exec);
         let after = |s: &str| {
             s.split("<key>RunAtLoad</key>")
                 .nth(1)

@@ -86,9 +86,18 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Single-instance lock; bail if another live daemon holds the pidfile.
-    if let Err(e) = shutdown::acquire_pidfile() {
-        anyhow::bail!(e);
+    // Single-instance guard. If another live daemon already holds the lock,
+    // exit *cleanly* (status 0) and DON'T touch its socket/pidfile — so a
+    // duplicate launch (e.g. launchd racing a manual start) is a no-op instead
+    // of a crash that `KeepAlive { SuccessfulExit = false }` would relaunch in a
+    // throttled loop.
+    match shutdown::acquire_singleton() {
+        Ok(shutdown::Singleton::Acquired) => {}
+        Ok(shutdown::Singleton::AlreadyRunning) => {
+            info!("another resonanced already holds the single-instance lock; exiting");
+            return Ok(());
+        }
+        Err(e) => anyhow::bail!("single-instance lock: {e}"),
     }
     shutdown::install_signal_handlers();
 

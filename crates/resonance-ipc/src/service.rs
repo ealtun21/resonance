@@ -67,10 +67,20 @@ pub fn daemon_bin() -> PathBuf {
         "resonanced"
     };
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let cand = dir.join(BIN);
-            if cand.is_file() {
-                return cand;
+        // Check the sibling next to the executable as-invoked AND next to its
+        // canonicalised path. macOS `current_exe()` returns the path used to
+        // launch — for a symlinked CLI (e.g. `~/.local/bin/resonance` →
+        // `…/Resonance.app/Contents/MacOS/resonance`) that's the symlink, whose
+        // directory has no `resonanced` sibling. Resolving the link lands us
+        // inside the bundle where `resonanced` lives. Without this the launchd
+        // plist gets a bare `resonanced` with no path and exits EX_CONFIG.
+        let resolved = exe.canonicalize().ok();
+        for base in [Some(&exe), resolved.as_ref()].into_iter().flatten() {
+            if let Some(dir) = base.parent() {
+                let cand = dir.join(BIN);
+                if cand.is_file() {
+                    return cand;
+                }
             }
         }
     }
@@ -122,6 +132,30 @@ pub fn status() -> Status {
     }
 }
 
+/// Generous ceiling for a start/restart to actually begin serving: the daemon
+/// initialises its audio backend (device enumeration + the system tap) before
+/// it binds the IPC socket, which can take a beat on first launch.
+const START_SETTLE: std::time::Duration = std::time::Duration::from_secs(6);
+/// Ceiling for a stop to stop serving (SIGTERM → audio teardown → socket gone).
+const STOP_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Block until the daemon's IPC endpoint reaches the desired reachability, or
+/// `timeout` elapses. Service-manager state transitions (process spawn, the
+/// SIGTERM teardown of the audio engine) are asynchronous, so reading status
+/// the instant a lifecycle op returns races the transition and reports the OLD
+/// state — the source of the "Start says running but nothing's there yet" and
+/// "Stop still says running" glitches. Polling the actual socket makes the
+/// reported `status()` (and the GUI's "busy" gate) reflect reality.
+fn settle(reachable: bool, timeout: std::time::Duration) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if crate::transport::is_reachable() == reachable {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(40));
+    }
+}
+
 /// Write (or refresh) the unit file and reload the user manager. Idempotent.
 pub fn install() -> io::Result<()> {
     backend::install()
@@ -132,35 +166,47 @@ pub fn uninstall() -> io::Result<()> {
     backend::uninstall()
 }
 
-/// Ensure the unit is installed, then start the service now.
+/// Ensure the unit is installed, then start the service now. Returns once the
+/// daemon is actually reachable (or the settle window elapses).
 pub fn start() -> io::Result<()> {
     if !is_installed() {
         install()?;
     }
-    backend::start()
+    backend::start()?;
+    settle(true, START_SETTLE);
+    Ok(())
 }
 
-/// Stop the running service.
+/// Stop the running service. Returns once it has actually stopped serving.
 pub fn stop() -> io::Result<()> {
-    backend::stop()
+    backend::stop()?;
+    settle(false, STOP_SETTLE);
+    Ok(())
 }
 
-/// Restart the service (installing the unit first if needed).
+/// Restart the service (installing the unit first if needed). Returns once the
+/// daemon is serving again.
 pub fn restart() -> io::Result<()> {
     if !is_installed() {
         install()?;
     }
-    backend::restart()
+    backend::restart()?;
+    settle(true, START_SETTLE);
+    Ok(())
 }
 
 /// Enable autostart and start now. Each backend's `enable` ensures the unit is
 /// installed itself (the macOS plist bootstrap is part of `enable`), so the
 /// facade does not pre-install — doing so double-bootstrapped launchd.
 pub fn enable() -> io::Result<()> {
-    backend::enable()
+    backend::enable()?;
+    settle(true, START_SETTLE);
+    Ok(())
 }
 
 /// Disable autostart and stop now.
 pub fn disable() -> io::Result<()> {
-    backend::disable()
+    backend::disable()?;
+    settle(false, STOP_SETTLE);
+    Ok(())
 }
