@@ -5,6 +5,7 @@
 
 use crate::app::GuiApp;
 use crate::state::{BAND_TYPES, GAIN_LIMIT, Q_LIMIT};
+use crate::ui::icons::Icon;
 use crate::ui::kit;
 use crate::ui::widgets::gain_bar;
 use eframe::egui;
@@ -157,7 +158,7 @@ impl GuiApp {
                     gain_bar(ui, graph_w, b.gain_db, &self.palette);
                 }
 
-                if kit::icon_button(ui, "✕", 24.0) {
+                if kit::icon_btn(ui, Icon::Close, 24.0, "Remove this band") {
                     self.queue_edit(Command::RemoveBand { index: i });
                     // Keep the lock pins on the same band after the list shifts.
                     remap_pin_on_remove(&mut self.vlock, i);
@@ -167,7 +168,14 @@ impl GuiApp {
         }
 
         ui.add_space(kit::SP_S);
-        if kit::button(ui, "✚  Add band", false, true) {
+        if kit::icon_text_btn(
+            ui,
+            Icon::Plus,
+            "Add band",
+            false,
+            true,
+            "Add a new peaking band",
+        ) {
             self.queue_edit(Command::AddBand {
                 band_type: BandType::Peaking,
                 freq: 1000.0,

@@ -54,13 +54,39 @@ impl GuiApp {
         // Reference / measurement overlays (target, result, gap…). Empty when the
         // reference system is off or has nothing to show; when present they
         // replace the bare EQ curve (the EQ is folded into the "result" series).
+        // Animate the normalise toggle: `na` eases 0↔1 so the target line visibly
+        // flattens to the 0-line and the result/measurement stretch into deviation,
+        // instead of snapping. Fed into `series` (the geometry) and the draw below.
+        let na = ui.ctx().animate_bool_with_time(
+            egui::Id::new("ref_norm_morph"),
+            self.reference.norm_view(),
+            0.35,
+        ) as f64;
         let ref_series = if self.reference.active() {
             self.reference
-                .series(&bands, state.sample_rate, 240, vlo, vhi)
+                .series(&bands, state.sample_rate, 240, vlo, vhi, na)
         } else {
             Vec::new()
         };
         let show_ref = !ref_series.is_empty();
+        // Legend for the overlay lines (drawn at the bottom, on top of everything).
+        // In the normalised view the target IS the flat 0-line, so there's no
+        // separate target line to key — only the result (+ raw measurement).
+        let legend: Vec<(&str, egui::Color32, bool)> = if show_ref {
+            let mut v = vec![("Result", pal.highlight, false)];
+            if !self.reference.norm_view() && self.reference.target.is_some() {
+                v.push(("Target", pal.accent, true));
+            }
+            if self.reference.show_bounds && self.reference.target.is_some() {
+                v.push(("Bounds", pal.accent.gamma_multiply(0.5), false));
+            }
+            if self.reference.show_measurement {
+                v.push(("Measured", pal.neutral.gamma_multiply(0.7), false));
+            }
+            v
+        } else {
+            Vec::new()
+        };
         // Loudest point the axis must show (any band gain, curve peak, or overlay
         // extent) + 5 dB headroom. Includes the dragged band, so the axis expands
         // live as you drag a node up and contracts as you bring it down.
@@ -75,6 +101,22 @@ impl GuiApp {
             .chain(bands.iter().map(|b| b.gain_db.abs()))
             .fold(0.0_f64, f64::max)
             .max(ref_peak);
+        // The preference band widens past the target at the extremes — grow the
+        // axis to keep the whole band on-screen when it's shown.
+        let peak = if self.reference.show_bounds {
+            ref_series
+                .iter()
+                .find(|s| s.role == crate::reference::SeriesRole::Target)
+                .map(|t| {
+                    t.pts.iter().fold(peak, |acc, &(lf, y)| {
+                        let (below, above) = crate::reference::preference_bounds(10f64.powf(lf));
+                        acc.max(y.abs() + below.max(above))
+                    })
+                })
+                .unwrap_or(peak)
+        } else {
+            peak
+        };
         let needed = peak + 5.0;
         // Pick the ± dB stop with HYSTERESIS so it doesn't chatter (jiggle) when
         // `needed` sits right on a stop boundary: grow once it exceeds 98% of the
@@ -247,8 +289,15 @@ impl GuiApp {
         // curve; otherwise draw the colour-coded EQ response (boost green / cut
         // red, neutral near 0 dB) as usual.
         if show_ref {
-            let norm = self.reference.norm_view();
-            draw_reference(&painter, &ref_series, norm, &x_of, &y_of, &pal);
+            draw_reference(
+                &painter,
+                &ref_series,
+                na as f32,
+                self.reference.show_bounds,
+                &x_of,
+                &y_of,
+                &pal,
+            );
         } else {
             for w in pts.windows(2) {
                 let (lf0, g0) = w[0];
@@ -548,16 +597,22 @@ impl GuiApp {
             painter.circle_stroke(center, r, ring);
         }
 
-        // In the normalised view the 0-line IS the target — tag it (the
-        // overlay/normalise toggles themselves live in the reference bar).
-        if show_ref && self.reference.norm_view() && self.reference.target.is_some() {
+        // As the view normalises, the 0-line becomes the target — fade the tag in
+        // with the morph (`na`), tracking the dashed target line that's flattening
+        // onto it.
+        if show_ref && self.reference.target.is_some() && na > 0.02 {
             painter.text(
                 egui::pos2(plot.right() - 4.0, y_of(0.0) - 3.0),
                 egui::Align2::RIGHT_BOTTOM,
                 "target",
                 egui::FontId::monospace(9.0),
-                pal.accent,
+                pal.accent.gamma_multiply(na as f32),
             );
+        }
+
+        // Legend (top-right, on top of everything) naming the overlay lines.
+        if !legend.is_empty() {
+            draw_legend(&painter, plot, &pal, &legend);
         }
     }
 }
@@ -568,12 +623,41 @@ impl GuiApp {
 fn draw_reference(
     painter: &egui::Painter,
     series: &[crate::reference::RefSeries],
-    normalized: bool,
+    na: f32,
+    show_bounds: bool,
     x_of: &dyn Fn(f64) -> f32,
     y_of: &dyn Fn(f64) -> f32,
     pal: &crate::theme::Palette,
 ) {
     use crate::reference::SeriesRole;
+
+    // Preference tolerance band first, behind every line: a translucent ribbon at
+    // target ± preference_halfwidth(f), so it follows the target (and flattens to
+    // a horizontal band around 0 as the view normalises). Drawn as per-segment
+    // filled quads (each a convex trapezoid) plus faint edge lines.
+    if show_bounds {
+        if let Some(t) = series.iter().find(|s| s.role == SeriesRole::Target) {
+            let [r, g, b, _] = pal.accent.to_array();
+            let fill = egui::Color32::from_rgba_unmultiplied(r, g, b, 26);
+            let edge = egui::Stroke::new(1.0, pal.accent.gamma_multiply(0.45));
+            let mut up: Vec<egui::Pos2> = Vec::with_capacity(t.pts.len());
+            let mut lo: Vec<egui::Pos2> = Vec::with_capacity(t.pts.len());
+            for &(lf, y) in &t.pts {
+                let (below, above) = crate::reference::preference_bounds(10f64.powf(lf));
+                up.push(egui::pos2(x_of(lf), y_of(y + above)));
+                lo.push(egui::pos2(x_of(lf), y_of(y - below)));
+            }
+            for i in 0..up.len().saturating_sub(1) {
+                painter.add(egui::Shape::convex_polygon(
+                    vec![up[i], up[i + 1], lo[i + 1], lo[i]],
+                    fill,
+                    egui::Stroke::NONE,
+                ));
+            }
+            painter.add(egui::Shape::line(up, edge));
+            painter.add(egui::Shape::line(lo, edge));
+        }
+    }
     let line = |pts: &[(f64, f64)], stroke: egui::Stroke| {
         for w in pts.windows(2) {
             painter.line_segment(
@@ -600,22 +684,27 @@ fn draw_reference(
                 &s.pts,
                 egui::Stroke::new(1.0, pal.neutral.gamma_multiply(0.5)),
             ),
-            // In the normalised view the target is the flat 0-line (the grid
-            // already marks it), so only draw the dashed target line otherwise.
+            // The dashed target line. Its points already flatten toward the 0-line
+            // as `na`→1; fade it out over the last quarter of the morph so it hands
+            // off cleanly to the grid's 0-line (tagged "target").
             SeriesRole::Target => {
-                if !normalized {
-                    dashed(&s.pts, egui::Stroke::new(1.5, pal.accent), 6.0, 4.0);
+                let a = ((1.0 - na) / 0.25).clamp(0.0, 1.0);
+                if a > 0.01 {
+                    dashed(
+                        &s.pts,
+                        egui::Stroke::new(1.5, pal.accent.gamma_multiply(a)),
+                        6.0,
+                        4.0,
+                    );
                 }
             }
+            // Result: solid highlight in the absolute view, easing toward the
+            // boost/cut gain colouring as the view normalises into deviation.
             SeriesRole::Result => {
                 for w in s.pts.windows(2) {
                     let (l0, y0) = w[0];
                     let (l1, y1) = w[1];
-                    let color = if normalized {
-                        gain_color((y0 + y1) * 0.5, pal)
-                    } else {
-                        pal.highlight
-                    };
+                    let color = lerp_color(pal.highlight, gain_color((y0 + y1) * 0.5, pal), na);
                     painter.line_segment(
                         [
                             egui::pos2(x_of(l0), y_of(y0)),
@@ -626,6 +715,73 @@ fn draw_reference(
                 }
             }
         }
+    }
+}
+
+/// A compact legend box in the plot's top-right naming the overlay lines, drawn
+/// over a translucent panel so it reads on any background. `entries` are
+/// `(label, colour, dashed)`; returns nothing (positioned by the caller).
+fn draw_legend(
+    painter: &egui::Painter,
+    plot: egui::Rect,
+    pal: &crate::theme::Palette,
+    entries: &[(&str, egui::Color32, bool)],
+) {
+    let font = egui::FontId::monospace(9.5);
+    let (pad, row_h, sw, gap) = (6.0_f32, 14.0_f32, 16.0_f32, 6.0_f32);
+    let label_col = contrast_color(pal.graph_bg);
+    let max_w = entries
+        .iter()
+        .map(|(l, _, _)| {
+            painter
+                .layout_no_wrap(l.to_string(), font.clone(), label_col)
+                .rect
+                .width()
+        })
+        .fold(0.0_f32, f32::max);
+    let box_w = pad + sw + gap + max_w + pad;
+    let box_h = pad * 2.0 + entries.len() as f32 * row_h;
+    // Bottom-right, lifted above the frequency-tick label row so it never collides
+    // with the top region labels / zoom readout (which sit at the top).
+    let right = plot.right() - 4.0;
+    let bottom = plot.bottom() - 16.0;
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(right - box_w, bottom - box_h),
+        egui::pos2(right, bottom),
+    );
+    let [r, g, b, _] = pal.graph_bg.to_array();
+    painter.rect_filled(
+        rect,
+        4.0,
+        egui::Color32::from_rgba_unmultiplied(r, g, b, 205),
+    );
+    painter.rect_stroke(
+        rect,
+        4.0,
+        egui::Stroke::new(1.0, pal.grid.gamma_multiply(0.8)),
+        egui::StrokeKind::Inside,
+    );
+    for (i, (label, color, dashed)) in entries.iter().enumerate() {
+        let cy = rect.top() + pad + row_h * i as f32 + row_h * 0.5;
+        let (x0, x1) = (rect.left() + pad, rect.left() + pad + sw);
+        let stroke = egui::Stroke::new(2.0, *color);
+        if *dashed {
+            painter.add(egui::Shape::dashed_line(
+                &[egui::pos2(x0, cy), egui::pos2(x1, cy)],
+                stroke,
+                3.0,
+                3.0,
+            ));
+        } else {
+            painter.line_segment([egui::pos2(x0, cy), egui::pos2(x1, cy)], stroke);
+        }
+        painter.text(
+            egui::pos2(x1 + gap, cy),
+            egui::Align2::LEFT_CENTER,
+            label,
+            font.clone(),
+            label_col,
+        );
     }
 }
 

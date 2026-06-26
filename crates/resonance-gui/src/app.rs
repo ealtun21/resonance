@@ -9,6 +9,7 @@ use crate::curve;
 use crate::ipc::IpcClient;
 use crate::state::*;
 use crate::theme::{Palette, Theme};
+use crate::ui::kit;
 use crate::ui::widgets::*;
 use eframe::egui;
 use resonance_ipc::{Command, DaemonState, Response, service, transport::TransportError};
@@ -308,6 +309,17 @@ pub struct GuiApp {
     pub(crate) autoeq_tx: std::sync::mpsc::Sender<AutoEqOutcome>,
     pub(crate) autoeq_rx: std::sync::mpsc::Receiver<AutoEqOutcome>,
     pub(crate) autoeq_busy: bool,
+    /// EQ has unsaved edits (set on any edit, cleared on profile save/load).
+    /// Drives the save-before-quit prompt.
+    pub(crate) dirty: bool,
+    /// The "unsaved changes" close prompt is showing; its name buffer.
+    pub(crate) pending_quit: bool,
+    pub(crate) quit_save_name: String,
+    /// Set once the user has resolved the prompt, so the window may close.
+    pub(crate) allow_close: bool,
+    /// Brief grace window to let a queued "Save & Quit" reach the daemon before
+    /// the window actually closes.
+    pub(crate) quit_deadline: Option<Instant>,
 }
 
 /// Messages from the UI thread to the IPC worker.
@@ -502,6 +514,9 @@ impl GuiApp {
             .map(|s| Theme::from_label(&s))
             .unwrap_or(Theme::System);
         cc.egui_ctx.set_visuals(theme.visuals());
+        // Restore the reference overlay (measurement + target) from a previous
+        // session so a loaded measurement persists across restarts.
+        let persisted_ref = cc.storage.and_then(|s| s.get_string("reference"));
         // Compact, consistent button sizing so controls stay usable when the
         // window is narrow (set once; set_visuals doesn't touch spacing).
         // Denser, desktop-native metrics (tighter than egui's airy defaults).
@@ -515,9 +530,14 @@ impl GuiApp {
         let shared = Arc::new(Mutex::new(GuiShared::default()));
         spawn_ipc_worker(ipc_rx, shared.clone(), cc.egui_ctx.clone());
         let (dl_tx, dl_rx) = crate::download::spawn(cc.egui_ctx.clone());
+        // Warm the target/measurement catalog at startup from the on-disk cache
+        // (instant) so the Manage/Browse dialogs open already populated; the
+        // worker's `IfStale` policy silently re-fetches anything older than the
+        // TTL in the background. Manual "Refresh" still forces a full re-fetch.
+        let _ = dl_tx.send(crate::download::DlCmd::Init);
         let (autoeq_tx, autoeq_rx) = std::sync::mpsc::channel::<AutoEqOutcome>();
 
-        Self {
+        let mut app = Self {
             cmd_tx,
             shared,
             state: None,
@@ -570,7 +590,49 @@ impl GuiApp {
             autoeq_tx,
             autoeq_rx,
             autoeq_busy: false,
+            dirty: false,
+            pending_quit: false,
+            quit_save_name: String::new(),
+            allow_close: false,
+            quit_deadline: None,
+        };
+        if let Some(p) = persisted_ref.and_then(|j| serde_json::from_str(&j).ok()) {
+            app.reference.restore(p);
         }
+        // Dev/test hook: `RESONANCE_OPEN=manage|browse` opens that dialog at
+        // startup so the screenshot harness can capture it. No effect otherwise.
+        match std::env::var("RESONANCE_OPEN").as_deref() {
+            Ok("manage") => app.reference.show_manage = true,
+            Ok("browse") => app.reference.show_browser = true,
+            _ => {}
+        }
+        // Dev/test hook: `RESONANCE_DEMO_REF=norm|raw` loads the first local curve
+        // as a stand-in measurement and turns the reference overlay on (normalised
+        // or absolute), so the harness can screenshot the overlay/legend/normalise
+        // morph without a live measurement. Also clears persisted panel sizes so
+        // the graph is full-height. No effect otherwise.
+        if let Ok(mode) = std::env::var("RESONANCE_DEMO_REF") {
+            let dir = resonance_ipc::paths::user_curve_dir();
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                if let Some(p) = rd
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("txt"))
+                    .min()
+                    && app.reference.load_measurement_file(&p)
+                {
+                    app.reference.enabled = true;
+                    app.reference.normalized = mode != "raw";
+                    app.reference.show_bounds = true;
+                }
+            }
+            use egui::containers::panel::PanelState;
+            cc.egui_ctx.data_mut(|d| {
+                d.remove::<PanelState>(egui::Id::new("controls_panel"));
+                d.remove::<PanelState>(egui::Id::new("graph_narrow"));
+            });
+        }
+        app
     }
 
     /// Drain download-worker events each frame: update the catalog snapshot /
@@ -586,6 +648,12 @@ impl GuiApp {
                     self.reference
                         .set_measurement(f.name, f.iem, f.left, f.right);
                     self.reference.show_browser = false;
+                }
+                crate::download::DlEvent::FetchedTarget { name, curve } => {
+                    // Added from the Manage-targets dialog; keep the dialog open
+                    // so the user can add several in a row.
+                    self.reference.write_target(&name, &curve);
+                    self.set_status(format!("added target: {name}"));
                 }
             }
         }
@@ -607,6 +675,7 @@ impl GuiApp {
             }
             self.redo_stack.clear();
             self.last_edit = None;
+            self.dirty = true;
             self.queue(Command::ApplyState {
                 preamp_db: o.preamp_db,
                 enabled: true,
@@ -654,6 +723,7 @@ impl GuiApp {
             }
         }
         self.last_edit = Some(now);
+        self.dirty = true;
         self.queue(cmd);
     }
 
@@ -761,6 +831,7 @@ impl GuiApp {
     /// profile — mirrors the TUI flow so presets are always captured, not just
     /// applied transiently.
     pub(crate) fn import_and_load(&mut self, path: String) {
+        self.dirty = false; // loading a preset replaces the current tuning
         let _ = self.cmd_tx.send(WorkerCmd::Import(path));
     }
 }
@@ -771,11 +842,39 @@ impl eframe::App for GuiApp {
     /// `persist_egui_memory`).
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string("theme", self.theme.label().to_string());
+        // Persist the reference overlay (measurement + target + customizer) so a
+        // loaded measurement survives a restart, tied to the EQ it was built for.
+        if let Ok(j) = serde_json::to_string(&self.reference.to_persisted()) {
+            storage.set_string("reference", j);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Read the latest snapshot the IPC worker published (never blocks).
         self.pull_shared();
+
+        // Save-before-quit guard: if the EQ has unsaved edits, intercept the
+        // window close and offer to save them as a profile first.
+        if ui.ctx().input(|i| i.viewport().close_requested()) && !self.allow_close && self.dirty {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if !self.pending_quit {
+                self.pending_quit = true;
+                self.quit_save_name = self
+                    .state
+                    .as_ref()
+                    .and_then(|s| s.current_preset.clone())
+                    .unwrap_or_default();
+            }
+        }
+        // Deferred close: once a "Save & Quit" has had a moment to flush to the
+        // daemon, actually close the window.
+        if let Some(dl) = self.quit_deadline {
+            if Instant::now() >= dl {
+                self.quit_deadline = None;
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
 
         // One-time window-state migration: older (CSD/borderless) builds persisted
         // `fullscreen:true`/`maximized:true` plus panel sizes scaled to the full
@@ -909,7 +1008,9 @@ impl eframe::App for GuiApp {
         self.confirm_dialog(&ctx);
         self.help_dialog(&ctx);
         self.browse_dialog(&ctx);
+        self.manage_dialog(&ctx);
         self.curve_picker_dialog(&ctx);
+        self.quit_dialog(&ctx);
         self.status_toast(&ctx);
 
         // Drive ~144 fps repaint so spectrum/curve stay smooth.
@@ -952,6 +1053,71 @@ impl GuiApp {
                     ui.add(egui::Label::new(&self.status).wrap_mode(egui::TextWrapMode::Extend));
                 });
             });
+    }
+
+    /// "Unsaved changes" prompt shown when the window is closed with dirty EQ
+    /// edits: save them as a profile, discard them, or cancel and stay.
+    fn quit_dialog(&mut self, ctx: &egui::Context) {
+        if !self.pending_quit {
+            return;
+        }
+        let mut open = true;
+        dialog_window(ctx, "Unsaved changes")
+            .id(egui::Id::new("quit_confirm"))
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("You have unsaved EQ changes. Save them as a profile before quitting?");
+                ui.add_space(kit::SP_S);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("name").size(kit::T_CAPTION).weak());
+                    kit::text_field(
+                        ui,
+                        220.0,
+                        egui::Id::new("quit_save_name"),
+                        &mut self.quit_save_name,
+                        "profile name…",
+                        false,
+                    );
+                });
+                ui.add_space(kit::SP_S);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = kit::SP_S;
+                    let name = self.quit_save_name.trim().to_string();
+                    if kit::button_tip(
+                        ui,
+                        "Save & Quit",
+                        true,
+                        !name.is_empty(),
+                        "Save the current EQ as this profile, then close",
+                    ) {
+                        self.queue(Command::SaveProfile { name });
+                        self.needs_meta = true;
+                        self.dirty = false;
+                        self.pending_quit = false;
+                        self.allow_close = true;
+                        self.quit_deadline = Some(Instant::now() + Duration::from_millis(400));
+                    }
+                    if kit::button_tip(
+                        ui,
+                        "Discard & Quit",
+                        false,
+                        true,
+                        "Close without saving — the unsaved tuning is lost",
+                    ) {
+                        self.dirty = false;
+                        self.pending_quit = false;
+                        self.allow_close = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    if kit::button_tip(ui, "Cancel", false, true, "Keep the window open") {
+                        self.pending_quit = false;
+                    }
+                });
+            });
+        // The window's own close button (X) acts as Cancel.
+        if !open {
+            self.pending_quit = false;
+        }
     }
 
     /// Write the current chain to `path` as a `.toml` profile (round-trips via

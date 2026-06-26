@@ -221,7 +221,7 @@ impl GuiApp {
                         self.bands_section(ui, s);
                     }
                 });
-                accordion(ui, "acc_map_v3", "Device Mapping", false, |ui| {
+                accordion(ui, "acc_map_v3", "Device mapping", false, |ui| {
                     self.device_mapping_section(ui)
                 });
                 accordion(ui, "acc_prof_v3", "Profiles", false, |ui| {

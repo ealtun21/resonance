@@ -15,6 +15,33 @@
 use resonance_ipc::BandState;
 use resonance_ipc::curve::{self, RefCurve};
 use resonance_ipc::fr::{LOG_MAX, LOG_MIN, response_db};
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+
+/// A serialisable snapshot of the reference overlay — the active measurement,
+/// target selection and customizer — persisted by the GUI across sessions so a
+/// loaded measurement (and the EQ context it belongs to) survives a restart,
+/// even when reference mode is currently off. Stored via eframe's app storage.
+#[derive(Serialize, Deserialize, Default)]
+pub(crate) struct PersistedReference {
+    enabled: bool,
+    show_measurement: bool,
+    normalized: bool,
+    #[serde(default)]
+    show_bounds: bool,
+    /// 0 = L+R avg, 1 = Left, 2 = Right.
+    channel: u8,
+    iem: bool,
+    smoothing_oct: f64,
+    meas_name: String,
+    /// Raw per-channel measurement curves (None = no measurement loaded).
+    meas_left: Option<RefCurve>,
+    meas_right: Option<RefCurve>,
+    /// 0 = None, 1 = File(name), 2 = DiamondBeta, 3 = Ultra.
+    target_kind: u8,
+    target_name: String,
+    adj: [f64; 4],
+}
 
 /// Built-in target curves embedded at build time (from AutoEq, MIT-licensed).
 /// Users add more by dropping `.txt`/`.csv` curves into `user_curve_dir()`.
@@ -35,6 +62,32 @@ const BUILTIN_TARGETS: &[(&str, &str)] = &[
 
 /// The target the Diffuse-Field-anchored generated targets build on.
 const DF_NAME: &str = "Diffuse Field";
+
+/// Listener-preference tolerance bounds at frequency `f`, returned as
+/// `(below, above)` dB magnitudes around the target — an **asymmetric** band.
+///
+/// Shaped from the qualitative findings in headphones.com's "The Shape of IEMs
+/// to Come": the midrange is tight (~±1 dB); the bass tolerates far more *boost*
+/// than cut (Harman in-ear targets carry ~4 dB more bass than the headphone
+/// target, and listeners reliably prefer extra low end), so the upper bound
+/// flares more than the lower below ~150 Hz; the upper-mid/ear-gain and treble
+/// region is contentious with high HRTF/coupler variance and no settled 5128
+/// preference research, so the band widens broadly above ~2.5 kHz. These are a
+/// shaped approximation (no proprietary preference dataset is reproduced), safe
+/// to ship.
+pub(crate) fn preference_bounds(f: f64) -> (f64, f64) {
+    // smoothstep between edges `e0`→`e1` (works in either direction).
+    let ss = |e0: f64, e1: f64, x: f64| {
+        let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    let base = 1.0;
+    let bass = ss(200.0, 40.0, f); // 0 above 200 Hz → 1 at/below 40 Hz
+    let treble = ss(2500.0, 12000.0, f); // widen from ear-gain up through air
+    let below = base + 2.4 * bass + 3.6 * treble;
+    let above = base + 5.2 * bass + 3.6 * treble; // bass skews toward boost
+    (below, above)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Channel {
@@ -64,6 +117,26 @@ pub(crate) enum TargetSel {
     /// Diffuse Field + the PEQdB "Optimized Target" paper filters.
     DiamondBeta,
     Ultra,
+}
+
+/// Which tab the "Manage targets" dialog is showing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ManageTab {
+    /// squig.link target curves (parsed from each site's config.js).
+    Targets,
+    /// squig.link headphone/IEM measurements, added as a target (L+R averaged).
+    Measurements,
+    /// The current target library — remove entries / reset to defaults.
+    Yours,
+}
+
+/// One row in the "Your targets" library list: a selectable target plus how to
+/// remove it (delete a user file, or hide a built-in/generated one).
+pub(crate) struct LibEntry {
+    pub label: String,
+    /// `true` for the embedded defaults / generated PEQdB targets (removed by
+    /// hiding, restorable via "Reset to defaults"); `false` for user files.
+    pub builtin: bool,
 }
 
 /// Role of a drawn reference series — `curve_view` maps it to colour/style.
@@ -101,9 +174,16 @@ pub(crate) struct ReferenceState {
     /// Toggle: normalised view — re-baseline so the target is a flat 0 dB line
     /// and the result shows as deviation. Only meaningful with a measurement.
     pub normalized: bool,
+    /// Toggle: shade a listener-preference tolerance band around the target
+    /// (tight in the mids, widening through bass/treble). A visual "stay inside
+    /// this zone" aid for manual EQ.
+    pub show_bounds: bool,
 
     /// Available target curves (built-in defaults + user `curve` dir).
     pub targets: Vec<TargetItem>,
+    /// Labels hidden from the selector — built-ins/generated the user "removed"
+    /// (user *files* are deleted instead). Cleared by "Reset to defaults".
+    pub hidden: HashSet<String>,
     pub target_sel: TargetSel,
     /// Edit buffer for naming a saved custom target.
     pub target_name: String,
@@ -126,8 +206,14 @@ pub(crate) struct ReferenceState {
     /// Search text in the browse dialog.
     pub browse_query: String,
 
+    /// The "Manage targets" dialog is open (add from squig / remove / reset).
+    pub show_manage: bool,
+    pub manage_tab: ManageTab,
+    /// Separate search buffers for the target-curve and measurement tabs.
+    pub manage_tquery: String,
+    pub manage_mquery: String,
+
     // ── Target customizer (stacks on the active target) ──
-    pub adjust_open: bool,
     pub adj_tilt: f64,
     pub adj_bass: f64,
     pub adj_ear: f64,
@@ -140,7 +226,9 @@ impl Default for ReferenceState {
             enabled: false,
             show_measurement: true,
             normalized: false,
+            show_bounds: false,
             targets: load_targets(),
+            hidden: load_hidden(),
             target_sel: TargetSel::None,
             target_name: String::new(),
             target: None,
@@ -152,7 +240,10 @@ impl Default for ReferenceState {
             measurement: None,
             show_browser: false,
             browse_query: String::new(),
-            adjust_open: false,
+            show_manage: false,
+            manage_tab: ManageTab::Targets,
+            manage_tquery: String::new(),
+            manage_mquery: String::new(),
             adj_tilt: 0.0,
             adj_bass: 0.0,
             adj_ear: 0.0,
@@ -189,30 +280,62 @@ impl ReferenceState {
             .map(|t| &t.curve)
     }
 
-    /// Selectable targets for a dropdown. Defaults (built-ins + generated) first,
-    /// user curves after, so the default list stays uncluttered.
+    /// Selectable targets for the dropdown — only the *visible* library, i.e.
+    /// everything except entries the user has removed (`hidden`). Defaults
+    /// (built-ins + generated) first, then user/added curves.
     pub(crate) fn target_options(&self) -> Vec<(String, TargetSel)> {
+        let visible = |name: &str| !self.hidden.contains(name);
         let mut opts = vec![("None".to_string(), TargetSel::None)];
-        for t in self.targets.iter().filter(|t| t.builtin) {
+        for t in self
+            .targets
+            .iter()
+            .filter(|t| t.builtin && visible(&t.name))
+        {
             opts.push((t.name.clone(), TargetSel::File(t.name.clone())));
         }
-        opts.push(("PEQdB Diamond β".to_string(), TargetSel::DiamondBeta));
-        opts.push(("PEQdB Ultra".to_string(), TargetSel::Ultra));
-        for t in self.targets.iter().filter(|t| !t.builtin) {
+        if visible("PEQdB Diamond β") {
+            opts.push(("PEQdB Diamond β".to_string(), TargetSel::DiamondBeta));
+        }
+        if visible("PEQdB Ultra") {
+            opts.push(("PEQdB Ultra".to_string(), TargetSel::Ultra));
+        }
+        for t in self
+            .targets
+            .iter()
+            .filter(|t| !t.builtin && visible(&t.name))
+        {
             opts.push((t.name.clone(), TargetSel::File(t.name.clone())));
         }
         opts
     }
 
-    /// Path of the active target if it's a deletable user curve.
-    pub(crate) fn active_user_target_path(&self) -> Option<std::path::PathBuf> {
-        let TargetSel::File(name) = &self.target_sel else {
-            return None;
-        };
-        self.targets
-            .iter()
-            .find(|t| &t.name == name && !t.builtin)
-            .and_then(|t| t.path.clone())
+    /// The visible target library as removable rows ("Your targets" tab). Built
+    /// from [`target_options`] minus the `None` entry, tagging each as a
+    /// built-in/generated default (hidden to remove) or a user file (deleted).
+    pub(crate) fn library_entries(&self) -> Vec<LibEntry> {
+        self.target_options()
+            .into_iter()
+            .filter(|(_, sel)| !matches!(sel, TargetSel::None))
+            .map(|(label, sel)| {
+                let is_user_file = matches!(&sel, TargetSel::File(n)
+                    if self.targets.iter().any(|t| &t.name == n && !t.builtin));
+                LibEntry {
+                    label,
+                    builtin: !is_user_file,
+                }
+            })
+            .collect()
+    }
+
+    /// Count of currently-hidden defaults (shown in the manage dialog so the
+    /// "Reset to defaults" button reads as actionable).
+    pub(crate) fn hidden_count(&self) -> usize {
+        self.hidden.len()
+    }
+
+    /// Whether the active target can be removed (anything but "None").
+    pub(crate) fn active_target_removable(&self) -> bool {
+        !matches!(self.target_sel, TargetSel::None)
     }
 
     pub(crate) fn label_for(sel: &TargetSel) -> String {
@@ -278,30 +401,151 @@ impl ReferenceState {
         self.adj_treble = 0.0;
     }
 
-    /// Write a curve to the user library as `<name>.txt`, reload, and select it
-    /// (with adjustments cleared, since they're baked into the saved curve).
-    pub(crate) fn save_target(&mut self, name: &str, curve: &RefCurve) {
+    /// Write a curve to the user library as `<name>.txt` and reload the library.
+    /// Un-hides the name (adding implies showing it). Returns the sanitized name
+    /// on success. Does **not** change the active selection.
+    pub(crate) fn write_target(&mut self, name: &str, curve: &RefCurve) -> Option<String> {
         let dir = resonance_ipc::paths::user_curve_dir();
         if std::fs::create_dir_all(&dir).is_err() {
-            return;
+            return None;
         }
-        let name = sanitize_name(name);
+        // Disambiguate a name that collides with a built-in or generated target:
+        // `load_targets` lets the built-in win over a same-named user file, so
+        // writing "Diffuse Field" verbatim would be silently shadowed (the added
+        // curve never appears). Suffix "(added)" so it shows as its own entry.
+        let mut name = sanitize_name(name);
+        const GENERATED: [&str; 2] = ["PEQdB Diamond β", "PEQdB Ultra"];
+        let collides = GENERATED.contains(&name.as_str())
+            || self.targets.iter().any(|t| t.builtin && t.name == name);
+        if collides {
+            name = format!("{name} (added)");
+        }
         let mut body = String::from("frequency,raw\n");
         for &(f, db) in &curve.points {
             body.push_str(&format!("{f:.2},{db:.3}\n"));
         }
-        if std::fs::write(dir.join(format!("{name}.txt")), body).is_ok() {
+        if std::fs::write(dir.join(format!("{name}.txt")), body).is_err() {
+            return None;
+        }
+        if self.hidden.remove(&name) {
+            self.save_hidden();
+        }
+        self.reload_targets();
+        Some(name)
+    }
+
+    /// Write a curve to the library, clear the customizer, and select it (the
+    /// customizer's Save flow — its adjustments are baked into the saved curve).
+    pub(crate) fn save_target(&mut self, name: &str, curve: &RefCurve) {
+        if let Some(name) = self.write_target(name, curve) {
             self.reset_adjust();
-            self.reload_targets();
             self.set_target(TargetSel::File(name));
         }
     }
 
-    /// Delete a user target file and deselect it.
-    pub(crate) fn delete_target(&mut self, path: &std::path::Path) {
-        let _ = std::fs::remove_file(path);
+    /// Remove a target from the library by its selector label: delete the file
+    /// for a user curve, or hide a built-in/generated default (restorable via
+    /// [`reset_targets_to_defaults`](Self::reset_targets_to_defaults)).
+    pub(crate) fn remove_target_label(&mut self, label: &str) {
+        let user_path = self
+            .targets
+            .iter()
+            .find(|t| t.name == label && !t.builtin)
+            .and_then(|t| t.path.clone());
+        match user_path {
+            Some(path) => {
+                let _ = std::fs::remove_file(path);
+            }
+            None => {
+                self.hidden.insert(label.to_string());
+                self.save_hidden();
+            }
+        }
         self.reload_targets();
-        self.set_target(TargetSel::None);
+        if self.target_label() == label {
+            self.set_target(TargetSel::None);
+        }
+    }
+
+    /// Restore the default library: un-hide every built-in/generated target.
+    /// User-added curves are kept (remove those individually).
+    pub(crate) fn reset_targets_to_defaults(&mut self) {
+        self.hidden.clear();
+        self.save_hidden();
+        self.reload_targets();
+    }
+
+    fn save_hidden(&self) {
+        let dir = resonance_ipc::paths::config_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let body: String = self.hidden.iter().map(|n| format!("{n}\n")).collect();
+        let _ = std::fs::write(dir.join("hidden_targets.txt"), body);
+    }
+
+    /// Snapshot the overlay for cross-session persistence.
+    pub(crate) fn to_persisted(&self) -> PersistedReference {
+        let (left, right) = match &self.measurement_lr {
+            Some((l, r)) => (Some(l.clone()), r.clone()),
+            None => (None, None),
+        };
+        let (target_kind, target_name) = match &self.target_sel {
+            TargetSel::None => (0, String::new()),
+            TargetSel::File(n) => (1, n.clone()),
+            TargetSel::DiamondBeta => (2, String::new()),
+            TargetSel::Ultra => (3, String::new()),
+        };
+        PersistedReference {
+            enabled: self.enabled,
+            show_measurement: self.show_measurement,
+            normalized: self.normalized,
+            show_bounds: self.show_bounds,
+            channel: match self.channel {
+                Channel::Avg => 0,
+                Channel::Left => 1,
+                Channel::Right => 2,
+            },
+            iem: self.measurement_iem,
+            smoothing_oct: self.smoothing_oct,
+            meas_name: self.measurement_name.clone(),
+            meas_left: left,
+            meas_right: right,
+            target_kind,
+            target_name,
+            adj: [self.adj_tilt, self.adj_bass, self.adj_ear, self.adj_treble],
+        }
+    }
+
+    /// Restore a persisted overlay (on GUI startup). The measurement is loaded
+    /// regardless of `enabled`, so re-enabling reference mode shows the same
+    /// measurement the EQ was built against.
+    pub(crate) fn restore(&mut self, p: PersistedReference) {
+        self.enabled = p.enabled;
+        self.show_measurement = p.show_measurement;
+        self.normalized = p.normalized;
+        self.show_bounds = p.show_bounds;
+        self.channel = match p.channel {
+            1 => Channel::Left,
+            2 => Channel::Right,
+            _ => Channel::Avg,
+        };
+        self.measurement_iem = p.iem;
+        if p.smoothing_oct > 0.0 {
+            self.smoothing_oct = p.smoothing_oct;
+        }
+        self.measurement_name = p.meas_name;
+        self.measurement_lr = p.meas_left.map(|l| (l, p.meas_right));
+        self.adj_tilt = p.adj[0];
+        self.adj_bass = p.adj[1];
+        self.adj_ear = p.adj[2];
+        self.adj_treble = p.adj[3];
+        self.target_sel = match p.target_kind {
+            1 => TargetSel::File(p.target_name),
+            2 => TargetSel::DiamondBeta,
+            3 => TargetSel::Ultra,
+            _ => TargetSel::None,
+        };
+        self.rebuild_target();
+        self.rebuild_measurement();
     }
 
     /// Load a local measurement file (`freq dB` text) as the active measurement.
@@ -386,12 +630,17 @@ impl ReferenceState {
         n: usize,
         vlo: f64,
         vhi: f64,
+        na: f64,
     ) -> Vec<RefSeries> {
         if !self.active() {
             return Vec::new();
         }
         let n = n.max(2);
-        let norm = self.norm_view();
+        // `na` (0..1) animates the normalisation: 0 = absolute curves, 1 = fully
+        // re-baselined onto the target (target flattens to 0, the result and the
+        // raw measurement stretch into deviation). Driving it from an eased
+        // `animate_bool` lets the toggle morph instead of snapping.
+        let na = na.clamp(0.0, 1.0);
         let off_t = self.target.as_ref().map(Self::offset);
         let off_m = self.measurement.as_ref().map(Self::offset);
         // Mean-remove the EQ's own broadband level too, so the result is compared
@@ -426,14 +675,16 @@ impl ReferenceState {
                 .measurement
                 .as_ref()
                 .map(|c| c.interp(f) + off_m.unwrap_or(0.0));
-            // In the normalised view everything is shown relative to the target.
-            let base = if norm { t.unwrap_or(0.0) } else { 0.0 };
+            // Re-baseline toward the target by the animation factor: at na=0 the
+            // curves are absolute, at na=1 everything is shown relative to the
+            // target (which therefore flattens to 0).
+            let base = na * t.unwrap_or(0.0);
             // Result = measurement shaped by the current EQ, with the EQ's mean
             // removed so only its shape contributes to the comparison.
             let res = m.unwrap_or(0.0) + eq + off_eq;
 
             if let Some(t) = t {
-                target.push((lf, if norm { 0.0 } else { t }));
+                target.push((lf, t - base)); // t·(1−na): flattens to 0 as na→1
             }
             result.push((lf, res - base));
             if self.show_measurement {
@@ -477,6 +728,19 @@ fn sanitize_name(name: &str) -> String {
     } else {
         n.to_string()
     }
+}
+
+/// Load the set of target labels the user has hidden from the selector.
+fn load_hidden() -> HashSet<String> {
+    std::fs::read_to_string(resonance_ipc::paths::config_dir().join("hidden_targets.txt"))
+        .map(|b| {
+            b.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Load built-in targets (embedded) plus any user curves in `user_curve_dir()`.

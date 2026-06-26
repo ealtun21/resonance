@@ -18,6 +18,7 @@ use crate::app::{GuiApp, ServiceAction, ServiceFn};
 use crate::browser::Browser;
 use crate::state::{Dialog, SaveDialog};
 use crate::theme::Theme;
+use crate::ui::icons::{self, Icon};
 use crate::ui::kit;
 use crate::ui::widgets::ellipsize;
 use eframe::egui;
@@ -73,16 +74,15 @@ impl GuiApp {
         let w_power = 66.0; // power button min width
         let w_pre_min = text_width(ui, body.clone(), "Pre") + gap + 58.0; // label + num field
         let w_pre_full = text_width(ui, body.clone(), "Preamp") + gap + 150.0 + gap + 72.0;
-        let w_output = text_width(ui, body.clone(), "🔊") + gap + 190.0; // label + dropdown
+        let w_output = 18.0 + gap + 190.0; // speaker icon + dropdown
         let w_daemon = text_width(ui, kf.clone(), "● Daemon") + 22.0; // menu button
-        let w_history = (text_width(ui, kf.clone(), "Undo") + 24.0)
-            + gap
-            + (text_width(ui, kf.clone(), "Redo") + 24.0);
-        let w_overflow = text_width(ui, kf.clone(), "☰") + 22.0;
+        let w_history = kit::CTRL_H + gap + kit::CTRL_H; // two icon buttons
+        let w_help = 28.0; // ? help icon button
+        let w_overflow = 28.0; // ☰ icon menu button
 
         // Cumulative widths required, in widen order: output → preamp-full →
-        // daemon → history. Power, the compact preamp and ☰ are always present.
-        let base = w_power + w_pre_min + w_overflow + 3.0 * unit;
+        // daemon → history. Power, the compact preamp, ? and ☰ are always present.
+        let base = w_power + w_pre_min + w_help + w_overflow + 4.0 * unit;
         let req_output = base + w_output + unit;
         let req_preamp_full = req_output + (w_pre_full - w_pre_min);
         let req_daemon = req_preamp_full + w_daemon + unit;
@@ -101,37 +101,56 @@ impl GuiApp {
             // discounted from the collapse-threshold width above.
             ui.add_space(lead);
 
-            self.tb_power(ui, &state);
-
-            // Preamp is always present (full slider when there's room, else a
-            // compact draggable value) — it's a primary, frequently-touched gain.
-            self.tb_sep(ui);
-            self.tb_preamp(ui, &state, !preamp_full);
-
+            // Build the list of present groups, then draw them joined by exactly
+            // one separator between consecutive groups (never leading, trailing or
+            // doubled — the structural fix for the adjacent-separator bug). Power
+            // and Preamp are always present; Overflow always closes the row.
+            #[derive(Clone, Copy)]
+            enum Grp {
+                Power,
+                Preamp,
+                Output,
+                History,
+                Daemon,
+                Help,
+                Overflow,
+            }
+            let mut groups = vec![Grp::Power, Grp::Preamp];
             if out_inline {
-                self.tb_sep(ui);
-                self.tb_output(ui, &state);
+                groups.push(Grp::Output);
             }
             if history_inline {
-                self.tb_sep(ui);
-                self.tb_history(ui);
+                groups.push(Grp::History);
             }
             if daemon_inline {
-                self.tb_sep(ui);
-                self.daemon_menu(ui);
+                groups.push(Grp::Daemon);
             }
+            groups.push(Grp::Help);
+            groups.push(Grp::Overflow);
 
-            self.tb_sep(ui);
-            self.overflow_menu(
-                ui,
-                &state,
-                Overflow {
-                    preamp: false,
-                    output: !out_inline,
-                    history: !history_inline,
-                    daemon: !daemon_inline && service::manager_available(),
-                },
-            );
+            for (i, g) in groups.iter().enumerate() {
+                if i > 0 {
+                    self.tb_sep(ui);
+                }
+                match g {
+                    Grp::Power => self.tb_power(ui, &state),
+                    Grp::Preamp => self.tb_preamp(ui, &state, !preamp_full),
+                    Grp::Output => self.tb_output(ui, &state),
+                    Grp::History => self.tb_history(ui),
+                    Grp::Daemon => self.daemon_menu(ui),
+                    Grp::Help => self.tb_help(ui),
+                    Grp::Overflow => self.overflow_menu(
+                        ui,
+                        &state,
+                        Overflow {
+                            preamp: false,
+                            output: !out_inline,
+                            history: !history_inline,
+                            daemon: !daemon_inline && service::manager_available(),
+                        },
+                    ),
+                }
+            }
 
             // Meters pinned to the far right (informational; first to drop). Shown
             // only when the space the left controls actually left over fits them —
@@ -150,8 +169,9 @@ impl GuiApp {
     }
 
     /// A thin vertical hairline between toolbar groups, matching the kit's rule
-    /// colour (egui's default separator is heavier and theme-mismatched).
-    fn tb_sep(&self, ui: &mut egui::Ui) {
+    /// colour (egui's default separator is heavier and theme-mismatched). Also
+    /// reused by the reference bar to separate its sections.
+    pub(crate) fn tb_sep(&self, ui: &mut egui::Ui) {
         let line = kit::tokens(ui).line;
         let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, 22.0), egui::Sense::hover());
         ui.painter().rect_filled(rect, 0.0, line);
@@ -238,26 +258,29 @@ impl GuiApp {
         }
     }
 
-    /// Output device picker (left-to-right: 🔊 then the combo).
+    /// Output device picker (left-to-right: speaker icon then the combo).
     fn tb_output(&mut self, ui: &mut egui::Ui, state: &Option<DaemonState>) {
         if let Some(s) = state {
-            ui.label("🔊");
+            let (r, resp) =
+                ui.allocate_exact_size(egui::vec2(18.0, kit::CTRL_H), egui::Sense::hover());
+            let g = egui::Rect::from_center_size(r.center(), egui::Vec2::splat(16.0));
+            icons::draw(ui.painter(), Icon::Speaker, g, kit::tokens(ui).dim);
+            resp.on_hover_text("Output device");
             self.output_combo(ui, s);
         }
     }
 
     fn output_combo(&mut self, ui: &mut egui::Ui, s: &DaemonState) {
         // When following the system, show the device it's currently on.
+        // Full labels — the combo's value box soft-fades + hover-scrolls long
+        // device names itself (see `kit::dropdown`), so no pre-truncation here.
         let current_label = if s.preferred_output.is_none() {
             match &s.active_output {
-                Some(d) => format!("Auto · {}", ellipsize(&s.sink_label(d), 16)),
+                Some(d) => format!("Auto · {}", s.sink_label(d)),
                 None => "Automatic".to_string(),
             }
         } else {
-            ellipsize(
-                &s.sink_label(s.preferred_output.as_deref().unwrap_or("")),
-                22,
-            )
+            s.sink_label(s.preferred_output.as_deref().unwrap_or(""))
         };
         // Index 0 = follow the OS default; the rest map 1:1 to available_sinks.
         let mut opts = vec!["Automatic (follow system)".to_string()];
@@ -301,11 +324,30 @@ impl GuiApp {
         }
     }
 
+    /// Help button — opens the controls & shortcuts overlay (same as F1 / ?).
+    fn tb_help(&mut self, ui: &mut egui::Ui) {
+        if kit::icon_btn(ui, Icon::Help, kit::CTRL_H, "Controls & shortcuts (F1)") {
+            self.show_help = true;
+        }
+    }
+
     fn tb_history(&mut self, ui: &mut egui::Ui) {
-        if kit::button(ui, "Undo", false, !self.undo_stack.is_empty()) {
+        if kit::icon_btn_enabled(
+            ui,
+            Icon::Undo,
+            kit::CTRL_H,
+            !self.undo_stack.is_empty(),
+            "Undo (Ctrl+Z)",
+        ) {
             self.undo();
         }
-        if kit::button(ui, "Redo", false, !self.redo_stack.is_empty()) {
+        if kit::icon_btn_enabled(
+            ui,
+            Icon::Redo,
+            kit::CTRL_H,
+            !self.redo_stack.is_empty(),
+            "Redo (Ctrl+Y)",
+        ) {
             self.redo();
         }
     }
@@ -314,54 +356,60 @@ impl GuiApp {
     /// width, plus the always-present preset/view/theme actions — so nothing is
     /// ever unreachable on a small window.
     fn overflow_menu(&mut self, ui: &mut egui::Ui, state: &Option<DaemonState>, of: Overflow) {
-        let label_color = kit::tokens(ui).text;
-        kit::menu_button(ui, "☰", label_color, egui::Id::new("overflow_pop"), |ui| {
-            ui.set_min_width(220.0);
-            ui.spacing_mut().item_spacing.y = 2.0;
+        kit::icon_menu_button(
+            ui,
+            Icon::Menu,
+            egui::Id::new("overflow_pop"),
+            true,
+            "Menu",
+            |ui| {
+                ui.set_min_width(220.0);
+                ui.spacing_mut().item_spacing.y = 2.0;
 
-            // Collapsed controls first (only those hidden from the bar).
-            if of.output {
-                if let Some(s) = state {
-                    kit::menu_caption(ui, "Output device");
-                    self.output_menu_items(ui, s);
+                // Collapsed controls first (only those hidden from the bar).
+                if of.output {
+                    if let Some(s) = state {
+                        kit::menu_caption(ui, "Output device");
+                        self.output_menu_items(ui, s);
+                    }
                 }
-            }
-            if of.history {
-                kit::menu_caption(ui, "Edit");
-                if kit::menu_item(ui, "Undo", false) {
-                    self.undo();
+                if of.history {
+                    kit::menu_caption(ui, "Edit");
+                    if kit::menu_item(ui, "Undo", false) {
+                        self.undo();
+                    }
+                    if kit::menu_item(ui, "Redo", false) {
+                        self.redo();
+                    }
                 }
-                if kit::menu_item(ui, "Redo", false) {
-                    self.redo();
+                if of.daemon {
+                    kit::menu_caption(ui, "Daemon");
+                    self.daemon_controls(ui);
                 }
-            }
-            if of.daemon {
-                kit::menu_caption(ui, "Daemon");
-                self.daemon_controls(ui);
-            }
-            let _ = of.preamp; // preamp never collapses fully (compact stays inline)
+                let _ = of.preamp; // preamp never collapses fully (compact stays inline)
 
-            kit::menu_caption(ui, "Presets");
-            if kit::menu_item(ui, "Load preset…", false) {
-                self.open_load_dialog();
-            }
-            if kit::menu_item(ui, "Export profile…", false) {
-                self.open_export_dialog();
-            }
-
-            kit::menu_caption(ui, "View");
-            if kit::menu_item(ui, "Reset layout", false) {
-                self.reset_layout(ui.ctx());
-            }
-
-            kit::menu_caption(ui, "Theme");
-            let ctx = ui.ctx().clone();
-            for t in Theme::ALL {
-                if kit::menu_item(ui, t.label(), self.theme == t) {
-                    self.set_theme(&ctx, t);
+                kit::menu_caption(ui, "Presets");
+                if kit::menu_item(ui, "Load preset…", false) {
+                    self.open_load_dialog();
                 }
-            }
-        });
+                if kit::menu_item(ui, "Export profile…", false) {
+                    self.open_export_dialog();
+                }
+
+                kit::menu_caption(ui, "View");
+                if kit::menu_item(ui, "Reset layout", false) {
+                    self.reset_layout(ui.ctx());
+                }
+
+                kit::menu_caption(ui, "Theme");
+                let ctx = ui.ctx().clone();
+                for t in Theme::ALL {
+                    if kit::menu_item(ui, t.label(), self.theme == t) {
+                        self.set_theme(&ctx, t);
+                    }
+                }
+            },
+        );
     }
 
     fn open_load_dialog(&mut self) {
@@ -561,11 +609,12 @@ impl GuiApp {
 
     fn meters_widget(&self, ui: &mut egui::Ui, s: &DaemonState) {
         let items = self.meters_items(s);
-        // RTL: add reversed (CLIP first → rightmost), separator between each.
+        // RTL: add reversed (CLIP first → rightmost), a hairline between each —
+        // the same rule the toolbar groups use, so the bar has one separator style.
         for (i, (col, txt)) in items.iter().enumerate().rev() {
             ui.colored_label(*col, egui::RichText::new(txt).monospace());
             if i != 0 {
-                ui.separator();
+                self.tb_sep(ui);
             }
         }
     }

@@ -9,6 +9,7 @@
 //! exists; the module-level allow keeps that from tripping `-D warnings`.
 #![allow(dead_code)]
 
+use crate::ui::icons::{self, Icon};
 use crate::ui::widgets::lerp_color;
 use eframe::egui::{self, Color32};
 
@@ -54,6 +55,20 @@ pub(crate) fn tokens(ui: &egui::Ui) -> Tokens {
         well: lerp_color(bg, text, if v.dark_mode { 0.16 } else { 0.10 }),
         line: lerp_color(bg, text, if v.dark_mode { 0.22 } else { 0.16 }),
     }
+}
+
+/// Width a string occupies at a proportional `size`, measured against the live
+/// fonts — so width-driven collapse logic tracks the real text size on any
+/// machine (font/zoom) instead of assuming fixed pixels.
+pub(crate) fn text_width(ui: &egui::Ui, size: f32, s: &str) -> f32 {
+    ui.painter()
+        .layout_no_wrap(
+            s.to_owned(),
+            egui::FontId::proportional(size),
+            Color32::WHITE,
+        )
+        .rect
+        .width()
 }
 
 // ── Primitives ────────────────────────────────────────────────────────────────
@@ -183,6 +198,109 @@ pub(crate) fn toggle(ui: &mut egui::Ui, on: &mut bool) -> bool {
     let kx = egui::lerp((rect.left() + radius)..=(rect.right() - radius), how);
     p.circle_filled(egui::pos2(kx, rect.center().y), kr, Color32::WHITE);
     changed
+}
+
+/// Width of the soft fade applied to the edge of overflowing boxed text.
+const FADE_W: f32 = 22.0;
+
+/// Draw `text` left-aligned and clipped within `rect`. If it fits, draw it
+/// plainly. If it overflows, fade the right edge into `bg` (a soft cut instead of
+/// a hard clip or "…"), and while the pointer hovers `rect`, marquee-scroll the
+/// text to reveal the whole string — pausing at each end — like a polished native
+/// app. Use for any fixed-width box whose contents can be longer than the box
+/// (dropdown values, device names).
+pub(crate) fn fade_text(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    text: &str,
+    font: egui::FontId,
+    color: Color32,
+    bg: Color32,
+) {
+    let pad = 7.0;
+    let cy = rect.center().y;
+    let painter = ui.painter_at(rect);
+    let galley = painter.layout_no_wrap(text.to_owned(), font, color);
+    let tw = galley.size().x;
+    let gy = cy - galley.size().y / 2.0;
+    let avail = (rect.width() - pad * 2.0).max(1.0);
+    if tw <= avail {
+        painter.galley(egui::pos2(rect.left() + pad, gy), galley, color);
+        return;
+    }
+    // Overflows: scroll while hovered, otherwise pin to the start. Hover is
+    // occlusion-aware (so it doesn't scroll under a dialog/popup) and the phase
+    // runs off the global clock — no stored per-box state to leak when a box
+    // (e.g. a device row) disappears.
+    let over = tw - avail + 2.0;
+    let hovered = ui.ctx().rect_contains_pointer(ui.layer_id(), rect);
+    let off = if hovered {
+        ui.ctx().request_repaint(); // keep the scroll animating while hovered
+        marquee_offset(ui.input(|i| i.time) as f32, over)
+    } else {
+        0.0
+    };
+    painter.galley(egui::pos2(rect.left() + pad - off, gy), galley, color);
+    // Fade each edge by how much text still overhangs past it, so the fade masks
+    // the hard clip but melts away as the marquee reveals the tail (or the head
+    // once scrolled). At full scroll the right fade vanishes → the last glyphs
+    // show fully.
+    fade_strip(
+        &painter,
+        rect,
+        bg,
+        true,
+        ((over - off) / FADE_W).clamp(0.0, 1.0),
+    );
+    fade_strip(&painter, rect, bg, false, (off / FADE_W).clamp(0.0, 1.0));
+}
+
+/// Marquee scroll offset (px) at `elapsed` seconds for content overhanging by
+/// `over` px: hold at the start, scroll to the end, hold, scroll back, repeat.
+fn marquee_offset(elapsed: f32, over: f32) -> f32 {
+    const SPEED: f32 = 38.0; // px/s
+    const PAUSE: f32 = 0.9; // s held at each end
+    let travel = (over / SPEED).max(0.05);
+    let cycle = 2.0 * (PAUSE + travel);
+    let p = elapsed.rem_euclid(cycle);
+    let o = if p < PAUSE {
+        0.0
+    } else if p < PAUSE + travel {
+        (p - PAUSE) * SPEED
+    } else if p < 2.0 * PAUSE + travel {
+        over
+    } else {
+        over - (p - (2.0 * PAUSE + travel)) * SPEED
+    };
+    o.clamp(0.0, over)
+}
+
+/// Paint a horizontal alpha gradient over one edge of `rect` (transparent →
+/// opaque `bg`), masking the text's hard clip. `right`: fade in toward the right
+/// edge; else toward the left. `strength` (0..1) scales the peak opacity so the
+/// fade can melt away as the marquee reveals that edge. Stepped strips avoid
+/// needing a gradient mesh.
+fn fade_strip(painter: &egui::Painter, rect: egui::Rect, bg: Color32, right: bool, strength: f32) {
+    if strength <= 0.01 {
+        return;
+    }
+    const N: usize = 14;
+    let w = FADE_W / N as f32;
+    for k in 0..N {
+        let frac = k as f32 / (N as f32 - 1.0);
+        let alpha = (if right { frac } else { 1.0 - frac }) * strength;
+        let col = Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), (alpha * 255.0) as u8);
+        let x = if right {
+            rect.right() - FADE_W + k as f32 * w
+        } else {
+            rect.left() + k as f32 * w
+        };
+        let strip = egui::Rect::from_min_max(
+            egui::pos2(x, rect.top()),
+            egui::pos2(x + w + 0.5, rect.bottom()),
+        );
+        painter.rect_filled(strip, 0.0, col);
+    }
 }
 
 /// A right-aligned monospace value chip (e.g. "+100%", "1.4 dB") in a `well`.
@@ -330,12 +448,17 @@ pub(crate) fn dropdown(
         t.well
     };
     ui.painter().rect_filled(rect, 4.0, bg);
-    ui.painter().text(
-        egui::pos2(rect.left() + 7.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
+    // The current value can be longer than the chip (long device/profile names):
+    // clip it to the chip with a soft fade + hover-scroll, leaving room for the
+    // caret on the right.
+    let text_rect = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right() - 16.0, rect.max.y));
+    fade_text(
+        ui,
+        text_rect,
         current,
         egui::FontId::proportional(T_VALUE),
         t.text,
+        bg,
     );
     // Custom caret (the icon font lacks ▾, so draw it).
     let cx = rect.right() - 9.0;
@@ -380,40 +503,181 @@ pub(crate) fn dropdown(
     sel
 }
 
-/// A small square icon button (✕, ✚, …). Returns true on click.
-pub(crate) fn icon_button(ui: &mut egui::Ui, glyph: &str, size: f32) -> bool {
+// ── Vector-icon controls ─────────────────────────────────────────────────────
+
+/// Paint a square vector-icon button and return its raw response. Drawn as a real
+/// button — a resting `well` chip that brightens toward the accent on hover — so
+/// it reads as a control, not a floating glyph. Senses clicks even when disabled
+/// so a tooltip still shows.
+fn vicon_button_draw(ui: &mut egui::Ui, icon: Icon, size: f32, enabled: bool) -> egui::Response {
     let t = tokens(ui);
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
-    if resp.hovered() {
-        ui.painter()
-            .rect_filled(rect, 4.0, lerp_color(t.well, t.accent, 0.30));
-    }
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        glyph,
-        egui::FontId::proportional(13.0),
-        if resp.hovered() { t.text } else { t.dim },
-    );
-    resp.clicked()
+    let (bg, fg) = if !enabled {
+        (t.well, t.dim)
+    } else if resp.hovered() {
+        (lerp_color(t.well, t.accent, 0.30), egui::Color32::WHITE)
+    } else {
+        (t.well, t.text)
+    };
+    ui.painter().rect_filled(rect, 5.0, bg);
+    // Icon drawn in a centred box a bit smaller than the hit target.
+    let g = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(size * 0.64));
+    icons::draw(ui.painter(), icon, g, fg);
+    resp
 }
 
-/// A bespoke text button, sized to its label. `accent` fills it (e.g. primary
-/// actions); otherwise it sits in a `well`. `enabled == false` dims it and
-/// ignores clicks.
-pub(crate) fn button(ui: &mut egui::Ui, label: &str, accent: bool, enabled: bool) -> bool {
+/// A square vector-icon button with a hover tooltip naming the action — the house
+/// style for compact, repeated actions (load / delete / refresh / …). Returns
+/// true on click.
+pub(crate) fn icon_btn(ui: &mut egui::Ui, icon: Icon, size: f32, tip: &str) -> bool {
+    let resp = vicon_button_draw(ui, icon, size, true);
+    let clicked = resp.clicked();
+    if !tip.is_empty() {
+        resp.on_hover_text(tip);
+    }
+    clicked
+}
+
+/// [`icon_btn`] that can be drawn disabled (dim, click ignored) while still
+/// surfacing its tooltip — so the user learns *why* it's unavailable.
+pub(crate) fn icon_btn_enabled(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    size: f32,
+    enabled: bool,
+    tip: &str,
+) -> bool {
+    let resp = vicon_button_draw(ui, icon, size, enabled);
+    let clicked = enabled && resp.clicked();
+    if !tip.is_empty() {
+        resp.on_hover_text(tip);
+    }
+    clicked
+}
+
+/// A button with a leading vector icon then a label — for primary actions that
+/// keep their text (Auto-EQ, Customize, Add band, Save). `accent` fills it.
+fn icon_text_draw(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    label: &str,
+    accent: bool,
+    enabled: bool,
+) -> egui::Response {
+    let t = tokens(ui);
+    let font = egui::FontId::proportional(T_BODY);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font.clone(), t.text);
+    let ico = CTRL_H * 0.62;
+    let pad = 11.0;
+    let gap = 6.0;
+    let w = pad + ico + gap + galley.size().x + pad;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, CTRL_H), egui::Sense::click());
+    let (bg, fg) = if !enabled {
+        (t.well, t.dim)
+    } else if accent {
+        (
+            if resp.hovered() {
+                t.accent
+            } else {
+                t.accent.gamma_multiply(0.88)
+            },
+            egui::Color32::WHITE,
+        )
+    } else if resp.hovered() {
+        (lerp_color(t.well, t.accent, 0.22), t.text)
+    } else {
+        (t.well, t.text)
+    };
+    ui.painter().rect_filled(rect, 5.0, bg);
+    let ig = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + pad + ico * 0.5, rect.center().y),
+        egui::Vec2::splat(ico),
+    );
+    icons::draw(ui.painter(), icon, ig, fg);
+    ui.painter().text(
+        egui::pos2(ig.right() + gap, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        font,
+        fg,
+    );
+    resp
+}
+
+/// An icon+label button with a hover tooltip (shown even when disabled). Returns
+/// true on click.
+pub(crate) fn icon_text_btn(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    label: &str,
+    accent: bool,
+    enabled: bool,
+    tip: &str,
+) -> bool {
+    let resp = icon_text_draw(ui, icon, label, accent, enabled);
+    let clicked = enabled && resp.clicked();
+    if !tip.is_empty() {
+        resp.on_hover_text(tip);
+    }
+    clicked
+}
+
+/// Measured width of an [`icon_text_btn`] — for width-driven collapse logic.
+pub(crate) fn icon_text_width(ui: &egui::Ui, label: &str) -> f32 {
+    let ico = CTRL_H * 0.62;
+    22.0 + ico + 6.0 + text_width(ui, T_BODY, label)
+}
+
+/// A vector-icon button that opens a popup menu (the ☰ overflow style). `tip`
+/// names it on hover; `close_on_click` false keeps the menu open for in-menu
+/// toggles. Mirrors [`menu_button_ex`] but with a crisp icon instead of a glyph.
+pub(crate) fn icon_menu_button(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    popup_id: egui::Id,
+    close_on_click: bool,
+    tip: &str,
+    add: impl FnOnce(&mut egui::Ui),
+) {
+    let t = tokens(ui);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(28.0, 26.0), egui::Sense::click());
+    let open = egui::Popup::is_id_open(ui.ctx(), popup_id);
+    let bg = if resp.hovered() || open {
+        lerp_color(t.well, t.accent, 0.20)
+    } else {
+        t.well
+    };
+    ui.painter().rect_filled(rect, 5.0, bg);
+    let g = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(16.0));
+    icons::draw(ui.painter(), icon, g, t.text);
+    if !tip.is_empty() {
+        resp.clone().on_hover_text(tip);
+    }
+    let close = if close_on_click {
+        egui::PopupCloseBehavior::CloseOnClick
+    } else {
+        egui::PopupCloseBehavior::CloseOnClickOutside
+    };
+    egui::Popup::menu(&resp)
+        .id(popup_id)
+        .close_behavior(close)
+        .show(|ui| add(ui));
+}
+
+/// Paint a text button sized to its label and return its raw response. `accent`
+/// fills it (primary actions); otherwise it sits in a `well`; `enabled == false`
+/// dims it. Always senses clicks (callers gate the action on `enabled`) so a
+/// disabled button still surfaces its hover tooltip explaining *why*.
+fn button_draw(ui: &mut egui::Ui, label: &str, accent: bool, enabled: bool) -> egui::Response {
     let t = tokens(ui);
     let font = egui::FontId::proportional(T_BODY);
     let galley = ui
         .painter()
         .layout_no_wrap(label.to_owned(), font.clone(), t.text);
     let w = galley.size().x + 24.0;
-    let sense = if enabled {
-        egui::Sense::click()
-    } else {
-        egui::Sense::hover()
-    };
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, CTRL_H), sense);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, CTRL_H), egui::Sense::click());
     let (bg, fg) = if !enabled {
         (t.well, t.dim)
     } else if accent {
@@ -433,16 +697,108 @@ pub(crate) fn button(ui: &mut egui::Ui, label: &str, accent: bool, enabled: bool
     ui.painter().rect_filled(rect, 5.0, bg);
     ui.painter()
         .text(rect.center(), egui::Align2::CENTER_CENTER, label, font, fg);
-    enabled && resp.clicked()
+    resp
+}
+
+/// A bespoke text button, sized to its label. `accent` fills it (e.g. primary
+/// actions); otherwise it sits in a `well`. `enabled == false` dims it and
+/// ignores clicks.
+pub(crate) fn button(ui: &mut egui::Ui, label: &str, accent: bool, enabled: bool) -> bool {
+    enabled && button_draw(ui, label, accent, enabled).clicked()
+}
+
+/// Like [`button`] but with a hover tooltip (shown even when disabled, so the
+/// user learns *why* an action is unavailable). Returns true on click.
+pub(crate) fn button_tip(
+    ui: &mut egui::Ui,
+    label: &str,
+    accent: bool,
+    enabled: bool,
+    tip: &str,
+) -> bool {
+    let resp = button_draw(ui, label, accent, enabled);
+    let clicked = enabled && resp.clicked();
+    if !tip.is_empty() {
+        resp.on_hover_text(tip);
+    }
+    clicked
+}
+
+/// A kit button that toggles a popup anchored *directly below it* (not at the
+/// panel's left edge). Unlike [`menu_button`], the popup stays open while you
+/// interact with its contents (dragging sliders, typing) — it closes only on a
+/// click outside — so it suits an inline editor rather than a one-shot menu. The
+/// button is accent-filled while the popup is open.
+pub(crate) fn popup_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    tip: &str,
+    popup_id: egui::Id,
+    min_width: f32,
+    add: impl FnOnce(&mut egui::Ui),
+) {
+    let open = egui::Popup::is_id_open(ui.ctx(), popup_id);
+    let resp = button_draw(ui, label, open, true);
+    if !tip.is_empty() {
+        resp.clone().on_hover_text(tip);
+    }
+    egui::Popup::menu(&resp)
+        .id(popup_id)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_min_width(min_width);
+            add(ui);
+        });
+}
+
+/// Like [`popup_button`] but with a leading vector icon — the icon language for
+/// an inline editor trigger (e.g. the target Customize popup).
+pub(crate) fn icon_popup_button(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    label: &str,
+    tip: &str,
+    popup_id: egui::Id,
+    min_width: f32,
+    add: impl FnOnce(&mut egui::Ui),
+) {
+    let open = egui::Popup::is_id_open(ui.ctx(), popup_id);
+    let resp = icon_text_draw(ui, icon, label, open, true);
+    if !tip.is_empty() {
+        resp.clone().on_hover_text(tip);
+    }
+    egui::Popup::menu(&resp)
+        .id(popup_id)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_min_width(min_width);
+            add(ui);
+        });
 }
 
 /// A bespoke menu button: a kit chip that opens a popup of menu content.
 /// `label_color` lets callers tint the label (e.g. the daemon status dot).
+/// Closes on any click inside (one-shot actions).
 pub(crate) fn menu_button(
     ui: &mut egui::Ui,
     label: &str,
     label_color: Color32,
     popup_id: egui::Id,
+    add: impl FnOnce(&mut egui::Ui),
+) {
+    menu_button_ex(ui, label, label_color, popup_id, true, "", add)
+}
+
+/// [`menu_button`] with two extra knobs: `close_on_click` false keeps the menu
+/// open after a click (so in-menu toggles can be flipped repeatedly; it then
+/// closes only on an outside click), and a hover `tip` on the button itself.
+pub(crate) fn menu_button_ex(
+    ui: &mut egui::Ui,
+    label: &str,
+    label_color: Color32,
+    popup_id: egui::Id,
+    close_on_click: bool,
+    tip: &str,
     add: impl FnOnce(&mut egui::Ui),
 ) {
     let t = tokens(ui);
@@ -466,9 +822,17 @@ pub(crate) fn menu_button(
         font,
         label_color,
     );
+    if !tip.is_empty() {
+        resp.clone().on_hover_text(tip);
+    }
+    let close = if close_on_click {
+        egui::PopupCloseBehavior::CloseOnClick
+    } else {
+        egui::PopupCloseBehavior::CloseOnClickOutside
+    };
     egui::Popup::menu(&resp)
         .id(popup_id)
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+        .close_behavior(close)
         .show(|ui| add(ui));
 }
 

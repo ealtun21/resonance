@@ -33,6 +33,13 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    // Dev helper: `RESONANCE_ICON_GALLERY=1` opens a window that just paints the
+    // vector icon set in a labelled grid, so the shapes can be eyeballed via the
+    // screenshot harness. No daemon, no real UI.
+    if std::env::var_os("RESONANCE_ICON_GALLERY").is_some() {
+        return run_icon_gallery();
+    }
+
     // If the user launched the GUI without a daemon (which is the default
     // when launching the .app bundle from Launchpad / Spotlight), spawn
     // one in the BACKGROUND so the window comes up instantly. The UI
@@ -47,15 +54,25 @@ fn main() -> eframe::Result<()> {
     // bar is colour-themed at runtime via DWM (see app::native_titlebar). The
     // old custom client-side titlebar was removed — a decoration-less winit
     // window had unreliable client-area input (clicks/drags landing off-target).
-    let viewport = egui::ViewportBuilder::default()
+    // Dev/test override: `RESONANCE_WINDOW_SIZE=WxH` opens the window at an exact
+    // inner size pinned to the top-left, so the screenshot harness
+    // (contrib/dev/uishot.sh) can capture the UI at arbitrary widths under Xvfb.
+    // Absent in normal use — zero effect on the shipped app.
+    let forced_size = std::env::var("RESONANCE_WINDOW_SIZE")
+        .ok()
+        .and_then(|s| parse_wxh(&s));
+    let mut viewport = egui::ViewportBuilder::default()
         .with_title("Resonance")
         .with_decorations(true)
-        .with_inner_size([1240.0, 760.0])
+        .with_inner_size(forced_size.unwrap_or([1240.0, 760.0]))
         // Small-window friendly: below ~1000px the lower sections collapse to
         // a single-column accordion and the toolbar wraps, so a low floor is
         // fine — no runtime min-width computation needed.
         .with_min_inner_size([360.0, 420.0])
         .with_icon(std::sync::Arc::new(app_icon()));
+    if forced_size.is_some() {
+        viewport = viewport.with_position([0.0, 0.0]);
+    }
     // macOS: a unified title bar — the content (our toolbar) draws under a
     // transparent title bar so the window chrome blends into the app instead of
     // showing a separate grey bar. The traffic-light buttons float over the
@@ -180,6 +197,37 @@ fn spawn_daemon_detached() {
             eprintln!("GUI: failed to spawn {}: {e}", daemon_path.display());
         }
     }
+}
+
+/// Run the dev icon gallery (see the `RESONANCE_ICON_GALLERY` check in `main`).
+#[allow(deprecated)] // top-level CentralPanel::show in a one-off dev helper
+fn run_icon_gallery() -> eframe::Result<()> {
+    let forced_size = std::env::var("RESONANCE_WINDOW_SIZE")
+        .ok()
+        .and_then(|s| parse_wxh(&s));
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("Resonance — icons")
+        .with_inner_size(forced_size.unwrap_or([720.0, 560.0]));
+    if forced_size.is_some() {
+        viewport = viewport.with_position([0.0, 0.0]);
+    }
+    eframe::run_simple_native(
+        "Resonance icons",
+        eframe::NativeOptions {
+            viewport,
+            ..Default::default()
+        },
+        |ctx, _frame| {
+            egui::CentralPanel::default().show(ctx, ui::icons::gallery);
+        },
+    )
+}
+
+/// Parse a `WIDTHxHEIGHT` string (e.g. `480x700`) into an egui inner-size pair.
+/// Used only by the `RESONANCE_WINDOW_SIZE` dev/test override.
+fn parse_wxh(s: &str) -> Option<[f32; 2]> {
+    let (w, h) = s.split_once(['x', 'X'])?;
+    Some([w.trim().parse().ok()?, h.trim().parse().ok()?])
 }
 
 /// Window/taskbar icon, rasterised from the shared brand drawing (matches

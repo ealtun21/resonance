@@ -2,8 +2,9 @@
 
 use crate::app::GuiApp;
 use crate::state::Confirm;
+use crate::ui::icons::Icon;
 use crate::ui::kit;
-use crate::ui::widgets::{ellipsize, section};
+use crate::ui::widgets::section;
 use eframe::egui;
 use resonance_ipc::{Command, DaemonState};
 
@@ -11,9 +12,7 @@ impl GuiApp {
     // ── Right column: devices → profiles + profile list ─────────────────────
 
     pub(crate) fn devices_profiles(&mut self, ui: &mut egui::Ui) {
-        section(ui, "Device Profile Mapping", |ui| {
-            self.device_mapping_section(ui)
-        });
+        section(ui, "Device mapping", |ui| self.device_mapping_section(ui));
         ui.add_space(12.0);
         section(ui, "Profiles", |ui| self.profiles_panel(ui));
     }
@@ -39,8 +38,8 @@ impl GuiApp {
     /// flex to fill the column width so the block isn't a squished fixed island.
     pub(crate) fn profiles_section(&mut self, ui: &mut egui::Ui) {
         let full_w = ui.available_width();
-        let save_name_w = (full_w - 72.0).max(120.0);
-        let row_name_w = (full_w - 96.0).max(100.0);
+        let save_name_w = (full_w - 96.0).max(110.0);
+        let row_name_w = (full_w - 80.0).max(100.0);
 
         ui.horizontal(|ui| {
             ui.set_min_height(26.0);
@@ -53,7 +52,14 @@ impl GuiApp {
                 "new profile name…",
                 false,
             );
-            let save_clicked = kit::button(ui, "Save", true, true);
+            let save_clicked = kit::icon_text_btn(
+                ui,
+                Icon::Save,
+                "Save",
+                true,
+                true,
+                "Save the current EQ as a profile with this name",
+            );
             let go = save_clicked
                 || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
             if go && !self.profile_name.trim().is_empty() {
@@ -64,6 +70,7 @@ impl GuiApp {
                 } else {
                     self.queue(Command::SaveProfile { name });
                     self.needs_meta = true;
+                    self.dirty = false;
                 }
                 self.profile_name.clear();
             }
@@ -84,8 +91,21 @@ impl GuiApp {
                 let active = current.as_deref() == Some(name.as_str());
                 let editing = matches!(&self.rename, Some((from, _)) if from == name);
 
-                if kit::button(ui, "Load", false, true) {
+                // Selection affordance: the active profile shows a greyed,
+                // unpressable OPEN folder ("this one's loaded"); every other row is
+                // a pressable CLOSED folder that loads it — so the list reads as a
+                // selection, not ten identical buttons.
+                if active {
+                    kit::icon_btn_enabled(
+                        ui,
+                        Icon::FolderOpen,
+                        kit::CTRL_H,
+                        false,
+                        "Currently loaded",
+                    );
+                } else if kit::icon_btn(ui, Icon::Folder, kit::CTRL_H, "Load this profile") {
                     self.queue(Command::LoadProfile { name: name.clone() });
+                    self.dirty = false; // loaded profile is the new baseline
                 }
 
                 // Inline-editable, fixed-width name. Type + Enter to rename;
@@ -120,7 +140,7 @@ impl GuiApp {
                     self.rename = None;
                 }
 
-                if kit::icon_button(ui, "✕", kit::CTRL_H) {
+                if kit::icon_btn(ui, Icon::Close, kit::CTRL_H, "Delete this profile") {
                     self.confirm = Some(Confirm::DeleteProfile(name.clone()));
                 }
             });
@@ -173,16 +193,19 @@ impl GuiApp {
                     ui.painter()
                         .circle_stroke(dr.center(), 3.5, egui::Stroke::new(1.3, col));
                 }
-                // Flexible device name (ellipsised to its cell).
+                // Flexible device name — soft-faded + hover-scrolled to its cell
+                // so a long device name never overflows into the dropdown.
                 let text = kit::tokens(ui).text;
+                let bg = ui.visuals().panel_fill;
                 let (lr, _) =
                     ui.allocate_exact_size(egui::vec2(name_w, 22.0), egui::Sense::hover());
-                ui.painter().text(
-                    egui::pos2(lr.left(), lr.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    ellipsize(&s.sink_label(node), (name_w / 7.0) as usize),
+                kit::fade_text(
+                    ui,
+                    lr,
+                    &s.sink_label(node),
                     egui::FontId::proportional(kit::T_BODY),
                     text,
+                    bg,
                 );
                 // Profile picker: index 0 = "—" (unmapped), the rest map 1:1.
                 let cur_text = map.get(node).cloned().unwrap_or_else(|| "—".to_string());
@@ -209,7 +232,7 @@ impl GuiApp {
                     }
                     self.needs_meta = true;
                 }
-                if kit::icon_button(ui, "✕", kit::CTRL_H) {
+                if kit::icon_btn(ui, Icon::Close, kit::CTRL_H, "Forget this device") {
                     self.queue(Command::ForgetSink {
                         node_name: node.clone(),
                     });

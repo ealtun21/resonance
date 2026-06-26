@@ -4,6 +4,8 @@
 use crate::app::GuiApp;
 use crate::browser::{Browser, Item};
 use crate::state::{Confirm, Dialog};
+use crate::ui::icons::Icon;
+use crate::ui::kit;
 use crate::ui::widgets::dialog_window;
 use eframe::egui;
 use resonance_ipc::Command;
@@ -78,6 +80,10 @@ impl GuiApp {
                             (
                                 "Auto-EQ",
                                 "fit EQ bands (peqdb AutoEQ) so the measurement matches the target",
+                            ),
+                            (
+                                "Bounds",
+                                "shade the listener-preference tolerance band around the target (tight mids, wider bass/treble); keep the result inside it",
                             ),
                             (
                                 "Customize",
@@ -406,7 +412,10 @@ impl GuiApp {
         match decision {
             Some(true) => {
                 match action {
-                    Confirm::SaveProfile(name) => self.queue(Command::SaveProfile { name }),
+                    Confirm::SaveProfile(name) => {
+                        self.queue(Command::SaveProfile { name });
+                        self.dirty = false;
+                    }
                     Confirm::DeleteProfile(name) => {
                         // Drop any device→profile mappings pointing at it first,
                         // so no device is left mapped to a profile that's gone.
@@ -444,21 +453,13 @@ fn entry_icon(it: &Item) -> &'static str {
 fn nav_bar(ui: &mut egui::Ui, browser: &mut Browser) -> Option<String> {
     let mut typed: Option<String> = None;
     ui.horizontal(|ui| {
-        if ui
-            .button("↑ Up")
-            .on_hover_text("parent directory")
-            .clicked()
-        {
+        if kit::icon_btn(ui, Icon::Up, kit::CTRL_H, "Up to parent folder") {
             browser.parent();
         }
-        if ui.button("Home").on_hover_text("home directory").clicked() {
+        if kit::icon_btn(ui, Icon::Home, kit::CTRL_H, "Home folder") {
             browser.navigate(crate::browser::home_dir());
         }
-        if ui
-            .button("Library")
-            .on_hover_text("Resonance preset library")
-            .clicked()
-        {
+        if kit::button_tip(ui, "Library", false, true, "Resonance preset library") {
             let lib = resonance_ipc::paths::user_preset_dir();
             let _ = std::fs::create_dir_all(&lib);
             browser.navigate(lib);
