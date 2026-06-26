@@ -61,6 +61,36 @@ impl GuiApp {
                     );
                     section(
                         ui,
+                        "Reference curves",
+                        &[
+                            (
+                                "Reference toggle",
+                                "overlay a target + a headphone measurement on the graph",
+                            ),
+                            (
+                                "Target",
+                                "pick a target to EQ toward (Diffuse Field / Harman / PEQdB); load a measurement via Browse to compare against it",
+                            ),
+                            (
+                                "raw meas / normalize",
+                                "toggles (after a measurement loads): raw meas shows the un-EQ'd curve; normalize flattens the target to 0 so you EQ the result straight",
+                            ),
+                            (
+                                "Auto-EQ",
+                                "fit EQ bands (peqdb AutoEQ) so the measurement matches the target",
+                            ),
+                            (
+                                "Customize",
+                                "tilt + bass + ear-gain + treble on top of any target; Save stores it",
+                            ),
+                            (
+                                "Browse",
+                                "download a headphone/IEM measurement from squig.link",
+                            ),
+                        ],
+                    );
+                    section(
+                        ui,
                         "Keyboard",
                         &[
                             ("Ctrl+Z", "undo"),
@@ -91,7 +121,7 @@ impl GuiApp {
         // window without overflowing. From the viewport (stable per window size),
         // not the dialog's own content, so it can't oscillate.
         let vh = ctx.content_rect().height();
-        let list_h = (vh * 0.42).clamp(120.0, 260.0);
+        let list_h = (vh * 0.42).clamp(120.0, 320.0);
         let prev_h = (vh * 0.24).clamp(72.0, 150.0);
         dialog_window(ctx, "Load preset")
             // Fresh id: egui keys collapse/geometry state off the window title; a
@@ -216,7 +246,7 @@ impl GuiApp {
         let mut close = false;
         let mut do_export: Option<String> = None;
 
-        let body_h = (ctx.content_rect().height() * 0.4).clamp(120.0, 240.0);
+        let body_h = (ctx.content_rect().height() * 0.4).clamp(120.0, 280.0);
         dialog_window(ctx, "Export profile")
             .open(&mut open)
             .show(ctx, |ui| {
@@ -335,11 +365,22 @@ impl GuiApp {
                 ),
                 "Overwrite",
             ),
-            Confirm::DeleteProfile(name) => (
-                "Delete profile",
-                format!("Really delete profile '{name}'?\nThis cannot be undone."),
-                "Delete",
-            ),
+            Confirm::DeleteProfile(name) => {
+                let mapped = self.mappings.iter().filter(|(_, p)| p == name).count();
+                let extra = if mapped == 0 {
+                    String::new()
+                } else {
+                    format!(
+                        "\n\nIt's mapped to {mapped} output device{}; that mapping will be removed too.",
+                        if mapped == 1 { "" } else { "s" }
+                    )
+                };
+                (
+                    "Delete profile",
+                    format!("Really delete profile '{name}'?\nThis cannot be undone.{extra}"),
+                    "Delete",
+                )
+            }
         };
         let mut decision: Option<bool> = None;
         egui::Window::new(title)
@@ -366,7 +407,16 @@ impl GuiApp {
             Some(true) => {
                 match action {
                     Confirm::SaveProfile(name) => self.queue(Command::SaveProfile { name }),
-                    Confirm::DeleteProfile(name) => self.queue(Command::DeleteProfile { name }),
+                    Confirm::DeleteProfile(name) => {
+                        // Drop any device→profile mappings pointing at it first,
+                        // so no device is left mapped to a profile that's gone.
+                        for (node, profile) in self.mappings.clone() {
+                            if profile == name {
+                                self.queue(Command::UnmapOutputFor { node_name: node });
+                            }
+                        }
+                        self.queue(Command::DeleteProfile { name });
+                    }
                 }
                 self.needs_meta = true;
                 self.confirm = None;

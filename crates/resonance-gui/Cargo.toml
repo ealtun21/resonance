@@ -15,12 +15,17 @@ path = "src/main.rs"
 resonance-ipc = { path = "../resonance-ipc" }
 resonance-dsp = { path = "../resonance-dsp" }
 resonance-preset = { path = "../resonance-preset" }
+# AutoEQ fit (LGPL-3.0 — Rust port of peqdb/autoeq-c; see that crate).
+resonance-autoeq = { path = "../resonance-autoeq" }
 eframe = { workspace = true }
 egui = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 postcard = { workspace = true }
 toml = { workspace = true }
 anyhow = { workspace = true }
+# squig.link measurement downloader (background thread).
+ureq = { workspace = true }
 # PNG encoder, used only by the `--dump-iconset` build helper. The image
 # crate is already pulled in transitively by eframe; depending on its
 # `png` feature directly costs nothing in binary size.

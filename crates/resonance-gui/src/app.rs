@@ -59,6 +59,14 @@ pub(crate) struct ServiceWorkerResult {
     feedback: Option<String>,
 }
 
+/// Result of a background Auto-EQ fit, applied on the UI thread once it lands.
+pub(crate) struct AutoEqOutcome {
+    /// Pre-fit chain state (for the undo step).
+    pub snapshot: Snapshot,
+    pub preamp_db: f64,
+    pub bands: Vec<resonance_ipc::BandState>,
+}
+
 /// Spawn the service worker thread. It serialises `service::start/stop/
 /// status/...` calls so the UI thread never blocks on launchctl.
 fn spawn_service_worker(
@@ -285,6 +293,21 @@ pub struct GuiApp {
     /// window is forced out of a restored fullscreen so we clear the stale panel
     /// sizes only once it has resized. `None` once the migration is done.
     pub(crate) migrate_settle: Option<u8>,
+    /// Reference / measurement overlay state (target curve, headphone
+    /// measurement, customizer, overlay-vs-deviation view).
+    pub(crate) reference: crate::reference::ReferenceState,
+    /// squig.link measurement downloader: command channel, event channel, and
+    /// the last catalog snapshot + status it published.
+    pub(crate) dl_tx: std::sync::mpsc::Sender<crate::download::DlCmd>,
+    pub(crate) dl_rx: std::sync::mpsc::Receiver<crate::download::DlEvent>,
+    pub(crate) catalog: Option<crate::download::Catalog>,
+    pub(crate) dl_status: String,
+    pub(crate) dl_busy: bool,
+    /// Background Auto-EQ fit: result channel + in-flight flag (the fit runs off
+    /// the UI thread so a 3000-step optimize never freezes the window).
+    pub(crate) autoeq_tx: std::sync::mpsc::Sender<AutoEqOutcome>,
+    pub(crate) autoeq_rx: std::sync::mpsc::Receiver<AutoEqOutcome>,
+    pub(crate) autoeq_busy: bool,
 }
 
 /// Messages from the UI thread to the IPC worker.
@@ -491,6 +514,8 @@ impl GuiApp {
         let (cmd_tx, ipc_rx) = std::sync::mpsc::channel::<WorkerCmd>();
         let shared = Arc::new(Mutex::new(GuiShared::default()));
         spawn_ipc_worker(ipc_rx, shared.clone(), cc.egui_ctx.clone());
+        let (dl_tx, dl_rx) = crate::download::spawn(cc.egui_ctx.clone());
+        let (autoeq_tx, autoeq_rx) = std::sync::mpsc::channel::<AutoEqOutcome>();
 
         Self {
             cmd_tx,
@@ -536,6 +561,59 @@ impl GuiApp {
             matugen_mtime: crate::theme::matugen_source_mtime(),
             last_matugen_check: Instant::now(),
             migrate_settle: None,
+            reference: crate::reference::ReferenceState::default(),
+            dl_tx,
+            dl_rx,
+            catalog: None,
+            dl_status: String::new(),
+            dl_busy: false,
+            autoeq_tx,
+            autoeq_rx,
+            autoeq_busy: false,
+        }
+    }
+
+    /// Drain download-worker events each frame: update the catalog snapshot /
+    /// status, and install a fetched measurement onto the reference overlay.
+    pub(crate) fn pump_downloads(&mut self) {
+        while let Ok(ev) = self.dl_rx.try_recv() {
+            match ev {
+                crate::download::DlEvent::Catalog(c) => self.catalog = Some(c),
+                crate::download::DlEvent::Status(s) => self.dl_status = s,
+                crate::download::DlEvent::Busy(b) => self.dl_busy = b,
+                crate::download::DlEvent::Fetched(f) => {
+                    self.reference.enabled = true;
+                    self.reference
+                        .set_measurement(f.name, f.iem, f.left, f.right);
+                    self.reference.show_browser = false;
+                }
+            }
+        }
+    }
+
+    /// Apply a finished background Auto-EQ fit (undo snapshot + ApplyState).
+    pub(crate) fn pump_autoeq(&mut self) {
+        while let Ok(o) = self.autoeq_rx.try_recv() {
+            self.autoeq_busy = false;
+            if o.bands.is_empty() {
+                self.set_status("Auto-EQ: nothing to correct");
+                continue;
+            }
+            let count = o.bands.len();
+            let effects = o.snapshot.effects.clone();
+            self.undo_stack.push(o.snapshot);
+            if self.undo_stack.len() > 100 {
+                self.undo_stack.remove(0);
+            }
+            self.redo_stack.clear();
+            self.last_edit = None;
+            self.queue(Command::ApplyState {
+                preamp_db: o.preamp_db,
+                enabled: true,
+                bands: o.bands,
+                effects,
+            });
+            self.set_status(format!("Auto-EQ: fitted {count} bands"));
         }
     }
 
@@ -781,6 +859,11 @@ impl eframe::App for GuiApp {
             // clicks can fire again.
             self.service_busy = false;
         }
+
+        // Drain measurement-downloader events (catalog/status/fetched curves).
+        self.pump_downloads();
+        // Apply any finished background Auto-EQ fit.
+        self.pump_autoeq();
         // Service status drives the toolbar daemon controls; poll it on a
         // slow timer via the worker (off the UI thread so launchctl
         // latency never freezes egui).
@@ -825,6 +908,8 @@ impl eframe::App for GuiApp {
         self.export_dialog(&ctx);
         self.confirm_dialog(&ctx);
         self.help_dialog(&ctx);
+        self.browse_dialog(&ctx);
+        self.curve_picker_dialog(&ctx);
         self.status_toast(&ctx);
 
         // Drive ~144 fps repaint so spectrum/curve stay smooth.

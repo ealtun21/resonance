@@ -4121,6 +4121,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "resonance-autoeq"
+version = "0.5.5"
+
+[[package]]
 name = "resonance-cli"
 version = "0.5.5"
 dependencies = [
@@ -4188,11 +4192,14 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "postcard",
+ "resonance-autoeq",
  "resonance-dsp",
  "resonance-ipc",
  "resonance-preset",
  "serde",
+ "serde_json",
  "toml",
+ "ureq",
 ]
 
 [[package]]

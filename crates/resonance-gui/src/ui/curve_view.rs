@@ -51,14 +51,30 @@ impl GuiApp {
             }
         }
         let pts = curve::curve_points_range(&bands, state.sample_rate, 240, vlo, vhi);
-        // Loudest point the axis must show (any band gain or curve peak) + 5 dB
-        // headroom. Includes the dragged band, so the axis expands live as you
-        // drag a node up and contracts as you bring it down.
+        // Reference / measurement overlays (target, result, gap…). Empty when the
+        // reference system is off or has nothing to show; when present they
+        // replace the bare EQ curve (the EQ is folded into the "result" series).
+        let ref_series = if self.reference.active() {
+            self.reference
+                .series(&bands, state.sample_rate, 240, vlo, vhi)
+        } else {
+            Vec::new()
+        };
+        let show_ref = !ref_series.is_empty();
+        // Loudest point the axis must show (any band gain, curve peak, or overlay
+        // extent) + 5 dB headroom. Includes the dragged band, so the axis expands
+        // live as you drag a node up and contracts as you bring it down.
+        let ref_peak = ref_series
+            .iter()
+            .flat_map(|s| s.pts.iter())
+            .map(|&(_, y)| y.abs())
+            .fold(0.0_f64, f64::max);
         let peak = pts
             .iter()
             .map(|&(_, g)| g.abs())
             .chain(bands.iter().map(|b| b.gain_db.abs()))
-            .fold(0.0_f64, f64::max);
+            .fold(0.0_f64, f64::max)
+            .max(ref_peak);
         let needed = peak + 5.0;
         // Pick the ± dB stop with HYSTERESIS so it doesn't chatter (jiggle) when
         // `needed` sits right on a stop boundary: grow once it exceeds 98% of the
@@ -226,15 +242,22 @@ impl GuiApp {
             }
         }
 
-        // Response curve — colour-coded by gain: each segment is tinted toward
-        // boost (green) or cut (red), neutral near 0 dB.
-        for w in pts.windows(2) {
-            let (lf0, g0) = w[0];
-            let (lf1, g1) = w[1];
-            let a = egui::pos2(x_of(lf0), y_of(g0));
-            let b = egui::pos2(x_of(lf1), y_of(g1));
-            let color = gain_color((g0 + g1) * 0.5, &pal);
-            painter.line_segment([a, b], egui::Stroke::new(2.0, color));
+        // Response curve. With reference overlays active the EQ response is folded
+        // into the "result" series, so we draw the overlays instead of the bare
+        // curve; otherwise draw the colour-coded EQ response (boost green / cut
+        // red, neutral near 0 dB) as usual.
+        if show_ref {
+            let norm = self.reference.norm_view();
+            draw_reference(&painter, &ref_series, norm, &x_of, &y_of, &pal);
+        } else {
+            for w in pts.windows(2) {
+                let (lf0, g0) = w[0];
+                let (lf1, g1) = w[1];
+                let a = egui::pos2(x_of(lf0), y_of(g0));
+                let b = egui::pos2(x_of(lf1), y_of(g1));
+                let color = gain_color((g0 + g1) * 0.5, &pal);
+                painter.line_segment([a, b], egui::Stroke::new(2.0, color));
+            }
         }
 
         use egui::PointerButton::{Primary, Secondary};
@@ -523,6 +546,85 @@ impl GuiApp {
                 egui::Stroke::new(1.0, pal.graph_bg)
             };
             painter.circle_stroke(center, r, ring);
+        }
+
+        // In the normalised view the 0-line IS the target — tag it (the
+        // overlay/normalise toggles themselves live in the reference bar).
+        if show_ref && self.reference.norm_view() && self.reference.target.is_some() {
+            painter.text(
+                egui::pos2(plot.right() - 4.0, y_of(0.0) - 3.0),
+                egui::Align2::RIGHT_BOTTOM,
+                "target",
+                egui::FontId::monospace(9.0),
+                pal.accent,
+            );
+        }
+    }
+}
+
+/// Draw the reference/measurement overlay series. Faint context (raw
+/// measurement, compare) first, the dashed target next, the bold "result" last
+/// so it sits on top.
+fn draw_reference(
+    painter: &egui::Painter,
+    series: &[crate::reference::RefSeries],
+    normalized: bool,
+    x_of: &dyn Fn(f64) -> f32,
+    y_of: &dyn Fn(f64) -> f32,
+    pal: &crate::theme::Palette,
+) {
+    use crate::reference::SeriesRole;
+    let line = |pts: &[(f64, f64)], stroke: egui::Stroke| {
+        for w in pts.windows(2) {
+            painter.line_segment(
+                [
+                    egui::pos2(x_of(w[0].0), y_of(w[0].1)),
+                    egui::pos2(x_of(w[1].0), y_of(w[1].1)),
+                ],
+                stroke,
+            );
+        }
+    };
+    let dashed = |pts: &[(f64, f64)], stroke: egui::Stroke, dash: f32, gap: f32| {
+        let path: Vec<egui::Pos2> = pts
+            .iter()
+            .map(|&(l, y)| egui::pos2(x_of(l), y_of(y)))
+            .collect();
+        painter.add(egui::Shape::dashed_line(&path, stroke, dash, gap));
+    };
+    for s in series {
+        match s.role {
+            // The raw (un-EQ'd) measurement — in the normalised view this is the
+            // error you're correcting; faint so the result stands out.
+            SeriesRole::Measurement => line(
+                &s.pts,
+                egui::Stroke::new(1.0, pal.neutral.gamma_multiply(0.5)),
+            ),
+            // In the normalised view the target is the flat 0-line (the grid
+            // already marks it), so only draw the dashed target line otherwise.
+            SeriesRole::Target => {
+                if !normalized {
+                    dashed(&s.pts, egui::Stroke::new(1.5, pal.accent), 6.0, 4.0);
+                }
+            }
+            SeriesRole::Result => {
+                for w in s.pts.windows(2) {
+                    let (l0, y0) = w[0];
+                    let (l1, y1) = w[1];
+                    let color = if normalized {
+                        gain_color((y0 + y1) * 0.5, pal)
+                    } else {
+                        pal.highlight
+                    };
+                    painter.line_segment(
+                        [
+                            egui::pos2(x_of(l0), y_of(y0)),
+                            egui::pos2(x_of(l1), y_of(y1)),
+                        ],
+                        egui::Stroke::new(2.5, color),
+                    );
+                }
+            }
         }
     }
 }

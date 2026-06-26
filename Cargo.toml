@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/resonance-dsp",
     "crates/resonance-preset",
+    "crates/resonance-autoeq",
     "crates/resonance-ipc",
     "crates/resonance-daemon",
     "crates/resonance-apo",
@@ -93,8 +94,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive", "string"] }
 clap_complete = "4"
 
-# HTTP (AutoEq download)
+# HTTP (AutoEq + squig.link download)
 ureq = "3"
+serde_json = "1"
 
 # Test utilities (dev only)
 approx = "0.5"

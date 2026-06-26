@@ -109,6 +109,41 @@ pub fn preset_search_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// Writable user curve library: reference *target* curves and saved/imported
+/// measurements the user drops in or exports from the target customizer. Sits
+/// beside the preset library so the existing file browser can reach it.
+pub fn user_curve_dir() -> PathBuf {
+    data_home().join("resonance").join("curves")
+}
+
+/// Per-user cache root for data that can always be re-fetched (so it belongs in
+/// the cache, not the data, dir).
+///   Linux:   `$XDG_CACHE_HOME` else `~/.cache`
+///   macOS:   `~/Library/Caches`
+///   Windows: `%LOCALAPPDATA%` (Windows has no data/cache split)
+fn cache_home() -> PathBuf {
+    if let Some(p) = env_dir("XDG_CACHE_HOME") {
+        return p;
+    }
+    #[cfg(windows)]
+    {
+        data_home()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        home().join("Library").join("Caches")
+    }
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
+    {
+        home().join(".cache")
+    }
+}
+
+/// Cache dir for downloaded squig.link measurement curves and database indexes.
+pub fn curve_cache_dir() -> PathBuf {
+    cache_home().join("resonance").join("curves")
+}
+
 /// Platform-aware config directory for the daemon (profiles, mappings,
 /// known-sinks registry).
 ///

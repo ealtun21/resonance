@@ -34,6 +34,12 @@ pub(crate) enum Dialog {
     LoadPreset(Browser),
     /// Export the current chain: a directory navigator plus a filename field.
     ExportProfile(SaveDialog),
+    /// Pick a local curve file — load it as a measurement, or (when `as_target`)
+    /// import it into the target-curve library.
+    ImportCurve {
+        browser: Browser,
+        as_target: bool,
+    },
 }
 
 /// State for the Export (save-as) dialog: where to write and under what name.

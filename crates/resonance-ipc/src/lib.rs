@@ -2,6 +2,7 @@ use resonance_dsp::chain::FxEffect;
 use resonance_dsp::filter::FilterType;
 use serde::{Deserialize, Serialize};
 
+pub mod curve;
 pub mod fr;
 pub mod paths;
 pub mod service;

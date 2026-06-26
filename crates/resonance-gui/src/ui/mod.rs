@@ -10,5 +10,6 @@ pub(crate) mod dialogs;
 pub(crate) mod effects;
 pub(crate) mod kit;
 pub(crate) mod layout;
+pub(crate) mod reference_bar;
 pub(crate) mod toolbar;
 pub(crate) mod widgets;

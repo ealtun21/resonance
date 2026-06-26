@@ -72,10 +72,14 @@ pub(crate) fn dialog_window<'a>(ctx: &egui::Context, title: &'a str) -> egui::Wi
     let vp = ctx.content_rect().size();
     let max_w = (vp.x * 0.9).max(320.0);
     let max_h = (vp.y * 0.9).max(240.0);
+    // Centre on first open via pivot+default_pos (NOT `.anchor`, which pins the
+    // window so it can't be dragged); egui then remembers the user's position,
+    // making the dialog movable.
     egui::Window::new(title)
         .collapsible(false)
         .resizable(true)
-        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ctx.content_rect().center())
         .max_width(max_w)
         .max_height(max_h)
         .default_width(max_w.min(620.0))

@@ -136,6 +136,11 @@ impl GuiApp {
                     .default_size(controls_h)
                     .min_size(80.0)
                     .show_inside(ui, |ui| self.lower_columns(ui, &state));
+                // Compact reference bar hugs its content just under the graph,
+                // above the controls cluster.
+                egui::Panel::bottom("reference_bar")
+                    .resizable(false)
+                    .show_inside(ui, |ui| self.reference_bar(ui));
                 egui::CentralPanel::default().show_inside(ui, |ui| {
                     if let Some(s) = &state {
                         self.eq_curve(ui, s);
@@ -156,6 +161,9 @@ impl GuiApp {
                             self.eq_curve(ui, s);
                         }
                     });
+                egui::Panel::top("reference_bar_narrow")
+                    .resizable(false)
+                    .show_inside(ui, |ui| self.reference_bar(ui));
                 egui::CentralPanel::default().show_inside(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .id_salt("controls_scroll")

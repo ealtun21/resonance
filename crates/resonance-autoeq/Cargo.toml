@@ -1,0 +1,14 @@
+# This crate is a Rust port of peqdb/autoeq-c (https://github.com/peqdb/autoeq-c),
+# Copyright (C) 2026 PEQdB Inc., and is therefore licensed LGPL-3.0-or-later —
+# separate from the rest of the workspace so its copyleft stays contained. The
+# init/smoothing strategies were in turn adapted from jaakkopasanen/AutoEq (MIT).
+[package]
+name = "resonance-autoeq"
+description = "Parametric AutoEQ fit — Rust port of peqdb/autoeq-c (LGPL-3.0)"
+version.workspace = true
+edition.workspace = true
+license = "LGPL-3.0-or-later"
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
