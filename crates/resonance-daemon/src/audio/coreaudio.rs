@@ -73,6 +73,7 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
         cmd_rx,
         spectrum_tx,
         scratch: Vec::with_capacity(8192 * CHANNELS),
+        routed: Vec::with_capacity(8192 * CHANNELS),
         meters: Arc::clone(&meters),
     }));
 
@@ -153,6 +154,8 @@ struct SharedRt {
     spectrum_tx: rtrb::Producer<f32>,
     /// Reusable interleaved f64 scratch buffer to avoid per-callback allocation.
     scratch: Vec<f64>,
+    /// Second scratch for the routing matrix output (square remap); same size.
+    routed: Vec<f64>,
     meters: Arc<AtomicMeters>,
 }
 
@@ -189,13 +192,16 @@ fn run_streams(
     };
 
     {
+        let mut guard = shared.lock().unwrap();
         // Re-bind the DSP chain to the output device's sample rate so the
         // filter *and* effect coefficients are correct for the rate we render at.
-        shared
-            .lock()
-            .unwrap()
-            .chain
-            .rebind_sample_rate(sample_rate as f64);
+        guard.chain.rebind_sample_rate(sample_rate as f64);
+        // The process tap captures the stereo system mix, and the IOProc always
+        // emits L/R pairs, so the chain processes stereo regardless of
+        // RESONANCE_CHANNELS. Pin its width to the stereo buffers the callback
+        // feeds — a stray env override must not desync chain.channels from the
+        // interleaved-stereo work buffer (which would misframe every block).
+        guard.chain.set_channels(2);
     }
 
     // Report the active output device by name (the daemon uses this to map
@@ -364,21 +370,41 @@ fn build_output_stream(
             if s.scratch.len() < need_f64 {
                 s.scratch.resize(need_f64, 0.0);
             }
+            if s.routed.len() < need_f64 {
+                s.routed.resize(need_f64, 0.0);
+            }
             // Promote to f64, process, demote.
             for (dst, src) in s.scratch[..need_f64].iter_mut().zip(buf.iter()) {
                 *dst = *src as f64;
             }
             let t0 = Instant::now();
-            // Split-borrow: separate `&mut chain` and `&mut scratch` so the
-            // process call doesn't second-borrow `s` whole.
-            let SharedRt { chain, scratch, .. } = &mut *s;
-            let scratch_slice = &mut scratch[..need_f64];
-            chain.process(scratch_slice);
+            // Split-borrow: separate `&mut chain`/`scratch`/`routed` so process +
+            // route don't second-borrow `s` whole. Returns the post-DSP peaks; the
+            // borrow ends with the block so the meter writes below can reborrow `s`.
+            let (out_peak, out_rms) = {
+                let SharedRt {
+                    chain,
+                    scratch,
+                    routed,
+                    ..
+                } = &mut *s;
+                chain.process(&mut scratch[..need_f64]);
+                // Square output routing (L/R swap / per-channel gain) on the
+                // stereo buffer — parity with the PipeWire/APO backends. `route`
+                // copies for the no-matrix / identity case.
+                let out: &[f64] = if chain.routing.is_some() {
+                    chain.route(&scratch[..need_f64], &mut routed[..need_f64]);
+                    &routed[..need_f64]
+                } else {
+                    &scratch[..need_f64]
+                };
+                let pr = peak_rms(out);
+                for (dst, src) in buf.iter_mut().zip(out.iter()) {
+                    *dst = *src as f32;
+                }
+                pr
+            };
             let dt = t0.elapsed();
-            let (out_peak, out_rms) = peak_rms(scratch_slice);
-            for (dst, src) in buf.iter_mut().zip(s.scratch[..need_f64].iter()) {
-                *dst = *src as f32;
-            }
 
             let sr = s.chain.sample_rate;
             let budget = frames as f64 / sr;
