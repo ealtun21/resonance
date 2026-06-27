@@ -78,6 +78,21 @@ impl GuiApp {
                 self.queue(Command::ClearRouting);
             }
         });
+        // Opt-in per-channel EQ: reveals a per-band channel-target column so a
+        // band can be aimed at specific channels (e.g. L-only / R-only). On
+        // >2ch the column shows automatically, so the toggle only matters at 2ch.
+        ui.add_space(kit::SP_XS);
+        let mut per_ch = self.per_channel_eq;
+        if ui
+            .checkbox(&mut per_ch, "Per-channel EQ")
+            .on_hover_text(
+                "Show a per-band channel column so a band can target specific \
+                 channels (e.g. left- or right-only). Always on for >2 channels.",
+            )
+            .changed()
+        {
+            self.per_channel_eq = per_ch;
+        }
     }
 
     /// Device → profile mapping table: every output device we've ever seen, each

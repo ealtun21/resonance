@@ -39,10 +39,11 @@ pub(crate) fn channel_tag(mask: ChannelMask, layout: &[String], channels: usize)
 impl GuiApp {
     pub(crate) fn bands_section(&mut self, ui: &mut egui::Ui, state: &DaemonState) {
         let avail = ui.available_width();
-        // Per-channel EQ is a multichannel feature: the channel-target column only
-        // appears on >2-channel devices, so stereo users get a clean table
-        // (progressive disclosure).
-        let show_ch = state.channels > 2;
+        // Per-channel EQ: the channel-target column appears on >2-channel
+        // devices automatically (progressive disclosure), or when a ≥2ch user
+        // opts in via the Channels section's "Per-channel EQ" toggle (lets a
+        // stereo user do L/R-specific EQ).
+        let show_ch = state.channels > 2 || (self.per_channel_eq && state.channels >= 2);
         // Collapse columns as the table narrows: drop the gain graph first, then
         // the Type combo (abbreviated when tight).
         let show_graph = avail >= 480.0;
