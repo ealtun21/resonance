@@ -118,8 +118,9 @@ enum Sub {
     },
     /// Channel routing + per-channel EQ (N-channel support)
     Channel {
+        // Optional so a bare `resonance channel` runs `info` (None → Info).
         #[command(subcommand)]
-        action: ChannelAction,
+        action: Option<ChannelAction>,
     },
     /// Send a raw shutdown signal to the daemon
     Shutdown,
@@ -221,17 +222,10 @@ fn main() -> Result<()> {
         return print_response(resp);
     }
 
-    // `channel info` (or bare `channel`) renders the channel layout + routing.
-    if let Sub::Channel {
-        action: ChannelAction::Info,
-    } = &sub
-    {
-        let resp = send(Command::GetState)?;
-        if let Response::State(s) = resp {
-            print_channels(&Paint::auto(), &s);
-            return Ok(());
-        }
-        return print_response(resp);
+    // All `channel` subcommands need either a state fetch (info / layout-aware
+    // band targeting) or a direct IPC send; handle them together.
+    if let Sub::Channel { action } = &sub {
+        return run_channel(action);
     }
 
     let cmd = to_ipc_command(sub)?;
@@ -301,23 +295,47 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
             name,
         }),
         Sub::Rename { from, to } => Ok(Command::RenameProfile { from, to }),
-        Sub::Channel { action } => match action {
-            // `Info` is handled in `main` (it renders state, doesn't map 1:1).
-            ChannelAction::Info => unreachable!(),
-            ChannelAction::Swap { a, b } => Ok(Command::SwapChannels { a, b }),
-            ChannelAction::Clear => Ok(Command::ClearRouting),
-            ChannelAction::Band { index, channels } => {
-                if index == 0 {
-                    bail!("band index is 1-based (see `status`)");
-                }
-                Ok(Command::SetBandChannels {
-                    index: index - 1,
-                    channels: parse_channel_mask(&channels)?,
-                })
-            }
-        },
         Sub::Shutdown => Ok(Command::Shutdown),
-        Sub::Daemon { .. } | Sub::Devices | Sub::Completions { .. } => unreachable!(),
+        // `Channel` is handled in `run_channel` (needs a state fetch); the others
+        // are handled in `main` before this point.
+        Sub::Channel { .. } | Sub::Daemon { .. } | Sub::Devices | Sub::Completions { .. } => {
+            unreachable!()
+        }
+    }
+}
+
+/// Handle the `channel` command group. `info` (or a bare `channel`) renders the
+/// layout; `swap`/`clear` map straight to IPC; `band` fetches state first so
+/// channel names resolve against the live layout and indices are range-checked.
+fn run_channel(action: &Option<ChannelAction>) -> Result<()> {
+    match action {
+        None | Some(ChannelAction::Info) => {
+            let resp = send(Command::GetState)?;
+            if let Response::State(s) = resp {
+                print_channels(&Paint::auto(), &s);
+                Ok(())
+            } else {
+                print_response(resp)
+            }
+        }
+        Some(ChannelAction::Swap { a, b }) => {
+            print_response(send(Command::SwapChannels { a: *a, b: *b })?)
+        }
+        Some(ChannelAction::Clear) => print_response(send(Command::ClearRouting)?),
+        Some(ChannelAction::Band { index, channels }) => {
+            if *index == 0 {
+                bail!("band index is 1-based (see `status`)");
+            }
+            let st = match send(Command::GetState)? {
+                Response::State(s) => s,
+                other => return print_response(other),
+            };
+            let mask = parse_channel_mask(channels, &st)?;
+            print_response(send(Command::SetBandChannels {
+                index: index - 1,
+                channels: mask,
+            })?)
+        }
     }
 }
 
@@ -666,12 +684,16 @@ fn parse_slot(s: &str) -> Result<resonance_ipc::AbSlot> {
     }
 }
 
-/// Parse a channel spec: `all`, or a comma list of indices / names (FL, FR, …).
-fn parse_channel_mask(spec: &str) -> Result<ChannelMask> {
+/// Parse a channel spec against the live state: `all`, or a comma list of 0-based
+/// indices / names (resolved against the device's actual layout, so names match
+/// what `channel info` shows even on 4/5/7-channel devices). Indices/names beyond
+/// the device's channel count are rejected.
+fn parse_channel_mask(spec: &str, st: &resonance_ipc::DaemonState) -> Result<ChannelMask> {
     let s = spec.trim();
     if s.eq_ignore_ascii_case("all") {
         return Ok(ChannelMask::ALL);
     }
+    let channels = st.channels;
     let mut idxs = Vec::new();
     for tok in s.split(',') {
         let t = tok.trim();
@@ -680,10 +702,15 @@ fn parse_channel_mask(spec: &str) -> Result<ChannelMask> {
         }
         let idx = match t.parse::<usize>() {
             Ok(n) => n,
-            Err(_) => channel_name_index(t).ok_or_else(|| {
-                anyhow::anyhow!("unknown channel '{t}' (use an index or FL/FR/FC/LFE/RL/RR/SL/SR)")
+            Err(_) => resolve_name(t, st).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown channel '{t}' (use an index or a name from `channel info`)"
+                )
             })?,
         };
+        if channels != 0 && idx >= channels {
+            bail!("channel {idx} out of range (device has {channels} channels)");
+        }
         idxs.push(idx);
     }
     if idxs.is_empty() {
@@ -692,7 +719,17 @@ fn parse_channel_mask(spec: &str) -> Result<ChannelMask> {
     Ok(ChannelMask::from_indices(idxs))
 }
 
-/// Map an APO/WAVE channel name to its index (mirrors the daemon's layout).
+/// Resolve a channel name to its index: prefer the live layout (count-correct on
+/// any device), falling back to the fixed WAVE-order aliases.
+fn resolve_name(name: &str, st: &resonance_ipc::DaemonState) -> Option<usize> {
+    st.channel_layout
+        .iter()
+        .position(|l| l.eq_ignore_ascii_case(name))
+        .or_else(|| channel_name_index(name))
+}
+
+/// Fixed WAVE-order name→index fallback (used only when the live layout lacks the
+/// name). Aliases: FL/L, LFE/SUB, RL/BL, RR/BR.
 fn channel_name_index(s: &str) -> Option<usize> {
     Some(match s.to_ascii_uppercase().as_str() {
         "FL" | "L" | "MONO" => 0,
@@ -716,6 +753,11 @@ fn mask_label(m: ChannelMask, layout: &[String], channels: usize) -> String {
         .filter(|&i| m.contains(i))
         .map(|i| layout.get(i).cloned().unwrap_or_else(|| format!("ch{i}")))
         .collect();
+    // A non-global mask that selects no in-range channel is degenerate (e.g. an
+    // out-of-range spec); show it explicitly rather than an empty `[]`.
+    if names.is_empty() {
+        return "[none]".to_string();
+    }
     format!("[{}]", names.join(","))
 }
 

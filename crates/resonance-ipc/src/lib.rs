@@ -167,17 +167,6 @@ pub enum Command {
     RemoveBand { index: usize },
     /// Change the filter type of an existing band
     SetBandType { index: usize, band_type: BandType },
-    /// Restrict (or widen) which channels an existing band applies to.
-    /// `ChannelMask::ALL` makes the band global again (the default).
-    SetBandChannels { index: usize, channels: ChannelMask },
-    /// Set the output routing/remap matrix (any input channel → any output
-    /// channel: swap, duplicate, drop, up/downmix).
-    SetChannelRouting { matrix: RoutingMatrix },
-    /// Swap two output channels — convenience over a swap routing matrix, built
-    /// by the daemon at the current channel count.
-    SwapChannels { a: usize, b: usize },
-    /// Clear routing: straight passthrough at the processing channel count.
-    ClearRouting,
     /// Replace the whole editable chain state at once (used by TUI undo/redo).
     ApplyState {
         preamp_db: f64,
@@ -233,6 +222,22 @@ pub enum Command {
     FollowSystemOutput,
     /// Stop the daemon
     Shutdown,
+    // ── N-channel commands ───────────────────────────────────────────────────
+    // IMPORTANT: keep these LAST. postcard encodes enum variants by ordinal with
+    // no names, and the IPC wire is unversioned, so inserting a variant mid-enum
+    // shifts every later variant's ordinal and silently misdecodes commands from
+    // a mismatched (older) client. New variants must always be appended here.
+    /// Restrict (or widen) which channels an existing band applies to.
+    /// `ChannelMask::ALL` makes the band global again (the default).
+    SetBandChannels { index: usize, channels: ChannelMask },
+    /// Set the output routing/remap matrix. In-graph (PipeWire) only a square
+    /// remap at the current channel count is applied; up/downmix is daemon-path.
+    SetChannelRouting { matrix: RoutingMatrix },
+    /// Swap two output channels — convenience over a swap routing matrix, built
+    /// by the daemon at the current channel count.
+    SwapChannels { a: usize, b: usize },
+    /// Clear routing: straight passthrough at the processing channel count.
+    ClearRouting,
 }
 
 /// One of the two in-memory comparison slots for quick A/B auditioning.
@@ -495,9 +500,12 @@ pub struct BandState {
     pub gain_db: f64,
     pub q: f64,
     pub enabled: bool,
-    /// Which channels this band applies to. `#[serde(default)]` → older profile
-    /// `.toml` files (and any client that omits it) load as `ChannelMask::ALL`,
-    /// i.e. a global band, preserving backward compatibility.
+    /// Which channels this band applies to. `#[serde(default)]` makes older
+    /// profile `.toml`/JSON files (self-describing formats) that omit the field
+    /// load as `ChannelMask::ALL`, a global band. NOTE: this does **not** give
+    /// postcard-wire back-compat — postcard is non-self-describing and reads a
+    /// fixed field count, so the IPC wire is version-locked to the daemon build
+    /// (clients + daemon ship together).
     #[serde(default)]
     pub channels: ChannelMask,
 }

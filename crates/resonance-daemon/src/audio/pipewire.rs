@@ -809,7 +809,12 @@ unsafe extern "C" fn filter_process_cb(data: *mut c_void, position: *mut spa_io_
         // can't change the fixed port count here, so it's skipped — full
         // up/downmix is the daemon-path backends' job (macOS), not the in-graph
         // filter's. `route` copies when there's no matrix or it's identity.
-        let route_applies = matches!(&fd.chain.routing, Some(m) if m.out_ch() == channels);
+        // Only a true square remap at the live width is applied in-graph (the
+        // filter has a fixed `channels` ports in and out). Requiring BOTH dims to
+        // equal `channels` rejects a mismatched matrix that would misframe the
+        // buffer; the daemon also validates this at install time.
+        let route_applies =
+            matches!(&fd.chain.routing, Some(m) if m.in_ch() == channels && m.out_ch() == channels);
         if route_applies {
             fd.chain.route(&fd.scratch[..need], &mut fd.routed[..need]);
         }

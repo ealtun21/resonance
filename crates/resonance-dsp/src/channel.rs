@@ -185,7 +185,13 @@ impl ChannelMatrix {
         if self.in_ch == 0 || self.out_ch == 0 {
             return;
         }
-        let frames = src.len() / self.in_ch;
+        // Clamp the frame count to BOTH buffers' capacities. The matrix may be
+        // mismatched against the live buffers (e.g. an in_ch that doesn't equal
+        // the stream's channel count); deriving frames from `src` alone could
+        // then overrun `dst`. Bounding to the min makes `apply` panic-free for
+        // any matrix/buffer pair — defense in depth behind the install-time
+        // validation in the daemon.
+        let frames = (src.len() / self.in_ch).min(dst.len() / self.out_ch);
         for frame in 0..frames {
             let s = &src[frame * self.in_ch..frame * self.in_ch + self.in_ch];
             let d = &mut dst[frame * self.out_ch..frame * self.out_ch + self.out_ch];

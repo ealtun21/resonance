@@ -278,7 +278,17 @@ impl SharedState {
     pub fn rebuild_chain(&self, build: impl Fn(usize, f64) -> ProcessorChain) {
         let (channels, sample_rate) = {
             let inner = self.0.lock().unwrap();
-            (inner.chain.channels, inner.chain.sample_rate)
+            // Prefer the live rate the RT thread reports — the shadow chain's
+            // `sample_rate` stays frozen at its construction rate (the RT chain
+            // follows the graph via `rebind_sample_rate`, but never writes back),
+            // so building from it would briefly run wrong-rate coefficients on an
+            // off-48k graph until the next RT block re-binds. Same workaround as
+            // `snapshot`.
+            let sr = inner
+                .meters
+                .sample_rate()
+                .unwrap_or(inner.chain.sample_rate);
+            (inner.chain.channels, sr)
         };
         self.replace_chain(build(channels, sample_rate), build(channels, sample_rate));
     }

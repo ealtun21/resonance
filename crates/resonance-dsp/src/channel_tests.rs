@@ -103,6 +103,25 @@ fn matrix_upmix_duplicates_mono() {
 }
 
 #[test]
+fn matrix_apply_clamps_mismatched_dims_without_panic() {
+    // Defense-in-depth: a matrix whose in_ch/out_ch don't match the buffers must
+    // bound its frame loop to both buffers and never panic / write out of range.
+    // (in_ch > buffer width: previously misframed; in_ch leading to over-long
+    // dst writes: previously panicked.)
+    let m = ChannelMatrix::new(3, 2, vec![0.0; 6]).unwrap();
+    let src = vec![0.5; 8]; // 8 samples; in_ch=3 → 2 full frames
+    let mut dst = vec![0.0; 8];
+    m.apply(&src, &mut dst); // must not panic
+
+    // The 1→2 expansion that previously overran dst when frames came from src.
+    let m2 = ChannelMatrix::new(1, 2, vec![1.0, 1.0]).unwrap();
+    let src2 = vec![0.5; 4];
+    let mut dst2 = vec![0.0; 4]; // only 2 output frames fit
+    m2.apply(&src2, &mut dst2); // frames clamped to dst capacity → no panic
+    assert!(dst2.iter().all(|v| v.is_finite()));
+}
+
+#[test]
 fn matrix_new_rejects_bad_dimensions() {
     assert!(ChannelMatrix::new(2, 2, vec![1.0, 0.0, 0.0]).is_none());
     assert!(ChannelMatrix::new(0, 2, vec![]).is_none());

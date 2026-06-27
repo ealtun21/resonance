@@ -394,6 +394,12 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
         }
 
         Command::SetBandChannels { index, channels } => {
+            // Reject an out-of-range band index rather than silently no-op'ing
+            // (mirrors SwapChannels' range check).
+            let nbands = state.0.lock().unwrap().chain.filters.len();
+            if index >= nbands {
+                return Response::Error(format!("no band at index {index} (have {nbands})"));
+            }
             let mask = channels.to_dsp();
             state.send(
                 AudioCommand::SetBandChannels { index, mask },
@@ -406,18 +412,28 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
             Response::Ok
         }
 
-        Command::SetChannelRouting { matrix } => match matrix.to_dsp() {
-            Some(m) => {
-                state.send(
-                    AudioCommand::SetRouting {
-                        matrix: Some(m.clone()),
-                    },
-                    move |chain| chain.routing = Some(m),
-                );
-                Response::Ok
+        Command::SetChannelRouting { matrix } => {
+            // The in-graph filter has a fixed `channels` ports in and out, so only
+            // a square remap at the live channel count can be applied. Reject a
+            // mismatched matrix here so it never reaches (and misframes) the RT
+            // thread. (Up/downmix to a different width is a daemon-path feature.)
+            let channels = state.0.lock().unwrap().chain.channels;
+            match matrix.to_dsp() {
+                Some(m) if m.in_ch() == channels && m.out_ch() == channels => {
+                    state.send(
+                        AudioCommand::SetRouting {
+                            matrix: Some(m.clone()),
+                        },
+                        move |chain| chain.routing = Some(m),
+                    );
+                    Response::Ok
+                }
+                Some(_) => Response::Error(format!(
+                    "routing matrix must be square at the current channel count ({channels}×{channels})"
+                )),
+                None => Response::Error("invalid routing matrix dimensions".to_string()),
             }
-            None => Response::Error("invalid routing matrix dimensions".to_string()),
-        },
+        }
 
         Command::SwapChannels { a, b } => {
             // Swap two of the processing channels (square remap at the current

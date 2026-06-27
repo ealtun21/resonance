@@ -163,8 +163,9 @@ fn parse_filter_line(line: &str, ln: usize, channels: u64) -> Result<Option<EqBa
 }
 
 /// Parse a `Channel:` directive value into a channel-target bitset. `all` (or an
-/// empty / wholly-unrecognised list) means every channel. Recognised names map
-/// via [`channel_name_to_index`]; unknown tokens are skipped.
+/// empty / wholly-unrecognised list) means every channel. EqualizerAPO allows
+/// positions by name (via [`channel_name_to_index`]) OR by 1-based number — both
+/// are accepted; numeric is exact for any layout, named tokens assume WAVE order.
 fn parse_channel_line(rest: &str) -> u64 {
     let rest = rest.trim();
     if rest.is_empty() || rest.eq_ignore_ascii_case("all") {
@@ -172,8 +173,15 @@ fn parse_channel_line(rest: &str) -> u64 {
     }
     let mut bits = 0u64;
     for tok in rest.split_whitespace() {
-        if let Some(idx) = channel_name_to_index(tok) {
-            bits |= 1u64 << idx;
+        // A 1-based numeric position takes priority (APO's exact form); else a name.
+        let idx = match tok.parse::<usize>() {
+            Ok(n) if n >= 1 => Some(n - 1),
+            _ => channel_name_to_index(tok),
+        };
+        if let Some(i) = idx {
+            if i < 64 {
+                bits |= 1u64 << i;
+            }
         }
     }
     // A directive naming only channels we don't model degrades to "all" rather
@@ -212,11 +220,18 @@ fn channel_index_to_name(i: usize) -> Option<&'static str> {
     })
 }
 
-/// Set channel-bit indices (0..8) rendered as APO channel names.
-fn channel_bits_to_names(bits: u64) -> Vec<&'static str> {
-    (0..8)
+/// Set channel-bit indices rendered as APO channel tokens. Indices 0..8 use their
+/// WAVE names; anything higher (or unnamed) falls back to a 1-based numeric token
+/// so every set bit survives the round-trip (APO accepts numeric positions). Scans
+/// the full 64-bit range, not just 0..8.
+fn channel_bits_to_names(bits: u64) -> Vec<String> {
+    (0..64)
         .filter(|&i| bits & (1u64 << i) != 0)
-        .filter_map(channel_index_to_name)
+        .map(|i| {
+            channel_index_to_name(i)
+                .map(str::to_string)
+                .unwrap_or_else(|| (i + 1).to_string())
+        })
         .collect()
 }
 
@@ -236,13 +251,18 @@ pub fn write_apo(preamp_db: f64, bands: &[EqBand]) -> String {
         if b.channels != current {
             if b.channels == u64::MAX {
                 out.push_str("Channel: all\n");
+                current = b.channels;
             } else {
-                out.push_str(&format!(
-                    "Channel: {}\n",
-                    channel_bits_to_names(b.channels).join(" ")
-                ));
+                let names = channel_bits_to_names(b.channels);
+                // Never emit an empty `Channel:` (a degenerate all-zero mask):
+                // APO would re-parse the empty value as `all`. Leave the previous
+                // scope in place instead — the numeric fallback means any real
+                // (non-zero) mask always yields at least one token.
+                if !names.is_empty() {
+                    out.push_str(&format!("Channel: {}\n", names.join(" ")));
+                    current = b.channels;
+                }
             }
-            current = b.channels;
         }
         let state = if b.enabled { "ON" } else { "OFF" };
         let kw = apo_keyword(b.filter_type);
@@ -516,6 +536,39 @@ mod tests {
         assert_eq!(re.bands[0].channels, 0b0001);
         assert_eq!(re.bands[1].channels, 0b0010);
         assert_eq!(re.bands[2].channels, u64::MAX);
+    }
+
+    #[test]
+    fn numeric_channel_directive_parses_one_based() {
+        // EqualizerAPO numeric positions are 1-based; `Channel: 1 2` = L+R.
+        let p = parse_apo("Channel: 1 2\nFilter 1: ON PK Fc 1000 Hz Gain -3 dB Q 1\n").unwrap();
+        assert_eq!(p.bands[0].channels, 0b11);
+        let p2 = parse_apo("Channel: 1\nFilter 1: ON PK Fc 1000 Hz Gain -3 dB Q 1\n").unwrap();
+        assert_eq!(p2.bands[0].channels, 0b01);
+        // Mixed numeric + name: `2 C` = R (idx1) + C (idx2).
+        let p3 = parse_apo("Channel: 2 C\nFilter 1: ON PK Fc 1000 Hz Gain 1 dB Q 1\n").unwrap();
+        assert_eq!(p3.bands[0].channels, 0b110);
+    }
+
+    #[test]
+    fn high_channel_band_round_trips_via_numeric() {
+        // A band on channel 8 (no WAVE name) must survive write→parse via the
+        // numeric fallback rather than collapsing to ALL or dropping the bit.
+        let bands = vec![EqBand {
+            filter_type: ApoFilterType::Peaking,
+            freq: 1000.0,
+            gain_db: 2.0,
+            q: 1.0,
+            enabled: true,
+            channels: 1u64 << 8,
+        }];
+        let text = write_apo(0.0, &bands);
+        assert!(
+            text.contains("Channel: 9"),
+            "expected numeric token:\n{text}"
+        );
+        let re = parse_apo(&text).unwrap();
+        assert_eq!(re.bands[0].channels, 1u64 << 8);
     }
 
     #[test]
