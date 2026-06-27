@@ -14,6 +14,8 @@ pub struct Prefs {
     pub default_band_q: f64,
     #[serde(default = "default_band_type")]
     pub default_band_type: BandType,
+    #[serde(default = "default_show_spectrum")]
+    pub show_spectrum: bool,
 }
 
 fn default_fps() -> u64 {
@@ -36,6 +38,9 @@ fn default_band_q() -> f64 {
 fn default_band_type() -> BandType {
     BandType::Peaking
 }
+fn default_show_spectrum() -> bool {
+    true
+}
 
 impl Default for Prefs {
     fn default() -> Self {
@@ -45,6 +50,7 @@ impl Default for Prefs {
             confirm_on_delete: default_confirm(),
             default_band_q: default_band_q(),
             default_band_type: default_band_type(),
+            show_spectrum: default_show_spectrum(),
         }
     }
 }

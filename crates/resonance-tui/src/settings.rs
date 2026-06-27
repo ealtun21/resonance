@@ -122,7 +122,7 @@ impl SettingsState {
             0 => self.profiles.len().saturating_sub(1),
             1 => self.mappings.len().saturating_sub(1),
             2 => self.sinks.len().saturating_sub(1),
-            3 => 4,
+            3 => 5, // Preferences: fps / refresh / confirm / band-Q / band-type / spectrum
             4 => 3, // Daemon: Start / Stop / Restart / Autostart
             // Reference: on / target / measurement / browse-online / autoeq /
             // show-meas / normalize / bounds / tilt / bass / ear / treble / reset.

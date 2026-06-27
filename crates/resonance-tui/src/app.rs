@@ -618,7 +618,7 @@ impl App {
 
     /// Resolve a click on the effects column to an effect index.
     fn hit_effect(&self, col: u16, row: u16) -> Option<usize> {
-        let p = crate::layout::panes(self.last_frame);
+        let p = crate::layout::panes(self.last_frame, self.prefs.show_spectrum);
         if !crate::layout::hit(p.effects, col, row) {
             return None;
         }
@@ -629,7 +629,7 @@ impl App {
 
     /// Resolve a click on the bands panel to (band index, optional field).
     fn hit_band(&self, col: u16, row: u16) -> Option<(usize, BandHit)> {
-        let p = crate::layout::panes(self.last_frame);
+        let p = crate::layout::panes(self.last_frame, self.prefs.show_spectrum);
         if !crate::layout::hit(p.bands, col, row) {
             return None;
         }
@@ -1620,6 +1620,10 @@ impl App {
             }
             4 => {
                 self.prefs.default_band_type = self.prefs.default_band_type.next();
+                self.prefs.save();
+            }
+            5 => {
+                self.prefs.show_spectrum = !self.prefs.show_spectrum;
                 self.prefs.save();
             }
             _ => {}
