@@ -21,15 +21,21 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use resonance_dsp::chain::{FxEffect, ProcessorChain};
+use resonance_dsp::channel::{ChannelMask, ChannelMatrix};
 use resonance_dsp::effects::Effect;
 use resonance_dsp::filter::{ApoFilter, FilterType};
 
 /// Maximum number of EQ bands carried in the shared block.
 pub const MAX_FILTERS: usize = 32;
+/// Max channel count a square routing matrix is carried for. Per-channel EQ
+/// (masks) works at any channel count; only the remap matrix is capped (a 64×64
+/// matrix would bloat every snapshot — 16 covers 7.1.4 and below).
+pub const MAX_ROUTE: usize = 16;
 /// `"RAPO"` little-endian — sanity tag for the shared block.
 pub const STATE_MAGIC: u32 = 0x4F50_4152;
 /// Layout version; bump on any `#[repr(C)]` change below.
-pub const STATE_VERSION: u32 = 2;
+/// v3: per-band channel mask + square routing matrix.
+pub const STATE_VERSION: u32 = 3;
 
 /// Number of spectrum bins carried in telemetry (matches the daemon's display).
 pub const TELEMETRY_BINS: usize = 64;
@@ -45,6 +51,9 @@ pub struct FilterSnapshot {
     pub freq: f64,
     pub gain_db: f64,
     pub q: f64,
+    /// `ChannelMask` bits — which channels this band applies to. `u64::MAX` (all
+    /// bits) = global. Channel-count-independent, so it works on any APO format.
+    pub channels: u64,
 }
 
 /// One FxSound-style effect.
@@ -69,6 +78,13 @@ pub struct ChainSnapshot {
     pub bass: EffectSnapshot,
     pub num_filters: u32,
     pub filters: [FilterSnapshot; MAX_FILTERS],
+    /// Square output routing matrix dimension: `0` = none/identity (passthrough);
+    /// else `N` means an `N×N` remap stored row-major in the first `N*N` entries
+    /// of `route_gains`. Only applied by the APO when `N` equals its live channel
+    /// count (the in-graph filter is in-place, so remap must be square).
+    pub route_channels: u32,
+    pub _pad_route: u32,
+    pub route_gains: [f64; MAX_ROUTE * MAX_ROUTE],
 }
 
 impl Default for ChainSnapshot {
@@ -83,8 +99,45 @@ impl Default for ChainSnapshot {
             bass: EffectSnapshot::default(),
             num_filters: 0,
             filters: [FilterSnapshot::default(); MAX_FILTERS],
+            route_channels: 0,
+            _pad_route: 0,
+            route_gains: [0.0; MAX_ROUTE * MAX_ROUTE],
         }
     }
+}
+
+/// Extract a square routing matrix from a chain into the snapshot's fixed array.
+/// Returns `(dim, gains)`; `dim == 0` when there's no carriable routing (none,
+/// identity, non-square, or wider than [`MAX_ROUTE`]).
+fn route_snapshot(chain: &ProcessorChain) -> (u32, [f64; MAX_ROUTE * MAX_ROUTE]) {
+    let mut gains = [0.0; MAX_ROUTE * MAX_ROUTE];
+    match &chain.routing {
+        Some(m)
+            if m.in_ch() == m.out_ch()
+                && m.in_ch() <= MAX_ROUTE
+                && m.in_ch() > 0
+                && !m.is_identity() =>
+        {
+            let d = m.in_ch();
+            gains[..d * d].copy_from_slice(m.gains());
+            (d as u32, gains)
+        }
+        _ => (0, gains),
+    }
+}
+
+/// Build a [`ChannelMatrix`] from the snapshot's routing fields, but only when it
+/// is square at `channels` (the APO's live width) — otherwise `None` (passthrough).
+fn route_matrix(
+    route_channels: u32,
+    route_gains: &[f64; MAX_ROUTE * MAX_ROUTE],
+    channels: usize,
+) -> Option<ChannelMatrix> {
+    let d = route_channels as usize;
+    if d == 0 || d != channels || d > MAX_ROUTE {
+        return None;
+    }
+    ChannelMatrix::new(d, d, route_gains[..d * d].to_vec())
 }
 
 /// APO → daemon telemetry (meters + spectrum). Written by the APO worker thread
@@ -159,8 +212,10 @@ impl ChainSnapshot {
                 freq: f.freq,
                 gain_db: f.gain_db,
                 q: f.q,
+                channels: f.mask.bits(),
             };
         }
+        let (route_channels, route_gains) = route_snapshot(chain);
         Self {
             enabled: chain.enabled as u32,
             preamp_db: chain.preamp_db,
@@ -171,6 +226,9 @@ impl ChainSnapshot {
             bass: effect(chain, FxEffect::Bass),
             num_filters: n as u32,
             filters,
+            route_channels,
+            _pad_route: 0,
+            route_gains,
         }
     }
 
@@ -195,6 +253,7 @@ impl ChainSnapshot {
                 .enabled(f.enabled != 0)
                 .channels(channels)
                 .sample_rate(sample_rate)
+                .channel_mask(ChannelMask::from_bits(f.channels))
                 .build()
             {
                 builder = builder.add_filter(filter);
@@ -202,6 +261,7 @@ impl ChainSnapshot {
         }
 
         let mut chain = builder.build();
+        chain.routing = route_matrix(self.route_channels, &self.route_gains, channels);
         chain.enabled = self.enabled != 0;
         chain.set_effect_intensity(FxEffect::Fidelity, self.fidelity.intensity);
         chain.set_effect_enabled(FxEffect::Fidelity, self.fidelity.enabled != 0);
@@ -234,6 +294,10 @@ impl ChainSnapshot {
         chain.set_effect_intensity(FxEffect::Bass, self.bass.intensity);
         chain.set_effect_enabled(FxEffect::Bass, self.bass.enabled != 0);
 
+        // Routing is format-independent state on the chain; apply it in place at
+        // the chain's live width (square-only; mismatched/absent → passthrough).
+        chain.routing = route_matrix(self.route_channels, &self.route_gains, chain.channels);
+
         let n = self.num_filters.min(MAX_FILTERS as u32) as usize;
         if chain.filters.len() != n {
             return false; // band added/removed — rebuild
@@ -249,6 +313,8 @@ impl ChainSnapshot {
                 sample_rate,
             );
             slot.enabled = f.enabled != 0;
+            // Per-channel target is plain state (no coefficient/history impact).
+            slot.mask = ChannelMask::from_bits(f.channels);
         }
         true
     }
@@ -499,12 +565,20 @@ fn read_f32(buf: &[u8], off: usize) -> Option<f32> {
 /// unchanged generation. `None` while a write is in flight or the header is
 /// not yet valid — the caller simply polls again.
 pub fn read_chain_fresh(path: &Path) -> Option<(u64, ChainSnapshot, bool)> {
+    let ver_off = std::mem::offset_of!(SharedState, version);
     let gen_off = std::mem::offset_of!(SharedState, generation);
     let snap_off = std::mem::offset_of!(SharedState, snapshot);
     let gate_off = std::mem::offset_of!(SharedState, telemetry_enabled);
     for _ in 0..8 {
         let b1 = std::fs::read(path).ok()?;
-        if b1.len() < STATE_SIZE || read_u32(&b1, 0)? != STATE_MAGIC {
+        // Reject a stale-layout file: reinterpreting an old ChainSnapshot at the
+        // new (larger) offsets would scramble the chain. The writer reinitialises
+        // the header on a version bump, so this only skips the brief window before
+        // the matching-build daemon republishes.
+        if b1.len() < STATE_SIZE
+            || read_u32(&b1, 0)? != STATE_MAGIC
+            || read_u32(&b1, ver_off)? != STATE_VERSION
+        {
             return None;
         }
         let g1 = read_u64(&b1, gen_off)?;
@@ -629,6 +703,52 @@ mod tests {
         assert!(r.read().is_some());
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn mask_and_routing_round_trip_through_snapshot() {
+        use resonance_dsp::channel::{ChannelMask, ChannelMatrix};
+
+        let band = ApoFilter::builder()
+            .filter_type(FilterType::Peaking)
+            .freq(1000.0)
+            .gain_db(6.0)
+            .q(1.0)
+            .enabled(true)
+            .channels(2)
+            .sample_rate(48000.0)
+            .channel_mask(ChannelMask::single(0))
+            .build()
+            .unwrap();
+        let mut chain = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48000.0)
+            .add_filter(band)
+            .build();
+        chain.routing = Some(ChannelMatrix::swap(2, 0, 1));
+
+        let snap = ChainSnapshot::from_chain(&chain);
+        assert_eq!(snap.filters[0].channels, ChannelMask::single(0).bits());
+        assert_eq!(snap.route_channels, 2);
+
+        // Rebuild at the matching width: both the mask and the routing apply.
+        let rebuilt = snap.build_chain(2, 48000.0);
+        assert_eq!(rebuilt.filters.len(), 1);
+        assert_eq!(rebuilt.filters[0].mask, ChannelMask::single(0));
+        let r = rebuilt
+            .routing
+            .expect("square routing should apply at width 2");
+        assert_eq!(r.out_ch(), 2);
+        assert!(!r.is_identity());
+
+        // Rebuild at a DIFFERENT width: the 2×2 routing must NOT apply (it would
+        // misframe), but the channel-count-independent band mask still does.
+        let rebuilt6 = snap.build_chain(6, 48000.0);
+        assert!(
+            rebuilt6.routing.is_none(),
+            "square routing must match the live channel count"
+        );
+        assert_eq!(rebuilt6.filters[0].mask, ChannelMask::single(0));
     }
 
     #[test]
