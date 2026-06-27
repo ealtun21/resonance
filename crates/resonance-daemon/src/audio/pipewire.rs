@@ -68,6 +68,20 @@ struct GraphState {
     route_rx: std::sync::mpsc::Receiver<String>,
     /// Sends the current set of available sink names to the daemon state.
     sinks_tx: tokio::sync::mpsc::UnboundedSender<Vec<(String, String)>>,
+    /// Channel count the live filter is built for (= the FilterData port count).
+    /// Set at filter setup; compared against the output device's channel count
+    /// each timer tick to drive live channel-count following.
+    active_channels: usize,
+    /// When the output device's channel count changes, the timer records the new
+    /// count here and quits the loop; the reconnect path rebuilds the filter +
+    /// chain at this width, then clears it.
+    pending_channels: Option<usize>,
+    /// Debounce for device-channel detection: the count last seen + how many
+    /// consecutive 50 ms ticks it has held. A rebuild only triggers once the
+    /// count is stable, so transient counts during device enumeration (ports
+    /// appearing one-by-one) don't cause spurious rebuilds.
+    device_seen_count: usize,
+    device_seen_ticks: u8,
 }
 
 // SAFETY: only touched from the pw main-loop thread.
@@ -150,6 +164,10 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
         preferred_output: None,
         route_rx,
         sinks_tx,
+        active_channels: channels,
+        pending_channels: None,
+        device_seen_count: 0,
+        device_seen_ticks: 0,
     }));
 
     Ok(thread::Builder::new()
@@ -158,6 +176,22 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
             pw::init();
             let mut backoff = Duration::from_millis(200);
             loop {
+                // Live channel-count following: if the output device's channel
+                // count changed, the timer recorded it and quit the loop — rebuild
+                // the FilterData (ports, scratch) + chain at the new width here,
+                // before the next connection attempt re-creates the filter from
+                // `fd.in_ports.len()`. `set_channels` clamps per-band channel masks.
+                if let Some(n) = gs.lock().unwrap().pending_channels.take() {
+                    if n != fd.in_ports.len() && (1..=MAX_CH).contains(&n) {
+                        fd.in_ports = vec![std::ptr::null_mut(); n];
+                        fd.out_ports = vec![std::ptr::null_mut(); n];
+                        fd.scratch = vec![0.0; MAX_QUANTUM * n];
+                        fd.routed = vec![0.0; MAX_QUANTUM * n];
+                        fd.chain.set_channels(n);
+                        fd.logged_rate = 0.0;
+                        tracing::info!("output device is now {n}ch — rebuilt the DSP chain");
+                    }
+                }
                 // Reset the per-attempt graph view (the persistent channels +
                 // user preferences + the captured original default are kept).
                 {
@@ -260,6 +294,7 @@ fn build_and_run(fd_ptr: *mut FilterData, gs: &Arc<Mutex<GraphState>>) -> Result
     // connected (below) and the main loop runs. The borrow is dropped before then.
     let fd = unsafe { &mut *fd_ptr };
     let channels = fd.in_ports.len();
+    gs.lock().unwrap().active_channels = channels;
     let names = pw_channel_names(channels);
     let position = names.join(",");
 
@@ -354,6 +389,7 @@ fn build_and_run(fd_ptr: *mut FilterData, gs: &Arc<Mutex<GraphState>>) -> Result
     // ── Poll filter node-id, then run main loop ───────────────────────────
     // Use a timer on the loop to poll pw_filter_get_node_id.
     let gs_timer = Arc::clone(gs);
+    let quit_timer = mainloop.as_raw_ptr() as usize;
     let timer = mainloop.loop_().add_timer(move |_| {
         let node_id = unsafe { pw_sys::pw_filter_get_node_id(filter) };
         let mut g = gs_timer.lock().unwrap();
@@ -370,6 +406,38 @@ fn build_and_run(fd_ptr: *mut FilterData, gs: &Arc<Mutex<GraphState>>) -> Result
         }
         if reroute_needed {
             reroute(&mut g);
+        }
+        // Live channel-count following: when the output device's channel count
+        // differs from the filter's, record it and quit the loop so the reconnect
+        // path rebuilds the filter + chain at the new width.
+        let dev = device_channels(&g);
+        // Debounce: only act once the count has held steady (~200 ms), so ports
+        // appearing one-by-one during enumeration don't trigger a rebuild at an
+        // intermediate count.
+        if dev == g.device_seen_count {
+            g.device_seen_ticks = g.device_seen_ticks.saturating_add(1);
+        } else {
+            g.device_seen_count = dev;
+            g.device_seen_ticks = 1;
+        }
+        // Only trigger for a count the rebuild path can actually act on — the
+        // same `1..=MAX_CH` range. Otherwise an out-of-range device count (a
+        // >64-channel sink) would quit-and-not-rebuild forever (active_channels
+        // never converges), livelocking the reconnect loop. The `is_none` guard
+        // stops it re-firing every tick before the quit lands.
+        if (1..=MAX_CH).contains(&dev)
+            && dev != g.active_channels
+            && g.device_seen_ticks >= 4
+            && g.pending_channels.is_none()
+        {
+            tracing::info!(
+                "output device is {dev}ch (filter is {}ch) — rebuilding the filter",
+                g.active_channels
+            );
+            g.pending_channels = Some(dev);
+            unsafe {
+                pw_sys::pw_main_loop_quit(quit_timer as *mut pw_sys::pw_main_loop);
+            }
         }
     });
     timer
@@ -507,6 +575,52 @@ fn on_global_remove(g: &mut GraphState, id: u32) {
 // Link / routing helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// The real output sink Resonance feeds, by priority: the user-selected sink
+/// (SetOutputTarget), else PipeWire's default from before Resonance took over,
+/// else the lowest-id real sink (deterministic). `None` if none is known yet.
+fn find_target_sink(g: &GraphState) -> Option<u32> {
+    let find_sink = |name: &str| -> Option<u32> {
+        g.nodes
+            .iter()
+            .find(|(id, n)| {
+                n.media_class == "Audio/Sink" && n.name == name && **id != g.sink_node_id
+            })
+            .map(|(id, _)| *id)
+    };
+    g.preferred_output
+        .as_deref()
+        .and_then(&find_sink)
+        .or_else(|| {
+            g.original_default
+                .lock()
+                .unwrap()
+                .as_deref()
+                .and_then(&find_sink)
+        })
+        .or_else(|| {
+            g.nodes
+                .iter()
+                .filter(|(id, n)| {
+                    n.media_class == "Audio/Sink" && n.name != "resonance" && **id != g.sink_node_id
+                })
+                .min_by_key(|(id, _)| **id)
+                .map(|(id, _)| *id)
+        })
+}
+
+/// The channel count of the current output device (its input-port count), or 0
+/// when no target sink is known yet. Used to drive live channel-count following.
+fn device_channels(g: &GraphState) -> usize {
+    match find_target_sink(g) {
+        Some(tid) => g
+            .ports
+            .values()
+            .filter(|p| p.node_id == tid && !p.is_output)
+            .count(),
+        None => 0,
+    }
+}
+
 fn reroute(g: &mut GraphState) {
     let core_ptr = g.raw_core as *mut pw_sys::pw_core;
     // SAFETY: raw_core is valid for daemon lifetime; we reconstruct a temporary Core ref.
@@ -544,45 +658,7 @@ fn reroute(g: &mut GraphState) {
 
     // filter-out → real device
     if g.filter_node_id != u32::MAX {
-        // Target priority (scoped so the shared borrows end before we relink):
-        //   1. user-selected sink (SetOutputTarget)
-        //   2. PipeWire's default sink from before Resonance took over
-        //   3. any available real sink
-        let real_sink_id = {
-            let find_sink = |name: &str| -> Option<u32> {
-                g.nodes
-                    .iter()
-                    .find(|(id, n)| {
-                        n.media_class == "Audio/Sink" && n.name == name && **id != g.sink_node_id
-                    })
-                    .map(|(id, _)| *id)
-            };
-            g.preferred_output
-                .as_deref()
-                .and_then(&find_sink)
-                .or_else(|| {
-                    g.original_default
-                        .lock()
-                        .unwrap()
-                        .as_deref()
-                        .and_then(&find_sink)
-                })
-                .or_else(|| {
-                    // Deterministic fallback: the lowest-id real sink. HashMap
-                    // iteration order is random, so `find` here used to pick a
-                    // different device run-to-run when several sinks existed —
-                    // which is why the mapped profile seemed to come and go.
-                    g.nodes
-                        .iter()
-                        .filter(|(id, n)| {
-                            n.media_class == "Audio/Sink"
-                                && n.name != "resonance"
-                                && **id != g.sink_node_id
-                        })
-                        .min_by_key(|(id, _)| **id)
-                        .map(|(id, _)| *id)
-                })
-        };
+        let real_sink_id = find_target_sink(g);
         if let Some(tid) = real_sink_id {
             // Report the device name to the daemon when it changes (for output→profile mapping).
             if let Some(name) = g.nodes.get(&tid).map(|n| n.name.clone()) {
