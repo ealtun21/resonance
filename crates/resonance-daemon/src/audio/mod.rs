@@ -24,12 +24,29 @@ use anyhow::Result;
 #[cfg(not(target_os = "windows"))]
 use std::{sync::Arc, thread::JoinHandle};
 
-/// Channel count the daemon negotiates with the system audio graph.
+/// Default channel count when nothing overrides it (stereo).
 pub const CHANNELS: usize = 2;
 /// Target sample rate for the DSP chain. Backends negotiate this with the
 /// system and may fall back to whatever the device offers.
 #[allow(dead_code)] // pipewire backend + stub use it; macOS reads device rate live
 pub const SAMPLE_RATE: u32 = 48_000;
+
+/// The channel count Resonance processes. Defaults to [`CHANNELS`] (stereo) and
+/// can be overridden with `RESONANCE_CHANNELS` (1..=64) — the manual override for
+/// surround devices until automatic device-layout following lands.
+///
+/// This is the **single source of truth** for buffer width: the backend sizes
+/// its ports/scratch to it *and* the daemon builds its shadow chain at the same
+/// count, so a `ReplaceChain` from the daemon can never hand the RT thread a
+/// chain whose channel count disagrees with the live ports.
+#[allow(dead_code)] // unused on Windows (APO owns the DSP + its own width)
+pub fn target_channels() -> usize {
+    std::env::var("RESONANCE_CHANNELS")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|&n| (1..=resonance_dsp::channel::MAX_CHANNELS).contains(&n))
+        .unwrap_or(CHANNELS)
+}
 /// Capacity of the spectrum SPSC ring buffer (mono `f32` samples).
 pub const SPECTRUM_BUF: usize = 8192;
 

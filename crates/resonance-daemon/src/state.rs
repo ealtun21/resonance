@@ -105,7 +105,7 @@ impl SharedState {
         meters: Arc<AtomicMeters>,
     ) -> Self {
         let chain = ProcessorChain::builder()
-            .channels(2)
+            .channels(crate::audio::target_channels())
             .sample_rate(48000.0)
             .build();
         Self(Arc::new(Mutex::new(Inner {

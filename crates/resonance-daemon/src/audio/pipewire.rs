@@ -1,12 +1,13 @@
 //! PipeWire backend — mirrors FxSound AudioPassthruPipeWire architecture:
 //!   1. null-audio-sink "Resonance EQ" — routable device; apps play into it.
-//!   2. pw_filter "Resonance EQ Processor" — 2-in/2-out, driven by same clock
-//!      as the sink (no ring-buffer choppy artefacts).
+//!   2. pw_filter "Resonance EQ Processor" — N-in/N-out (channel count from
+//!      `target_channels()`, default stereo; override `RESONANCE_CHANNELS`),
+//!      driven by the same clock as the sink (no ring-buffer choppy artefacts).
 //!   3. Registry listener creates links: sink-monitor → filter-in,
-//!      filter-out → real device.
+//!      filter-out → real device, paired by channel label (positional fallback).
 //!   4. WirePlumber metadata sets "Resonance EQ" as system default sink.
 
-use super::{CHANNELS, SAMPLE_RATE, apply_command};
+use super::{SAMPLE_RATE, apply_command, target_channels};
 use crate::meters::{AtomicMeters, Sample, peak_rms, peak_rms_f32};
 use crate::state::AudioCommand;
 use anyhow::Result;
@@ -73,20 +74,26 @@ struct GraphState {
 unsafe impl Send for GraphState {}
 
 struct FilterData {
-    in_ports: [*mut c_void; 2],
-    out_ports: [*mut c_void; 2],
+    /// One DSP buffer pointer per channel (length = processing channel count).
+    in_ports: Vec<*mut c_void>,
+    out_ports: Vec<*mut c_void>,
     chain: ProcessorChain,
     cmd_rx: rtrb::Consumer<AudioCommand>,
     spectrum_tx: rtrb::Producer<f32>,
     /// Reusable interleaved f64 scratch buffer — avoids allocating every RT callback.
     scratch: Vec<f64>,
+    /// Second interleaved scratch for the routing matrix output (square remap).
+    routed: Vec<f64>,
     /// Live meters published to the IPC thread.
     meters: Arc<AtomicMeters>,
 }
 
 /// Pre-allocated scratch capacity: a generous upper bound on the PipeWire quantum
-/// (frames × CHANNELS). Growth in the RT callback past this is rare and handled.
+/// (frames × channels). Growth in the RT callback past this is rare and handled.
 const MAX_QUANTUM: usize = 8192;
+/// Hard ceiling on channels the RT callback gathers onto the stack (matches
+/// `resonance_dsp::channel::MAX_CHANNELS`); `target_channels()` already clamps to it.
+const MAX_CH: usize = 64;
 
 // SAFETY: only touched from pw_filter process callback (RT thread).
 unsafe impl Send for FilterData {}
@@ -103,16 +110,23 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
         sinks_tx,
         meters,
     } = ctx;
+    // Channel count is fixed for the daemon's lifetime (env override or stereo).
+    // The chain may arrive built at a different width; force it to match the ports.
+    let channels = target_channels();
+    let mut initial_chain = initial_chain;
+    initial_chain.set_channels(channels);
+
     // FilterData and GraphState persist across reconnects — the audio chain (EQ
     // state) and the daemon-facing channels must survive a PipeWire restart,
     // since they're paired with producers/receivers the daemon already holds.
     let mut fd = Box::new(FilterData {
-        in_ports: [std::ptr::null_mut(); 2],
-        out_ports: [std::ptr::null_mut(); 2],
+        in_ports: vec![std::ptr::null_mut(); channels],
+        out_ports: vec![std::ptr::null_mut(); channels],
         chain: initial_chain,
         cmd_rx,
         spectrum_tx,
-        scratch: vec![0.0; MAX_QUANTUM * CHANNELS],
+        scratch: vec![0.0; MAX_QUANTUM * channels],
+        routed: vec![0.0; MAX_QUANTUM * channels],
         meters,
     });
     let gs = Arc::new(Mutex::new(GraphState {
@@ -155,8 +169,12 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
                     g.default_set = false;
                     g.last_output = None;
                 }
-                fd.in_ports = [std::ptr::null_mut(); 2];
-                fd.out_ports = [std::ptr::null_mut(); 2];
+                fd.in_ports
+                    .iter_mut()
+                    .for_each(|p| *p = std::ptr::null_mut());
+                fd.out_ports
+                    .iter_mut()
+                    .for_each(|p| *p = std::ptr::null_mut());
                 let fd_ptr: *mut FilterData = &mut *fd;
 
                 let started = Instant::now();
@@ -229,40 +247,52 @@ fn build_and_run(fd_ptr: *mut FilterData, gs: &Arc<Mutex<GraphState>>) -> Result
         f
     };
 
-    for ch in 0..CHANNELS {
-        let (chname, inname, outname) = if ch == 0 {
-            ("FL", "input_FL", "output_FL")
-        } else {
-            ("FR", "input_FR", "output_FR")
-        };
-        unsafe {
-            (*fd_ptr).in_ports[ch] = pw_sys::pw_filter_add_port(
+    // Channel count + layout for this connection — fixed at the FilterData's port
+    // count (set in `spawn` from `target_channels()`). Reused for the sink's
+    // `audio.position` and the ready log below.
+    //
+    // SAFETY: take one `&mut` to the FilterData for port setup. Nothing else
+    // aliases it here — the RT process callback is not invoked until the filter is
+    // connected (below) and the main loop runs. The borrow is dropped before then.
+    let fd = unsafe { &mut *fd_ptr };
+    let channels = fd.in_ports.len();
+    let names = pw_channel_names(channels);
+    let position = names.join(",");
+
+    for (ch, chname) in names.iter().enumerate() {
+        let chname = chname.as_str();
+        let inname = format!("input_{chname}");
+        let outname = format!("output_{chname}");
+        fd.in_ports[ch] = unsafe {
+            pw_sys::pw_filter_add_port(
                 filter,
                 SPA_DIRECTION_INPUT,
                 pw_sys::pw_filter_port_flags_PW_FILTER_PORT_FLAG_MAP_BUFFERS,
                 std::mem::size_of::<u64>(),
                 pw_props_raw(&[
                     ("format.dsp", "32 bit float mono audio"),
-                    ("port.name", inname),
+                    ("port.name", inname.as_str()),
                     ("audio.channel", chname),
                 ]),
                 std::ptr::null_mut(),
                 0,
-            );
-            (*fd_ptr).out_ports[ch] = pw_sys::pw_filter_add_port(
+            )
+        };
+        fd.out_ports[ch] = unsafe {
+            pw_sys::pw_filter_add_port(
                 filter,
                 SPA_DIRECTION_OUTPUT,
                 pw_sys::pw_filter_port_flags_PW_FILTER_PORT_FLAG_MAP_BUFFERS,
                 std::mem::size_of::<u64>(),
                 pw_props_raw(&[
                     ("format.dsp", "32 bit float mono audio"),
-                    ("port.name", outname),
+                    ("port.name", outname.as_str()),
                     ("audio.channel", chname),
                 ]),
                 std::ptr::null_mut(),
                 0,
-            );
-        }
+            )
+        };
     }
 
     anyhow::ensure!(
@@ -285,7 +315,7 @@ fn build_and_run(fd_ptr: *mut FilterData, gs: &Arc<Mutex<GraphState>>) -> Result
             "node.name"              => "resonance",
             "node.description"       => "Resonance EQ",
             "media.class"            => "Audio/Sink",
-            "audio.position"         => "FL,FR",
+            "audio.position"         => position.as_str(),
             "monitor.channel-volumes" => "false",
             "monitor.passthrough"    => "true",
             "node.virtual"           => "true",
@@ -346,8 +376,8 @@ fn build_and_run(fd_ptr: *mut FilterData, gs: &Arc<Mutex<GraphState>>) -> Result
         .into_result()?;
 
     info!(
-        "PipeWire ready — 'Resonance EQ' is now the default output ({}ch @ {} Hz)",
-        CHANNELS, SAMPLE_RATE
+        "PipeWire ready — 'Resonance EQ' is now the default output ({}ch [{}] @ {} Hz)",
+        channels, position, SAMPLE_RATE
     );
 
     // Blocks until the connection drops (core error → pw_main_loop_quit).
@@ -588,25 +618,34 @@ fn parse_metadata_name(value: &str) -> Option<String> {
     Some(rest[start..end].to_string())
 }
 
+/// Link every source port to a destination port. Each source prefers a
+/// destination carrying the *same* `audio.channel` label (FL→FL, FC→FC, …); a
+/// source whose label has no match (or unlabeled ports) falls back to the next
+/// free destination by port-id order. Generalises the old hardcoded FL/FR pair
+/// to any channel layout, while still correctly pairing mismatched layouts.
 fn create_links(
     core: &pw::core::Core,
     srcs: &[PortMeta],
     dsts: &[PortMeta],
 ) -> Vec<pw::link::Link> {
-    let find = |ports: &[PortMeta], ch: &str| -> Option<u32> {
-        ports
-            .iter()
-            .find(|p| p.channel == ch)
-            .or_else(|| ports.first())
-            .map(|p| p.id)
-    };
+    let mut srcs_sorted = srcs.to_vec();
+    srcs_sorted.sort_by_key(|p| p.id);
+    let mut dst_used = vec![false; dsts.len()];
+
     let mut out = Vec::new();
-    for ch in ["FL", "FR"] {
-        let Some(sid) = find(srcs, ch) else { continue };
-        let Some(did) = find(dsts, ch) else { continue };
+    for s in &srcs_sorted {
+        // Prefer a free same-label destination; else the first free one (positional).
+        let pick = dsts
+            .iter()
+            .enumerate()
+            .find(|(i, d)| !dst_used[*i] && !d.channel.is_empty() && d.channel == s.channel)
+            .map(|(i, _)| i)
+            .or_else(|| dst_used.iter().position(|&used| !used));
+        let Some(di) = pick else { break };
+        dst_used[di] = true;
         let props = properties! {
-            "link.output.port" => sid.to_string(),
-            "link.input.port"  => did.to_string(),
+            "link.output.port" => s.id.to_string(),
+            "link.input.port"  => dsts[di].id.to_string(),
             "object.linger"    => "false",
         };
         if let Ok(link) = core.create_object::<pw::link::Link>("link-factory", &props) {
@@ -636,14 +675,26 @@ fn try_set_default(g: &mut GraphState) {
 // RT process callback
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Peak/RMS across two mono `f32` channel buffers (RT-thread passthrough metering).
+/// Peak/RMS across `channels` mono `f32` buffers (RT-thread passthrough metering).
+/// Peak is the max over channels; RMS is the root-mean of per-channel mean-squares
+/// — the N-channel generalisation of the old stereo helper.
 ///
 /// # Safety
-/// `a` and `b` must point to at least `n` valid `f32` samples.
-unsafe fn stereo_peak_rms(a: *const f32, b: *const f32, n: usize) -> (f32, f32) {
-    let (pa, ra) = peak_rms_f32(unsafe { std::slice::from_raw_parts(a, n) });
-    let (pb, rb) = peak_rms_f32(unsafe { std::slice::from_raw_parts(b, n) });
-    (pa.max(pb), ((ra * ra + rb * rb) / 2.0).sqrt())
+/// Each of `ptrs[..channels]` must point to at least `n` valid `f32` samples.
+unsafe fn ptrs_peak_rms(ptrs: &[*mut f32], channels: usize, n: usize) -> (f32, f32) {
+    let mut peak = 0.0f32;
+    let mut sumsq = 0.0f64;
+    for &p in &ptrs[..channels] {
+        let (pk, rms) = peak_rms_f32(unsafe { std::slice::from_raw_parts(p, n) });
+        peak = peak.max(pk);
+        sumsq += (rms as f64) * (rms as f64);
+    }
+    let rms = if channels > 0 {
+        (sumsq / channels as f64).sqrt() as f32
+    } else {
+        0.0
+    };
+    (peak, rms)
 }
 
 unsafe extern "C" fn filter_process_cb(data: *mut c_void, position: *mut spa_io_position) {
@@ -681,11 +732,17 @@ unsafe extern "C" fn filter_process_cb(data: *mut c_void, position: *mut spa_io_
         fd.meters.set_sample_rate(fd.chain.sample_rate);
         fd.meters.set_capture_rate(fd.chain.sample_rate);
 
-        let in0 = pw_sys::pw_filter_get_dsp_buffer(fd.in_ports[0], n as u32) as *mut f32;
-        let in1 = pw_sys::pw_filter_get_dsp_buffer(fd.in_ports[1], n as u32) as *mut f32;
-        let out0 = pw_sys::pw_filter_get_dsp_buffer(fd.out_ports[0], n as u32) as *mut f32;
-        let out1 = pw_sys::pw_filter_get_dsp_buffer(fd.out_ports[1], n as u32) as *mut f32;
-        if out0.is_null() || out1.is_null() {
+        // Gather the per-channel DSP buffers onto the stack (no heap on the RT
+        // path). `channels` is fixed at the FilterData's port count.
+        let channels = fd.in_ports.len();
+        let mut ins: [*mut f32; MAX_CH] = [std::ptr::null_mut(); MAX_CH];
+        let mut outs: [*mut f32; MAX_CH] = [std::ptr::null_mut(); MAX_CH];
+        for (ch, (&inp, &outp)) in fd.in_ports.iter().zip(fd.out_ports.iter()).enumerate() {
+            ins[ch] = pw_sys::pw_filter_get_dsp_buffer(inp, n as u32) as *mut f32;
+            outs[ch] = pw_sys::pw_filter_get_dsp_buffer(outp, n as u32) as *mut f32;
+        }
+        // No output buffers this cycle → nothing to write.
+        if outs[..channels].iter().any(|p| p.is_null()) {
             return;
         }
 
@@ -693,13 +750,14 @@ unsafe extern "C" fn filter_process_cb(data: *mut c_void, position: *mut spa_io_
             apply_command(&mut fd.chain, cmd);
         }
 
-        let have_in = !in0.is_null() && !in1.is_null();
+        let have_in = ins[..channels].iter().all(|p| !p.is_null());
         if !have_in || !fd.chain.enabled {
             if have_in {
-                std::ptr::copy_nonoverlapping(in0, out0, n);
-                std::ptr::copy_nonoverlapping(in1, out1, n);
+                for (&inp, &outp) in ins[..channels].iter().zip(&outs[..channels]) {
+                    std::ptr::copy_nonoverlapping(inp, outp, n);
+                }
                 // Passthrough: in == out, no DSP cost.
-                let (p, r) = stereo_peak_rms(in0, in1, n);
+                let (p, r) = ptrs_peak_rms(&outs, channels, n);
                 fd.meters.store(Sample {
                     in_peak: p,
                     out_peak: p,
@@ -710,41 +768,62 @@ unsafe extern "C" fn filter_process_cb(data: *mut c_void, position: *mut spa_io_
                     dsp_frame_us: 0,
                 });
             } else {
-                std::ptr::write_bytes(out0, 0, n * std::mem::size_of::<f32>());
-                std::ptr::write_bytes(out1, 0, n * std::mem::size_of::<f32>());
+                for &outp in &outs[..channels] {
+                    std::ptr::write_bytes(outp, 0, n * std::mem::size_of::<f32>());
+                }
                 fd.meters.store(Sample::default());
             }
-            // Keep the spectrum ring fed even while bypassed (power off) or with
-            // no input: read the output we just wrote — the live passthrough
-            // signal, or the silence we zeroed. Without this the ring starves,
-            // the FFT task re-runs on its last full buffer forever, and the
-            // analyzer freezes on the frame captured the instant power went off.
+            // Keep the spectrum ring fed even while bypassed (power off) or with no
+            // input: feed the mono mix of the output we just wrote. Without this
+            // the ring starves and the analyzer freezes on its last full buffer.
             let sn = n.min(fd.spectrum_tx.slots());
             for i in 0..sn {
-                let _ = fd.spectrum_tx.push((*out0.add(i) + *out1.add(i)) * 0.5);
+                let mut acc = 0.0f32;
+                for &outp in &outs[..channels] {
+                    acc += *outp.add(i);
+                }
+                let _ = fd.spectrum_tx.push(acc / channels as f32);
             }
             return;
         }
 
-        // Reuse the pre-allocated scratch buffer (grows only if the quantum exceeds
+        // Reuse the pre-allocated scratch buffers (grow only if the quantum exceeds
         // MAX_QUANTUM, which is rare); no per-callback heap allocation in steady state.
-        let need = n * 2;
+        let need = n * channels;
         if fd.scratch.len() < need {
             fd.scratch.resize(need, 0.0);
         }
-        let buf = &mut fd.scratch[..need];
-        for i in 0..n {
-            buf[i * 2] = *in0.add(i) as f64;
-            buf[i * 2 + 1] = *in1.add(i) as f64;
+        if fd.routed.len() < need {
+            fd.routed.resize(need, 0.0);
         }
-        let (in_peak, in_rms) = peak_rms(buf);
-        let t0 = Instant::now();
-        fd.chain.process(buf);
-        let dt = t0.elapsed();
-        let (out_peak, out_rms) = peak_rms(buf);
         for i in 0..n {
-            *out0.add(i) = buf[i * 2] as f32;
-            *out1.add(i) = buf[i * 2 + 1] as f32;
+            for (ch, &inp) in ins[..channels].iter().enumerate() {
+                fd.scratch[i * channels + ch] = *inp.add(i) as f64;
+            }
+        }
+        let (in_peak, in_rms) = peak_rms(&fd.scratch[..need]);
+        let t0 = Instant::now();
+        fd.chain.process(&mut fd.scratch[..need]);
+        // Output routing: a square remap (swap / per-channel gain) maps the
+        // processed channels onto the same number of ports. A non-square matrix
+        // can't change the fixed port count here, so it's skipped — full
+        // up/downmix is the daemon-path backends' job (macOS), not the in-graph
+        // filter's. `route` copies when there's no matrix or it's identity.
+        let route_applies = matches!(&fd.chain.routing, Some(m) if m.out_ch() == channels);
+        if route_applies {
+            fd.chain.route(&fd.scratch[..need], &mut fd.routed[..need]);
+        }
+        let out_buf: &[f64] = if route_applies {
+            &fd.routed[..need]
+        } else {
+            &fd.scratch[..need]
+        };
+        let dt = t0.elapsed();
+        let (out_peak, out_rms) = peak_rms(out_buf);
+        for i in 0..n {
+            for (ch, &outp) in outs[..channels].iter().enumerate() {
+                *outp.add(i) = out_buf[i * channels + ch] as f32;
+            }
         }
 
         // DSP load = process time / the block's real-time budget (n / sample_rate).
@@ -764,11 +843,14 @@ unsafe extern "C" fn filter_process_cb(data: *mut c_void, position: *mut spa_io_
             dsp_frame_us: dt.as_micros() as u32,
         });
 
+        // Spectrum: mono mix of the final output, per frame.
         let sn = n.min(fd.spectrum_tx.slots());
         for i in 0..sn {
-            let _ = fd
-                .spectrum_tx
-                .push((buf[i * 2] + buf[i * 2 + 1]) as f32 * 0.5);
+            let mut acc = 0.0f64;
+            for ch in 0..channels {
+                acc += out_buf[i * channels + ch];
+            }
+            let _ = fd.spectrum_tx.push((acc / channels as f64) as f32);
         }
     }
 }
@@ -776,6 +858,18 @@ unsafe extern "C" fn filter_process_cb(data: *mut c_void, position: *mut spa_io_
 // ─────────────────────────────────────────────────────────────────────────────
 // Raw pw_properties helper (for pw_filter FFI only)
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// SPA channel-position names for `channels` ports. Uses the standard WAVE-order
+/// names for 1..=8 (matching `resonance_ipc::default_channel_layout`, all valid
+/// SPA positions); beyond 8 falls back to `AUX0..` (also valid SPA names) since
+/// there are no further standard positions.
+fn pw_channel_names(channels: usize) -> Vec<String> {
+    if (1..=8).contains(&channels) {
+        resonance_ipc::default_channel_layout(channels)
+    } else {
+        (0..channels).map(|i| format!("AUX{i}")).collect()
+    }
+}
 
 fn pw_props_raw(pairs: &[(&str, &str)]) -> *mut pw_sys::pw_properties {
     use std::ffi::CString;

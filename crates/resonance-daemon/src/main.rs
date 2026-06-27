@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
     let (sinks_tx, mut sinks_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<(String, String)>>();
 
     let initial_chain = ProcessorChain::builder()
-        .channels(2)
+        .channels(audio::target_channels())
         .sample_rate(48000.0)
         .build();
 
