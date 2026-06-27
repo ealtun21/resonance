@@ -389,16 +389,15 @@ fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
     // Reference overlay (target / measurement / result), when active. Each
     // series is a polyline in the same (log10 freq, dB) space as the EQ curve;
     // clamp dB to the chart's ±range so an out-of-range curve doesn't jump.
-    let ref_runs: Vec<(Color, Vec<(f64, f64)>)> = app
-        .reference
-        .series(
-            &bands,
-            sr,
-            n_points,
-            log_min,
-            log_max,
-            if app.reference.normalized { 1.0 } else { 0.0 },
-        )
+    let ref_series = app.reference.series(
+        &bands,
+        sr,
+        n_points,
+        log_min,
+        log_max,
+        if app.reference.normalized { 1.0 } else { 0.0 },
+    );
+    let ref_runs: Vec<(Color, Vec<(f64, f64)>)> = ref_series
         .iter()
         .map(|s| {
             // Result is white (the curve you shape onto the target); yellow is
@@ -416,6 +415,31 @@ fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
             (color, pts)
         })
         .collect();
+
+    // Listener-preference tolerance band around the target (asymmetric): two
+    // faint lines at target ± preference_bounds, drawn under the overlay.
+    let bound_runs: Vec<Vec<(f64, f64)>> = if app.reference.show_bounds {
+        ref_series
+            .iter()
+            .find(|s| s.role == SeriesRole::Target)
+            .map(|t| {
+                let edge = |sign: f64| {
+                    t.pts
+                        .iter()
+                        .map(|&(lf, ty)| {
+                            let (below, above) =
+                                resonance_reference::reference::preference_bounds(10f64.powf(lf));
+                            let d = if sign > 0.0 { above } else { -below };
+                            (lf, (ty + d).clamp(-DB_RANGE, DB_RANGE))
+                        })
+                        .collect::<Vec<_>>()
+                };
+                vec![edge(1.0), edge(-1.0)]
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     // Colour-code the response by gain sign: boost green, cut red, neutral cyan
     // near 0 dB (matches the GUI's gain-signed curve tint). Build it from the
@@ -435,6 +459,16 @@ fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(Style::default().fg(*color))
+                .data(pts),
+        );
+    }
+    // Tolerance band first (faint), so the overlay lines sit on top of it.
+    for pts in &bound_runs {
+        datasets.push(
+            Dataset::default()
+                .marker(symbols::Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Style::default().fg(Color::Rgb(70, 70, 95)))
                 .data(pts),
         );
     }
@@ -1319,7 +1353,7 @@ fn settings_footer_hint(s: &SettingsState) -> String {
         2 => "  •  [Enter] route  [m] map to profile",
         3 => "  •  [Enter/Space] edit/toggle",
         4 => "  •  [Enter] run action",
-        5 => "  •  [Enter] toggle / cycle / load / fit",
+        5 => "  •  [Enter] act  [+/-] customizer",
         _ => "",
     };
     format!("{base}{ctx}")
@@ -1371,7 +1405,7 @@ fn render_tab_reference(s: &SettingsState, app: &App, frame: &mut Frame, area: R
     } else {
         "fit measurement → target".to_string()
     };
-    let rows: [(&str, String, &str); 6] = [
+    let rows: [(&str, String, &str); 12] = [
         (
             "Reference",
             on(r.enabled).to_string(),
@@ -1393,6 +1427,37 @@ fn render_tab_reference(s: &SettingsState, app: &App, frame: &mut Frame, area: R
             "Normalize",
             on(r.normalized).to_string(),
             "(re-baseline onto the target → flat 0)",
+        ),
+        (
+            "Preference bounds",
+            on(r.show_bounds).to_string(),
+            "(shade the listener-tolerance band)",
+        ),
+        // Customizer: stacks tilt/bass/ear/treble onto the active target.
+        (
+            "Tilt",
+            format!("{:+.1} dB/oct", r.adj_tilt),
+            "([+/-] tilt the target)",
+        ),
+        (
+            "Bass",
+            format!("{:+.1} dB", r.adj_bass),
+            "([+/-] bass shelf)",
+        ),
+        (
+            "Ear gain",
+            format!("{:+.1} dB", r.adj_ear),
+            "([+/-] ear gain)",
+        ),
+        (
+            "Treble",
+            format!("{:+.1} dB", r.adj_treble),
+            "([+/-] treble shelf)",
+        ),
+        (
+            "Reset customizer",
+            String::new(),
+            "(Enter zeroes tilt/bass/ear/treble)",
         ),
     ];
 
@@ -1419,7 +1484,7 @@ fn render_tab_reference(s: &SettingsState, app: &App, frame: &mut Frame, area: R
 
     // Hint when enabled but nothing to show yet (no measurement → inactive).
     if r.enabled && !r.active() {
-        let y = area.y + 7;
+        let y = area.y + rows.len() as u16 + 1;
         if y < area.y + area.height {
             frame.render_widget(
                 Paragraph::new("  load a measurement to see the overlay")
@@ -2062,12 +2127,46 @@ mod tests {
         ss.tab = 5; // Reference
         app.mode = InputMode::Settings(ss);
         let text = render_to_text(&app, 120, 44);
-        for needle in ["Reference", "Target", "Measurement", "Auto-EQ", "Normalize"] {
+        for needle in [
+            "Reference",
+            "Target",
+            "Measurement",
+            "Auto-EQ",
+            "Normalize",
+            "Preference bounds",
+            "Tilt",
+            "Bass",
+            "Treble",
+            "Reset customizer",
+        ] {
             assert!(
                 text.contains(needle),
                 "reference tab missing {needle}:\n{text}"
             );
         }
+    }
+
+    #[test]
+    fn reference_customizer_adjust_is_reference_tab_only() {
+        let mut app = App::new();
+        app.state = Some(fixture(2));
+        let mut ss = crate::settings::SettingsState::new(vec![], vec![], vec![]);
+        ss.tab = 5;
+        ss.cursor = 7; // Tilt
+        app.mode = InputMode::Settings(ss);
+        app.settings_adjust(1.0);
+        assert!(app.reference.adj_tilt > 0.0, "tilt should increase");
+        // +/- is a no-op on a non-Reference tab.
+        if let InputMode::Settings(s) = &mut app.mode {
+            s.tab = 3;
+            s.cursor = 0;
+        }
+        let before = app.reference.adj_tilt;
+        app.settings_adjust(1.0);
+        assert_eq!(
+            app.reference.adj_tilt, before,
+            "customizer adjust only applies on the Reference tab"
+        );
     }
 
     #[test]
@@ -2089,8 +2188,9 @@ mod tests {
             app.reference.set_target(sel);
         }
         app.reference.enabled = true;
+        app.reference.show_bounds = true; // exercise the tolerance-band path too
         assert!(app.reference.active(), "measurement + enabled → active");
-        // The overlay path must render without panicking.
+        // The overlay + bounds path must render without panicking.
         let text = render_to_text(&app, 120, 44);
         assert!(!text.trim().is_empty());
     }
