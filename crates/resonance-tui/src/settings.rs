@@ -124,9 +124,9 @@ impl SettingsState {
             2 => self.sinks.len().saturating_sub(1),
             3 => 4,
             4 => 3, // Daemon: Start / Stop / Restart / Autostart
-            // Reference: on / target / measurement / autoeq / show-meas /
-            // normalize / bounds / tilt / bass / ear / treble / reset.
-            5 => 11,
+            // Reference: on / target / measurement / browse-online / autoeq /
+            // show-meas / normalize / bounds / tilt / bass / ear / treble / reset.
+            5 => 12,
             _ => 0,
         }
     }

@@ -5,6 +5,7 @@ use resonance_ipc::{
     RoutingMatrix,
     transport::{SyncClient as IpcClient, TransportError},
 };
+use resonance_reference::download::{self, Catalog, DlCmd, DlEvent, ModelEntry, TargetEntry};
 use resonance_reference::reference::ReferenceState;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -13,6 +14,15 @@ use std::time::{Duration, Instant};
 struct AutoEqDone {
     preamp_db: f64,
     bands: Vec<BandState>,
+}
+
+/// Which squig.link list the online browser is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SquigTab {
+    /// Headphone/IEM measurements (loaded as the active measurement).
+    Models,
+    /// Target curves (added to the target library).
+    Targets,
 }
 
 /// Spectrum envelope time constants: bars snap up, glide down.
@@ -61,6 +71,13 @@ pub enum InputMode {
         mask: ChannelMask,
         cursor: usize,
     },
+    /// squig.link online browser: search + pick a measurement (or target) from
+    /// the federated catalog. `cursor` indexes into the query-filtered list.
+    SquigBrowse {
+        tab: SquigTab,
+        query: String,
+        cursor: usize,
+    },
     Help,
 }
 
@@ -101,6 +118,15 @@ pub struct App {
     autoeq_tx: Sender<AutoEqDone>,
     autoeq_rx: Receiver<AutoEqDone>,
     pub autoeq_busy: bool,
+    /// squig.link downloader: command sender + event receiver, plus the latest
+    /// catalog snapshot and busy/status (drained by `pump_downloads`).
+    dl_tx: Sender<DlCmd>,
+    dl_rx: Receiver<DlEvent>,
+    pub catalog: Option<Catalog>,
+    pub dl_busy: bool,
+    pub dl_status: String,
+    /// Whether `DlCmd::Init` has been sent (catalog warmed lazily on first open).
+    dl_inited: bool,
 }
 
 /// A restorable snapshot of the editable chain state (for undo/redo).
@@ -116,6 +142,11 @@ impl App {
     pub fn new() -> Self {
         let prefs = crate::prefs::Prefs::load();
         let (autoeq_tx, autoeq_rx) = std::sync::mpsc::channel();
+        // Spawn the squig.link downloader worker idle (no Init yet — the catalog
+        // is warmed lazily the first time the online browser opens, so a plain
+        // TUI launch never touches the network). The TUI polls, so the wake
+        // callback is a no-op.
+        let (dl_tx, dl_rx) = download::spawn(std::sync::Arc::new(|| {}));
         Self {
             state: None,
             running: true,
@@ -139,6 +170,12 @@ impl App {
             autoeq_tx,
             autoeq_rx,
             autoeq_busy: false,
+            dl_tx,
+            dl_rx,
+            catalog: None,
+            dl_busy: false,
+            dl_status: String::new(),
+            dl_inited: false,
         }
     }
 
@@ -990,6 +1027,141 @@ impl App {
         }
     }
 
+    // ── squig.link online browser ────────────────────────────────────────────
+
+    /// Open the online browser, warming the catalog from cache on first open
+    /// (the network warm-up happens on the downloader's background thread).
+    pub fn begin_squig_browse(&mut self) {
+        if !self.dl_inited {
+            let _ = self.dl_tx.send(DlCmd::Init);
+            self.dl_inited = true;
+            self.dl_busy = true;
+        }
+        self.mode = InputMode::SquigBrowse {
+            tab: SquigTab::Models,
+            query: String::new(),
+            cursor: 0,
+        };
+    }
+
+    /// Drain downloader events each loop iteration: catalog/status/busy updates,
+    /// install a fetched measurement (and close the browser), or add a fetched
+    /// target to the library.
+    pub fn pump_downloads(&mut self) {
+        while let Ok(ev) = self.dl_rx.try_recv() {
+            match ev {
+                DlEvent::Catalog(c) => self.catalog = Some(c),
+                DlEvent::Status(s) => self.dl_status = s,
+                DlEvent::Busy(b) => self.dl_busy = b,
+                DlEvent::Fetched(f) => {
+                    let name = f.name.clone();
+                    self.reference.enabled = true;
+                    self.reference
+                        .set_measurement(f.name, f.iem, f.left, f.right);
+                    self.set_status(format!("loaded measurement: {name}"));
+                    if matches!(self.mode, InputMode::SquigBrowse { .. }) {
+                        self.mode = InputMode::Normal;
+                    }
+                }
+                DlEvent::FetchedTarget { name, curve } => {
+                    self.reference.write_target(&name, &curve);
+                    self.set_status(format!("added target: {name}"));
+                }
+            }
+        }
+    }
+
+    /// Length of the currently-filtered squig list (for cursor clamping).
+    fn squig_len(&self) -> usize {
+        let (tab, query) = match &self.mode {
+            InputMode::SquigBrowse { tab, query, .. } => (*tab, query.as_str()),
+            _ => return 0,
+        };
+        let Some(cat) = &self.catalog else {
+            return 0;
+        };
+        match tab {
+            SquigTab::Models => squig_filter_models(cat, query).len(),
+            SquigTab::Targets => squig_filter_targets(cat, query).len(),
+        }
+    }
+
+    pub fn squig_move(&mut self, delta: i32) {
+        let len = self.squig_len();
+        if let InputMode::SquigBrowse { cursor, .. } = &mut self.mode {
+            if len == 0 {
+                *cursor = 0;
+                return;
+            }
+            let max = len as i32 - 1;
+            *cursor = (*cursor as i32 + delta).clamp(0, max) as usize;
+        }
+    }
+
+    pub fn squig_switch_tab(&mut self) {
+        if let InputMode::SquigBrowse { tab, cursor, .. } = &mut self.mode {
+            *tab = match *tab {
+                SquigTab::Models => SquigTab::Targets,
+                SquigTab::Targets => SquigTab::Models,
+            };
+            *cursor = 0;
+        }
+    }
+
+    pub fn squig_query_char(&mut self, c: char) {
+        if let InputMode::SquigBrowse { query, cursor, .. } = &mut self.mode {
+            query.push(c);
+            *cursor = 0;
+        }
+    }
+
+    pub fn squig_backspace(&mut self) {
+        if let InputMode::SquigBrowse { query, cursor, .. } = &mut self.mode {
+            query.pop();
+            *cursor = 0;
+        }
+    }
+
+    pub fn squig_refresh(&mut self) {
+        let _ = self.dl_tx.send(DlCmd::Refresh);
+        self.dl_busy = true;
+        self.set_status("refreshing squig.link catalog…");
+    }
+
+    /// Fetch the selected entry: a measurement (→ active measurement) or a
+    /// target curve (→ target library). The fetch runs on the worker thread.
+    pub fn squig_enter(&mut self) {
+        let (tab, query, cursor) = match &self.mode {
+            InputMode::SquigBrowse { tab, query, cursor } => (*tab, query.clone(), *cursor),
+            _ => return,
+        };
+        // Resolve the command in a scope so the catalog borrow ends before we
+        // mutate `self` (dl_busy / status) below.
+        let cmd = {
+            let Some(cat) = &self.catalog else {
+                return;
+            };
+            match tab {
+                SquigTab::Models => squig_filter_models(cat, &query)
+                    .get(cursor)
+                    .map(|m| DlCmd::Fetch((*m).clone())),
+                SquigTab::Targets => squig_filter_targets(cat, &query)
+                    .get(cursor)
+                    .map(|t| DlCmd::FetchTarget((*t).clone())),
+            }
+        };
+        if let Some(cmd) = cmd {
+            let fetching_target = matches!(cmd, DlCmd::FetchTarget(_));
+            let _ = self.dl_tx.send(cmd);
+            self.dl_busy = true;
+            self.set_status(if fetching_target {
+                "fetching target…"
+            } else {
+                "fetching measurement…"
+            });
+        }
+    }
+
     pub fn preamp_adjust(&mut self, delta: f64) {
         let current = self.state.as_ref().map(|s| s.preamp_db).unwrap_or(0.0);
         let new_db = ((current + delta) * 10.0).round() / 10.0;
@@ -1286,11 +1458,12 @@ impl App {
             0 => self.reference.enabled = !self.reference.enabled,
             1 => self.cycle_reference_target(),
             2 => self.begin_browse_measurement(),
-            3 => self.run_autoeq(),
-            4 => self.reference.show_measurement = !self.reference.show_measurement,
-            5 => self.reference.normalized = !self.reference.normalized,
-            6 => self.reference.show_bounds = !self.reference.show_bounds,
-            11 => {
+            3 => self.begin_squig_browse(),
+            4 => self.run_autoeq(),
+            5 => self.reference.show_measurement = !self.reference.show_measurement,
+            6 => self.reference.normalized = !self.reference.normalized,
+            7 => self.reference.show_bounds = !self.reference.show_bounds,
+            12 => {
                 // Reset the customizer to a flat (no-adjustment) target.
                 self.reference.adj_tilt = 0.0;
                 self.reference.adj_bass = 0.0;
@@ -1315,11 +1488,11 @@ impl App {
         let r = &mut self.reference;
         match cursor {
             // Tilt is gentle (dB/oct), the gain bands coarser (dB). Ranges mirror
-            // the GUI customizer sliders.
-            7 => r.adj_tilt = (r.adj_tilt + dir * 0.1).clamp(-2.0, 1.0),
-            8 => r.adj_bass = (r.adj_bass + dir * 0.5).clamp(-12.0, 18.0),
-            9 => r.adj_ear = (r.adj_ear + dir * 0.5).clamp(-12.0, 12.0),
-            10 => r.adj_treble = (r.adj_treble + dir * 0.5).clamp(-12.0, 12.0),
+            // the GUI customizer sliders. (Rows 8–11; 3=Browse online shifted them.)
+            8 => r.adj_tilt = (r.adj_tilt + dir * 0.1).clamp(-2.0, 1.0),
+            9 => r.adj_bass = (r.adj_bass + dir * 0.5).clamp(-12.0, 18.0),
+            10 => r.adj_ear = (r.adj_ear + dir * 0.5).clamp(-12.0, 12.0),
+            11 => r.adj_treble = (r.adj_treble + dir * 0.5).clamp(-12.0, 12.0),
             _ => return,
         }
         self.reference.rebuild_target();
@@ -1583,4 +1756,34 @@ pub fn fx_intensity(state: &DaemonState, idx: usize) -> f64 {
 
 pub fn fx_enabled(state: &DaemonState, idx: usize) -> bool {
     state.effects.get(fx_effect_at(idx)).1
+}
+
+// ── squig.link catalog filtering (shared by the browser actions + renderer) ──
+
+/// Models whose display name or source contains the (case-insensitive) query.
+pub(crate) fn squig_filter_models<'a>(catalog: &'a Catalog, query: &str) -> Vec<&'a ModelEntry> {
+    let q = query.to_lowercase();
+    catalog
+        .models
+        .iter()
+        .filter(|m| {
+            q.is_empty()
+                || m.display.to_lowercase().contains(&q)
+                || m.source.to_lowercase().contains(&q)
+        })
+        .collect()
+}
+
+/// Target curves whose name or source contains the (case-insensitive) query.
+pub(crate) fn squig_filter_targets<'a>(catalog: &'a Catalog, query: &str) -> Vec<&'a TargetEntry> {
+    let q = query.to_lowercase();
+    catalog
+        .targets
+        .iter()
+        .filter(|t| {
+            q.is_empty()
+                || t.name.to_lowercase().contains(&q)
+                || t.source.to_lowercase().contains(&q)
+        })
+        .collect()
 }
