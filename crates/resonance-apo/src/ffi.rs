@@ -694,7 +694,10 @@ mod hires_harness {
             (l - 12.0).abs() < 1.5,
             "masked channel 0 (L) should boost +12 dB, got {l:.2}"
         );
-        assert!(r.abs() < 1.0, "unmasked channel 1 (R) should be ~0 dB, got {r:.2}");
+        assert!(
+            r.abs() < 1.0,
+            "unmasked channel 1 (R) should be ~0 dB, got {r:.2}"
+        );
     }
 
     #[test]
