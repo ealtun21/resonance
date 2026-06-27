@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
     let (sinks_tx, mut sinks_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<(String, String)>>();
 
     let initial_chain = ProcessorChain::builder()
-        .channels(2)
+        .channels(audio::target_channels())
         .sample_rate(48000.0)
         .build();
 
@@ -262,7 +262,12 @@ fn apply_profile(name: &str, state: &state::SharedState) -> Result<(), String> {
     let profile = Profile::load(name)?;
     let (sr, channels) = {
         let inner = state.0.lock().unwrap();
-        (inner.chain.sample_rate, inner.chain.channels)
+        // Live RT rate, not the frozen shadow rate (see SharedState::rebuild_chain).
+        let sr = inner
+            .meters
+            .sample_rate()
+            .unwrap_or(inner.chain.sample_rate);
+        (sr, inner.chain.channels)
     };
     let chain_rt = profile.clone().into_chain(channels, sr);
     let chain_shadow = profile.into_chain(channels, sr);

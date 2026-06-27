@@ -182,6 +182,7 @@ pub fn fit_graphic_eq(points: &[(f64, f64)]) -> (f64, Vec<EqBand>) {
             gain_db: (f.gain * 10.0).round() / 10.0,
             q: (f.q * 100.0).round() / 100.0,
             enabled: true,
+            channels: u64::MAX,
         })
         .collect();
     bands.sort_by(|a, b| {

@@ -1,6 +1,10 @@
 use crate::meters::AtomicMeters;
+use resonance_dsp::channel::{ChannelMask, ChannelMatrix};
 use resonance_dsp::{chain::FxEffect, chain::ProcessorChain};
-use resonance_ipc::{BandState, BandType, DaemonState, EffectsState, FxEffectId};
+use resonance_ipc::{
+    BandState, BandType, DaemonState, EffectsState, FxEffectId, RoutingMatrix,
+    default_channel_layout,
+};
 use rtrb::Producer;
 use std::sync::{Arc, Mutex};
 
@@ -44,6 +48,15 @@ pub enum AudioCommand {
     SetBandType {
         index: usize,
         band_type: BandType,
+    },
+    /// Retarget an existing band to a channel subset (per-channel EQ).
+    SetBandChannels {
+        index: usize,
+        mask: ChannelMask,
+    },
+    /// Install (or clear) the output routing/remap matrix.
+    SetRouting {
+        matrix: Option<ChannelMatrix>,
     },
 }
 
@@ -92,7 +105,7 @@ impl SharedState {
         meters: Arc<AtomicMeters>,
     ) -> Self {
         let chain = ProcessorChain::builder()
-            .channels(2)
+            .channels(crate::audio::target_channels())
             .sample_rate(48000.0)
             .build();
         Self(Arc::new(Mutex::new(Inner {
@@ -206,6 +219,7 @@ impl SharedState {
                 gain_db: f.gain_db,
                 q: f.q,
                 enabled: f.enabled,
+                channels: resonance_ipc::ChannelMask::from_dsp(f.mask),
             })
             .collect();
 
@@ -230,6 +244,9 @@ impl SharedState {
             // Capture rate; equals the DSP rate unless a backend is resampling.
             capture_rate: inner.meters.capture_rate().unwrap_or(dsp_rate),
             channels: chain.channels,
+            out_channels: chain.out_channels(),
+            channel_layout: default_channel_layout(chain.channels),
+            routing: chain.routing.as_ref().map(RoutingMatrix::from_dsp),
             spectrum: inner.spectrum.to_vec(),
             active_output: inner.active_output.clone(),
             mapped_profile: inner.mapped_profile.clone(),
@@ -261,7 +278,17 @@ impl SharedState {
     pub fn rebuild_chain(&self, build: impl Fn(usize, f64) -> ProcessorChain) {
         let (channels, sample_rate) = {
             let inner = self.0.lock().unwrap();
-            (inner.chain.channels, inner.chain.sample_rate)
+            // Prefer the live rate the RT thread reports — the shadow chain's
+            // `sample_rate` stays frozen at its construction rate (the RT chain
+            // follows the graph via `rebind_sample_rate`, but never writes back),
+            // so building from it would briefly run wrong-rate coefficients on an
+            // off-48k graph until the next RT block re-binds. Same workaround as
+            // `snapshot`.
+            let sr = inner
+                .meters
+                .sample_rate()
+                .unwrap_or(inner.chain.sample_rate);
+            (inner.chain.channels, sr)
         };
         self.replace_chain(build(channels, sample_rate), build(channels, sample_rate));
     }

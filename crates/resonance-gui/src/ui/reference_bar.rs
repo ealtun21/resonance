@@ -964,6 +964,7 @@ impl GuiApp {
                         gain_db: fl.gain_db,
                         q: fl.q,
                         enabled: true,
+                        channels: resonance_ipc::ChannelMask::ALL,
                     })
                     .collect();
                 let _ = tx.send(crate::app::AutoEqOutcome {

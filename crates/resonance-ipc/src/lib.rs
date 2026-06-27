@@ -1,4 +1,5 @@
 use resonance_dsp::chain::FxEffect;
+use resonance_dsp::channel::{ChannelMask as DspMask, ChannelMatrix as DspMatrix};
 use resonance_dsp::filter::FilterType;
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +11,128 @@ pub mod transport;
 
 pub const SOCKET_PATH_ENV: &str = "RESONANCE_SOCKET";
 pub const DEFAULT_SOCKET_FILENAME: &str = "resonance.sock";
+
+/// Serializable channel-targeting bitset — the wire/disk mirror of
+/// `resonance_dsp::channel::ChannelMask` (kept here so resonance-dsp stays
+/// serde-free, exactly as [`BandType`] mirrors the DSP `FilterType`).
+/// `ALL` is the default and means "every channel", independent of count.
+///
+/// Serde note: the bitset is (de)serialized as an `i64` bit-cast of the `u64`,
+/// **not** as a plain `u64`. TOML integers are signed 64-bit, so the default
+/// `ALL` (`u64::MAX`) would overflow a `u64` field on save; `u64::MAX as i64`
+/// is `-1`, which round-trips cleanly through TOML, JSON and postcard alike. A
+/// hand-written impl is required because `skip_serializing_if` is unusable here
+/// (postcard is not self-describing, so a skipped field corrupts the stream).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChannelMask(pub u64);
+
+impl Serialize for ChannelMask {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_i64(self.0 as i64)
+    }
+}
+
+impl<'de> Deserialize<'de> for ChannelMask {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(ChannelMask(i64::deserialize(d)? as u64))
+    }
+}
+
+impl ChannelMask {
+    pub const ALL: ChannelMask = ChannelMask(u64::MAX);
+    pub const NONE: ChannelMask = ChannelMask(0);
+
+    pub fn single(ch: usize) -> Self {
+        Self::from_dsp(DspMask::single(ch))
+    }
+
+    pub fn from_indices<I: IntoIterator<Item = usize>>(it: I) -> Self {
+        Self::from_dsp(DspMask::from_indices(it))
+    }
+
+    pub fn contains(self, ch: usize) -> bool {
+        self.to_dsp().contains(ch)
+    }
+
+    pub fn with(self, ch: usize) -> Self {
+        Self::from_dsp(self.to_dsp().with(ch))
+    }
+
+    pub fn without(self, ch: usize) -> Self {
+        Self::from_dsp(self.to_dsp().without(ch))
+    }
+
+    /// True when every channel in `0..channels` is selected (a global band).
+    pub fn is_global(self, channels: usize) -> bool {
+        self.to_dsp().is_global(channels)
+    }
+
+    pub fn to_dsp(self) -> DspMask {
+        DspMask::from_bits(self.0)
+    }
+
+    pub fn from_dsp(m: DspMask) -> Self {
+        ChannelMask(m.bits())
+    }
+}
+
+impl Default for ChannelMask {
+    fn default() -> Self {
+        ChannelMask::ALL
+    }
+}
+
+/// Serializable channel routing/remap matrix — the wire mirror of
+/// `resonance_dsp::channel::ChannelMatrix` (`out_ch × in_ch`, row-major gains).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoutingMatrix {
+    pub in_ch: usize,
+    pub out_ch: usize,
+    /// Row-major, length `out_ch * in_ch`: `gains[o * in_ch + i]`.
+    pub gains: Vec<f64>,
+}
+
+impl RoutingMatrix {
+    /// Validate + convert to the DSP matrix. `None` if dimensions are bad.
+    pub fn to_dsp(&self) -> Option<DspMatrix> {
+        DspMatrix::new(self.in_ch, self.out_ch, self.gains.clone())
+    }
+
+    pub fn from_dsp(m: &DspMatrix) -> Self {
+        Self {
+            in_ch: m.in_ch(),
+            out_ch: m.out_ch(),
+            gains: m.gains().to_vec(),
+        }
+    }
+
+    pub fn identity(channels: usize) -> Self {
+        Self::from_dsp(&DspMatrix::identity(channels))
+    }
+
+    pub fn swap(channels: usize, a: usize, b: usize) -> Self {
+        Self::from_dsp(&DspMatrix::swap(channels, a, b))
+    }
+}
+
+/// Standard channel position labels for a given count (WAVE / PipeWire order),
+/// for UI display and APO `Channel:` mapping. Unknown counts fall back to
+/// `CH0..CHn`.
+pub fn default_channel_layout(channels: usize) -> Vec<String> {
+    let labels: &[&str] = match channels {
+        0 => &[],
+        1 => &["MONO"],
+        2 => &["FL", "FR"],
+        3 => &["FL", "FR", "FC"],
+        4 => &["FL", "FR", "RL", "RR"],
+        5 => &["FL", "FR", "FC", "RL", "RR"],
+        6 => &["FL", "FR", "FC", "LFE", "RL", "RR"],
+        7 => &["FL", "FR", "FC", "LFE", "RC", "SL", "SR"],
+        8 => &["FL", "FR", "FC", "LFE", "RL", "RR", "SL", "SR"],
+        _ => return (0..channels).map(|i| format!("CH{i}")).collect(),
+    };
+    labels.iter().map(|s| s.to_string()).collect()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Command {
@@ -99,6 +222,22 @@ pub enum Command {
     FollowSystemOutput,
     /// Stop the daemon
     Shutdown,
+    // ── N-channel commands ───────────────────────────────────────────────────
+    // IMPORTANT: keep these LAST. postcard encodes enum variants by ordinal with
+    // no names, and the IPC wire is unversioned, so inserting a variant mid-enum
+    // shifts every later variant's ordinal and silently misdecodes commands from
+    // a mismatched (older) client. New variants must always be appended here.
+    /// Restrict (or widen) which channels an existing band applies to.
+    /// `ChannelMask::ALL` makes the band global again (the default).
+    SetBandChannels { index: usize, channels: ChannelMask },
+    /// Set the output routing/remap matrix. In-graph (PipeWire) only a square
+    /// remap at the current channel count is applied; up/downmix is daemon-path.
+    SetChannelRouting { matrix: RoutingMatrix },
+    /// Swap two output channels — convenience over a swap routing matrix, built
+    /// by the daemon at the current channel count.
+    SwapChannels { a: usize, b: usize },
+    /// Clear routing: straight passthrough at the processing channel count.
+    ClearRouting,
 }
 
 /// One of the two in-memory comparison slots for quick A/B auditioning.
@@ -289,7 +428,19 @@ pub struct DaemonState {
     /// macOS tap clocked differently from the output device). Equal to
     /// `sample_rate` on the no-resample path (Linux/PipeWire in-graph filter).
     pub capture_rate: f64,
+    /// Channel count the DSP chain *processes* (capture/input width).
     pub channels: usize,
+    /// Channel count the chain *emits* after routing. Equals `channels` with no
+    /// remap; differs when a routing matrix up/downmixes.
+    #[serde(default)]
+    pub out_channels: usize,
+    /// Position labels for the processing channels (e.g. `["FL","FR","FC",…]`),
+    /// for UI display and per-channel band targeting.
+    #[serde(default)]
+    pub channel_layout: Vec<String>,
+    /// Active output routing matrix, if any (None = identity passthrough).
+    #[serde(default)]
+    pub routing: Option<RoutingMatrix>,
     /// 16 spectrum bins (20 Hz–20 kHz, log-spaced), values 0.0–1.0 peak-normalised
     pub spectrum: Vec<f32>,
     /// Node name of the output device Resonance is currently feeding (if known)
@@ -349,6 +500,14 @@ pub struct BandState {
     pub gain_db: f64,
     pub q: f64,
     pub enabled: bool,
+    /// Which channels this band applies to. `#[serde(default)]` makes older
+    /// profile `.toml`/JSON files (self-describing formats) that omit the field
+    /// load as `ChannelMask::ALL`, a global band. NOTE: this does **not** give
+    /// postcard-wire back-compat — postcard is non-self-describing and reads a
+    /// fixed field count, so the IPC wire is version-locked to the daemon build
+    /// (clients + daemon ship together).
+    #[serde(default)]
+    pub channels: ChannelMask,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -458,6 +617,7 @@ mod tests {
                 gain_db: 3.0,
                 q: 1.41,
                 enabled: true,
+                channels: ChannelMask::single(0),
             }],
             effects: EffectsState {
                 fidelity_intensity: 0.5,
@@ -472,6 +632,15 @@ mod tests {
                 bass_enabled: false,
             },
         });
+        command_round_trip(&Command::SetBandChannels {
+            index: 1,
+            channels: ChannelMask::from_indices([0, 2, 4]),
+        });
+        command_round_trip(&Command::SetChannelRouting {
+            matrix: RoutingMatrix::swap(2, 0, 1),
+        });
+        command_round_trip(&Command::SwapChannels { a: 0, b: 1 });
+        command_round_trip(&Command::ClearRouting);
         command_round_trip(&Command::SaveProfile {
             name: "night".into(),
         });
@@ -483,6 +652,54 @@ mod tests {
         });
         command_round_trip(&Command::UnmapOutput);
         command_round_trip(&Command::ListMappings);
+    }
+
+    #[test]
+    fn channel_mask_wire_mirrors_dsp() {
+        // The serde mirror and the DSP type must agree on membership semantics.
+        let m = ChannelMask::from_indices([0, 3, 5]);
+        assert!(m.contains(0) && m.contains(3) && m.contains(5) && !m.contains(1));
+        assert_eq!(m.to_dsp().bits(), m.0);
+        assert!(ChannelMask::ALL.is_global(8));
+        assert!(!m.is_global(8));
+        // round-trips through postcard
+        let bytes = to_stdvec(&m).unwrap();
+        let back: ChannelMask = from_bytes(&bytes).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn routing_matrix_wire_round_trips_to_dsp() {
+        // 2→1 downmix matrix, built as a literal (fields are public).
+        let rm = RoutingMatrix {
+            in_ch: 2,
+            out_ch: 1,
+            gains: vec![0.5, 0.5],
+        };
+        let dsp = rm.to_dsp().expect("valid dims");
+        assert_eq!(RoutingMatrix::from_dsp(&dsp), rm);
+        // identity + swap helpers build valid matrices
+        assert!(RoutingMatrix::identity(6).to_dsp().is_some());
+        assert!(RoutingMatrix::swap(2, 0, 1).to_dsp().is_some());
+        // bad dimensions are rejected
+        assert!(
+            RoutingMatrix {
+                in_ch: 2,
+                out_ch: 2,
+                gains: vec![1.0],
+            }
+            .to_dsp()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn channel_mask_defaults_to_all() {
+        // `BandState.channels` uses `#[serde(default)]`; the default must be the
+        // global mask so pre-per-channel profiles load as global bands. (The
+        // disk-format back-compat is covered in the daemon's config tests, where
+        // a real `.toml` without the field is round-tripped.)
+        assert_eq!(ChannelMask::default(), ChannelMask::ALL);
     }
 
     #[test]
@@ -527,6 +744,7 @@ mod tests {
                 gain_db: 0.0,
                 q: 8.0,
                 enabled: true,
+                channels: ChannelMask::single(1),
             }],
             effects: EffectsState {
                 fidelity_intensity: 0.5,
@@ -544,6 +762,9 @@ mod tests {
             sample_rate: 48000.0,
             capture_rate: 48000.0,
             channels: 2,
+            out_channels: 2,
+            channel_layout: default_channel_layout(2),
+            routing: Some(RoutingMatrix::swap(2, 0, 1)),
             spectrum: vec![0.1, 0.2, 0.3],
             active_output: Some("alsa_output.pci".into()),
             mapped_profile: None,

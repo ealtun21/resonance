@@ -350,6 +350,10 @@ impl Effect for AmbienceEffect {
 //   out = mono·comp + gain_side·(in − mono)
 // Bipolar: negative intensity narrows toward mono (gain_side clamped ≥ 0).
 // At intensity 0 the path is a bit-exact bypass.
+//
+// Stereo only: mid/side is defined for an L/R pair. For any non-stereo layout
+// (mono, 5.1, 7.1, …) the effect passes through unchanged rather than guess how
+// to widen a multichannel bed — there is no meaningful L/R pair to operate on.
 
 const SURROUND_INTENSITY_SCALE: f64 = 0.7;
 
@@ -370,7 +374,8 @@ impl SurroundEffect {
 
 impl Effect for SurroundEffect {
     fn process(&mut self, samples: &mut [f64], channels: usize) {
-        if !self.enabled || self.intensity == 0.0 || channels < 2 {
+        // Stereo-only: mid/side needs exactly one L/R pair (see note above).
+        if !self.enabled || self.intensity == 0.0 || channels != 2 {
             return;
         }
 

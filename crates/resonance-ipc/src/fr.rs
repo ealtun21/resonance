@@ -100,7 +100,7 @@ fn mag(re: f64, im: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BandState, BandType};
+    use crate::{BandState, BandType, ChannelMask};
 
     fn peaking(q: f64) -> Vec<BandState> {
         vec![BandState {
@@ -109,6 +109,7 @@ mod tests {
             gain_db: 12.0,
             q,
             enabled: true,
+            channels: ChannelMask::ALL,
         }]
     }
 

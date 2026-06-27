@@ -3,7 +3,7 @@ mod autoeq;
 use anyhow::{Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
-use resonance_ipc::{Command, FxEffectId, Response, transport::SyncClient};
+use resonance_ipc::{ChannelMask, Command, FxEffectId, Response, transport::SyncClient};
 use std::io::{self, IsTerminal};
 
 #[derive(Parser)]
@@ -116,6 +116,12 @@ enum Sub {
         /// Headphone name (e.g. "HD 600"); multiple words allowed
         query: Vec<String>,
     },
+    /// Channel routing + per-channel EQ (N-channel support)
+    Channel {
+        // Optional so a bare `resonance channel` runs `info` (None → Info).
+        #[command(subcommand)]
+        action: Option<ChannelAction>,
+    },
     /// Send a raw shutdown signal to the daemon
     Shutdown,
     /// Manage the resonanced user service (start/stop/autostart). Backed by
@@ -130,6 +136,20 @@ enum Sub {
         /// Shell: bash | zsh | fish | elvish | powershell
         shell: Shell,
     },
+}
+
+#[derive(Subcommand)]
+enum ChannelAction {
+    /// Show the channel layout + active routing (default)
+    Info,
+    /// Swap two channels, e.g. `channel swap 0 1` (L/R swap)
+    Swap { a: usize, b: usize },
+    /// Clear routing — straight passthrough at the processing channel count
+    Clear,
+    /// Target an EQ band to a channel subset. `index` is 1-based (as shown in
+    /// `status`); `channels` is a comma list of indices or names (e.g. `0,1`,
+    /// `FL,FR`), or `all`.
+    Band { index: usize, channels: String },
 }
 
 #[derive(Subcommand)]
@@ -202,6 +222,12 @@ fn main() -> Result<()> {
         return print_response(resp);
     }
 
+    // All `channel` subcommands need either a state fetch (info / layout-aware
+    // band targeting) or a direct IPC send; handle them together.
+    if let Sub::Channel { action } = &sub {
+        return run_channel(action);
+    }
+
     let cmd = to_ipc_command(sub)?;
     let response = send(cmd)?;
     print_response(response)
@@ -270,7 +296,46 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
         }),
         Sub::Rename { from, to } => Ok(Command::RenameProfile { from, to }),
         Sub::Shutdown => Ok(Command::Shutdown),
-        Sub::Daemon { .. } | Sub::Devices | Sub::Completions { .. } => unreachable!(),
+        // `Channel` is handled in `run_channel` (needs a state fetch); the others
+        // are handled in `main` before this point.
+        Sub::Channel { .. } | Sub::Daemon { .. } | Sub::Devices | Sub::Completions { .. } => {
+            unreachable!()
+        }
+    }
+}
+
+/// Handle the `channel` command group. `info` (or a bare `channel`) renders the
+/// layout; `swap`/`clear` map straight to IPC; `band` fetches state first so
+/// channel names resolve against the live layout and indices are range-checked.
+fn run_channel(action: &Option<ChannelAction>) -> Result<()> {
+    match action {
+        None | Some(ChannelAction::Info) => {
+            let resp = send(Command::GetState)?;
+            if let Response::State(s) = resp {
+                print_channels(&Paint::auto(), &s);
+                Ok(())
+            } else {
+                print_response(resp)
+            }
+        }
+        Some(ChannelAction::Swap { a, b }) => {
+            print_response(send(Command::SwapChannels { a: *a, b: *b })?)
+        }
+        Some(ChannelAction::Clear) => print_response(send(Command::ClearRouting)?),
+        Some(ChannelAction::Band { index, channels }) => {
+            if *index == 0 {
+                bail!("band index is 1-based (see `status`)");
+            }
+            let st = match send(Command::GetState)? {
+                Response::State(s) => s,
+                other => return print_response(other),
+            };
+            let mask = parse_channel_mask(channels, &st)?;
+            print_response(send(Command::SetBandChannels {
+                index: index - 1,
+                channels: mask,
+            })?)
+        }
     }
 }
 
@@ -379,6 +444,20 @@ fn print_state(p: &Paint, s: &resonance_ipc::DaemonState) {
         format!("{:.0} Hz · {}ch", s.sample_rate, s.channels)
     };
     println!("{}{}", label("format"), rate);
+    // Routing: only shown when non-trivial (a remap or a changed output width).
+    if s.routing.is_some() || (s.out_channels != 0 && s.out_channels != s.channels) {
+        let out = if s.out_channels == 0 {
+            s.channels
+        } else {
+            s.out_channels
+        };
+        println!(
+            "{}{} → {} ch (custom remap)",
+            label("route"),
+            s.channels,
+            out
+        );
+    }
 
     // Live meters.
     let m = &s.meters;
@@ -441,14 +520,63 @@ fn print_state(p: &Paint, s: &resonance_ipc::DaemonState) {
             } else {
                 p.dim("off")
             };
+            let chlabel = mask_label(b.channels, &s.channel_layout, s.channels);
+            let tail = if chlabel.is_empty() {
+                String::new()
+            } else {
+                format!("  {}", p.dim(&chlabel))
+            };
             println!(
-                "  {:>2}  {}  {:>8.1} Hz  {:+5.1} dB  Q {:>4.2}  {state}",
+                "  {:>2}  {}  {:>8.1} Hz  {:+5.1} dB  Q {:>4.2}  {state}{tail}",
                 i + 1,
                 p.cyan(b.band_type.abbrev()),
                 b.freq,
                 b.gain_db,
                 b.q,
             );
+        }
+    }
+}
+
+/// Render the channel layout + active routing (the `channel info` view).
+fn print_channels(p: &Paint, s: &resonance_ipc::DaemonState) {
+    let out = if s.out_channels == 0 {
+        s.channels
+    } else {
+        s.out_channels
+    };
+    println!(
+        "{} {}",
+        p.bold("channels"),
+        p.dim(&format!("(in {} → out {out})", s.channels))
+    );
+    for (i, name) in s.channel_layout.iter().enumerate() {
+        println!("  {:>2}  {}", i, p.cyan(name));
+    }
+    println!();
+    match &s.routing {
+        Some(rm) => println!(
+            "{} {}",
+            p.bold("routing"),
+            p.dim(&format!("{}→{} matrix (custom remap)", rm.in_ch, rm.out_ch))
+        ),
+        None => println!("{} {}", p.bold("routing"), p.dim("passthrough")),
+    }
+    // Per-channel band targets, if any.
+    let targeted: Vec<(usize, String)> = s
+        .bands
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| {
+            let l = mask_label(b.channels, &s.channel_layout, s.channels);
+            (!l.is_empty()).then_some((i + 1, l))
+        })
+        .collect();
+    if !targeted.is_empty() {
+        println!();
+        println!("{}", p.bold("per-channel bands"));
+        for (idx, l) in targeted {
+            println!("  {:>2}  {}", idx, p.cyan(&l));
         }
     }
 }
@@ -554,6 +682,83 @@ fn parse_slot(s: &str) -> Result<resonance_ipc::AbSlot> {
         "b" => Ok(resonance_ipc::AbSlot::B),
         _ => bail!("expected slot a or b, got '{s}'"),
     }
+}
+
+/// Parse a channel spec against the live state: `all`, or a comma list of 0-based
+/// indices / names (resolved against the device's actual layout, so names match
+/// what `channel info` shows even on 4/5/7-channel devices). Indices/names beyond
+/// the device's channel count are rejected.
+fn parse_channel_mask(spec: &str, st: &resonance_ipc::DaemonState) -> Result<ChannelMask> {
+    let s = spec.trim();
+    if s.eq_ignore_ascii_case("all") {
+        return Ok(ChannelMask::ALL);
+    }
+    let channels = st.channels;
+    let mut idxs = Vec::new();
+    for tok in s.split(',') {
+        let t = tok.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let idx = match t.parse::<usize>() {
+            Ok(n) => n,
+            Err(_) => resolve_name(t, st).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown channel '{t}' (use an index or a name from `channel info`)"
+                )
+            })?,
+        };
+        if channels != 0 && idx >= channels {
+            bail!("channel {idx} out of range (device has {channels} channels)");
+        }
+        idxs.push(idx);
+    }
+    if idxs.is_empty() {
+        bail!("no channels specified");
+    }
+    Ok(ChannelMask::from_indices(idxs))
+}
+
+/// Resolve a channel name to its index: prefer the live layout (count-correct on
+/// any device), falling back to the fixed WAVE-order aliases.
+fn resolve_name(name: &str, st: &resonance_ipc::DaemonState) -> Option<usize> {
+    st.channel_layout
+        .iter()
+        .position(|l| l.eq_ignore_ascii_case(name))
+        .or_else(|| channel_name_index(name))
+}
+
+/// Fixed WAVE-order name→index fallback (used only when the live layout lacks the
+/// name). Aliases: FL/L, LFE/SUB, RL/BL, RR/BR.
+fn channel_name_index(s: &str) -> Option<usize> {
+    Some(match s.to_ascii_uppercase().as_str() {
+        "FL" | "L" | "MONO" => 0,
+        "FR" | "R" => 1,
+        "FC" | "C" => 2,
+        "LFE" | "SUB" => 3,
+        "RL" | "BL" => 4,
+        "RR" | "BR" => 5,
+        "SL" => 6,
+        "SR" => 7,
+        _ => return None,
+    })
+}
+
+/// Short `[FL,FR]`-style label for a band's channel target — empty when global.
+fn mask_label(m: ChannelMask, layout: &[String], channels: usize) -> String {
+    if channels == 0 || m.is_global(channels) {
+        return String::new();
+    }
+    let names: Vec<String> = (0..channels)
+        .filter(|&i| m.contains(i))
+        .map(|i| layout.get(i).cloned().unwrap_or_else(|| format!("ch{i}")))
+        .collect();
+    // A non-global mask that selects no in-range channel is degenerate (e.g. an
+    // out-of-range spec); show it explicitly rather than an empty `[]`.
+    if names.is_empty() {
+        return "[none]".to_string();
+    }
+    format!("[{}]", names.join(","))
 }
 
 fn parse_effect(s: &str) -> Result<FxEffectId> {

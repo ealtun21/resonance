@@ -1,3 +1,4 @@
+use crate::channel::ChannelMask;
 use std::f64::consts::PI;
 use thiserror::Error;
 
@@ -253,6 +254,13 @@ impl BiquadFilter {
     pub fn reset(&mut self) {
         self.states.iter_mut().for_each(|s| s.reset());
     }
+
+    /// Resize the per-channel state to `channels`. Existing channels keep their
+    /// running history; new channels start at rest. Used when the live channel
+    /// count changes (device renegotiation).
+    pub fn set_channels(&mut self, channels: usize) {
+        self.states.resize(channels, BiquadState::default());
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -262,6 +270,10 @@ pub struct ApoFilter {
     pub gain_db: f64,
     pub q: f64,
     pub enabled: bool,
+    /// Which channels this band applies to. Defaults to [`ChannelMask::ALL`] so a
+    /// band loaded from a preset (or built without an explicit target) processes
+    /// every channel — the back-compatible behaviour. Per-channel EQ narrows it.
+    pub mask: ChannelMask,
     /// Whether the current parameters are realizable at the active sample rate.
     /// Distinct from `enabled` (user intent): a band sitting at/above Nyquist
     /// after a rate drop is held inert here, then resumes on its own when a
@@ -285,6 +297,8 @@ pub struct ApoFilterBuilder {
     enabled: bool,
     channels: usize,
     sample_rate: Option<f64>,
+    // `ChannelMask::default()` is `ALL`, so an unset mask targets every channel.
+    channel_mask: ChannelMask,
 }
 
 impl ApoFilterBuilder {
@@ -323,6 +337,13 @@ impl ApoFilterBuilder {
         self
     }
 
+    /// Restrict this band to a subset of channels. Omit (or pass
+    /// [`ChannelMask::ALL`]) for a global band.
+    pub fn channel_mask(mut self, mask: ChannelMask) -> Self {
+        self.channel_mask = mask;
+        self
+    }
+
     pub fn build(self) -> Result<ApoFilter, FilterError> {
         let filter_type = self.filter_type.unwrap_or(FilterType::Peaking);
         let freq = self.freq.unwrap_or(1000.0);
@@ -350,6 +371,7 @@ impl ApoFilterBuilder {
             gain_db,
             q,
             enabled: self.enabled,
+            mask: self.channel_mask,
             realizable: true,
             biquad: BiquadFilter::new(coeffs, channels),
         })
@@ -424,6 +446,13 @@ impl ApoFilter {
 
     pub fn reset(&mut self) {
         self.biquad.reset();
+    }
+
+    /// Resize per-channel filter state to `channels` (device renegotiation). The
+    /// channel *mask* is unchanged — a band targeting only channel 0 still does
+    /// after a widen — and existing channels keep their running history.
+    pub fn set_channels(&mut self, channels: usize) {
+        self.biquad.set_channels(channels);
     }
 }
 

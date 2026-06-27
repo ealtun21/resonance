@@ -154,6 +154,7 @@ pub fn parse_fac(content: &str) -> Result<Preset, FacError> {
             gain_db,
             q: 1.41,
             enabled: true,
+            channels: u64::MAX,
         });
     }
 
