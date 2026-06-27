@@ -1,10 +1,19 @@
 use ratatui::layout::Rect;
+use resonance_autoeq::{BandKind, Smoothing};
 use resonance_ipc::{
-    BandState, ChannelMask, Command, DaemonState, EffectsState, FxEffectId, Response,
+    BandState, BandType, ChannelMask, Command, DaemonState, EffectsState, FxEffectId, Response,
     RoutingMatrix,
     transport::{SyncClient as IpcClient, TransportError},
 };
+use resonance_reference::reference::ReferenceState;
+use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
+
+/// A finished background Auto-EQ fit, applied on the UI thread.
+struct AutoEqDone {
+    preamp_db: f64,
+    bands: Vec<BandState>,
+}
 
 /// Spectrum envelope time constants: bars snap up, glide down.
 const SPECTRUM_ATTACK_TAU: f32 = 0.020;
@@ -86,6 +95,12 @@ pub struct App {
     pub clip_until: Option<Instant>,
     /// Cached systemd user-service status (refreshed when the Daemon tab is used).
     pub daemon_status: resonance_ipc::service::Status,
+    /// Reference/measurement target-curve overlay state (shared with the GUI).
+    pub reference: ReferenceState,
+    /// Background Auto-EQ fit result channel + in-flight flag.
+    autoeq_tx: Sender<AutoEqDone>,
+    autoeq_rx: Receiver<AutoEqDone>,
+    pub autoeq_busy: bool,
 }
 
 /// A restorable snapshot of the editable chain state (for undo/redo).
@@ -100,6 +115,7 @@ struct Snapshot {
 impl App {
     pub fn new() -> Self {
         let prefs = crate::prefs::Prefs::load();
+        let (autoeq_tx, autoeq_rx) = std::sync::mpsc::channel();
         Self {
             state: None,
             running: true,
@@ -119,6 +135,10 @@ impl App {
             redo_stack: Vec::new(),
             clip_until: None,
             daemon_status: resonance_ipc::service::Status::default(),
+            reference: ReferenceState::default(),
+            autoeq_tx,
+            autoeq_rx,
+            autoeq_busy: false,
         }
     }
 
@@ -416,14 +436,19 @@ impl App {
     /// that profile — so every preset that enters the app is captured and can be
     /// renamed/managed from Settings, rather than loaded transiently.
     pub fn browse_enter(&mut self) {
-        let action = match &mut self.mode {
-            InputMode::Browse(b) => b.enter(),
+        let (action, purpose) = match &mut self.mode {
+            InputMode::Browse(b) => (b.enter(), b.purpose),
             _ => return,
         };
         if let Some(path) = action {
             self.mode = InputMode::Normal;
-            self.import_and_load(path);
-            self.refresh_state();
+            match purpose {
+                crate::browser::BrowsePurpose::LoadPreset => {
+                    self.import_and_load(path);
+                    self.refresh_state();
+                }
+                crate::browser::BrowsePurpose::LoadMeasurement => self.load_measurement(path),
+            }
         }
     }
 
@@ -833,6 +858,138 @@ impl App {
         self.refresh_state();
     }
 
+    // ── Reference overlay / Auto-EQ ──────────────────────────────────────────
+
+    /// Open the file picker to load a measurement curve (freq/dB `.txt`).
+    pub fn begin_browse_measurement(&mut self) {
+        let start = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_dir())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        self.mode = InputMode::Browse(crate::browser::Browser::new_measurement(start));
+    }
+
+    /// Load a measurement file into the reference overlay (enabling it so the
+    /// overlay shows immediately).
+    fn load_measurement(&mut self, path: String) {
+        if self
+            .reference
+            .load_measurement_file(std::path::Path::new(&path))
+        {
+            // load_measurement_file already enables the overlay.
+            let name = self.reference.measurement_name.clone();
+            self.set_status(format!("loaded measurement: {name} (overlay on)"));
+        } else {
+            self.set_status("failed to load measurement (expected a freq/dB curve)");
+        }
+    }
+
+    /// Cycle the active reference target through the available options.
+    pub fn cycle_reference_target(&mut self) {
+        let opts = self.reference.target_options();
+        if opts.is_empty() {
+            return;
+        }
+        let idx = opts
+            .iter()
+            .position(|(_, sel)| *sel == self.reference.target_sel)
+            .unwrap_or(0);
+        let sel = opts[(idx + 1) % opts.len()].1.clone();
+        self.reference.set_target(sel);
+    }
+
+    /// Kick off a background Auto-EQ fit (measurement → target). Needs both a
+    /// target and a loaded measurement; the result lands via [`Self::pump_autoeq`].
+    pub fn run_autoeq(&mut self) {
+        if self.autoeq_busy {
+            return;
+        }
+        let (Some(meas), Some(tgt)) = (
+            self.reference.measurement.clone(),
+            self.reference.target.clone(),
+        ) else {
+            self.set_status("Auto-EQ needs a target and a measurement");
+            return;
+        };
+        // Sample both curves onto AutoEQ's fixed log grid (dB).
+        let f = resonance_autoeq::log_freqs();
+        let target: Vec<f32> = f.iter().map(|&hz| tgt.interp(hz as f64) as f32).collect();
+        let measured: Vec<f32> = f.iter().map(|&hz| meas.interp(hz as f64) as f32).collect();
+        let smoothing = if self.reference.measurement_iem {
+            Smoothing::InEar
+        } else {
+            Smoothing::OverEar
+        };
+        let tx = self.autoeq_tx.clone();
+        self.autoeq_busy = true;
+        self.set_status("Auto-EQ: fitting…");
+        std::thread::Builder::new()
+            .name("resonance-autoeq".into())
+            .spawn(move || {
+                // Always send exactly one result, even if the fit panics, so
+                // pump_autoeq() can't leave autoeq_busy stuck on forever.
+                let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let res = resonance_autoeq::run(&target, &measured, 10, smoothing, 3000);
+                    let bands: Vec<BandState> = res
+                        .filters
+                        .iter()
+                        .map(|fl| BandState {
+                            band_type: match fl.kind {
+                                BandKind::Peak => BandType::Peaking,
+                                BandKind::LowShelf => BandType::LowShelf,
+                                BandKind::HighShelf => BandType::HighShelf,
+                            },
+                            freq: fl.freq,
+                            gain_db: fl.gain_db,
+                            q: fl.q,
+                            enabled: true,
+                            channels: ChannelMask::ALL,
+                        })
+                        .collect();
+                    AutoEqDone {
+                        preamp_db: res.preamp_db,
+                        bands,
+                    }
+                }))
+                .unwrap_or(AutoEqDone {
+                    preamp_db: 0.0,
+                    bands: Vec::new(),
+                });
+                let _ = tx.send(done);
+            })
+            .ok();
+    }
+
+    /// Apply any finished Auto-EQ fit (undo snapshot + ApplyState). Called each
+    /// loop iteration, like the spectrum pump.
+    pub fn pump_autoeq(&mut self) {
+        while let Ok(o) = self.autoeq_rx.try_recv() {
+            self.autoeq_busy = false;
+            if o.bands.is_empty() {
+                self.set_status("Auto-EQ: nothing to correct");
+                continue;
+            }
+            let count = o.bands.len();
+            // The chain is untouched during the fit, so snapshotting now captures
+            // the correct pre-fit state for undo.
+            self.push_undo();
+            let effects = self
+                .state
+                .as_ref()
+                .map(|s| s.effects.clone())
+                .unwrap_or_default();
+            self.send(Command::ApplyState {
+                preamp_db: o.preamp_db,
+                enabled: true,
+                bands: o.bands,
+                effects,
+            });
+            self.refresh_state();
+            self.set_status(format!("Auto-EQ: fitted {count} bands"));
+        }
+    }
+
     pub fn preamp_adjust(&mut self, delta: f64) {
         let current = self.state.as_ref().map(|s| s.preamp_db).unwrap_or(0.0);
         let new_db = ((current + delta) * 10.0).round() / 10.0;
@@ -1113,6 +1270,25 @@ impl App {
             2 => self.settings_route_output(),
             3 => self.settings_pref_activate(),
             4 => self.settings_daemon_activate(),
+            5 => self.settings_reference_activate(),
+            _ => {}
+        }
+    }
+
+    /// Reference tab actions (by cursor row): toggle on/off, cycle target, load a
+    /// measurement, run Auto-EQ, toggle show-measurement / normalize.
+    fn settings_reference_activate(&mut self) {
+        let cursor = match &self.mode {
+            InputMode::Settings(s) => s.cursor,
+            _ => return,
+        };
+        match cursor {
+            0 => self.reference.enabled = !self.reference.enabled,
+            1 => self.cycle_reference_target(),
+            2 => self.begin_browse_measurement(),
+            3 => self.run_autoeq(),
+            4 => self.reference.show_measurement = !self.reference.show_measurement,
+            5 => self.reference.normalized = !self.reference.normalized,
             _ => {}
         }
     }

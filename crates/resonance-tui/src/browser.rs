@@ -12,16 +12,35 @@ pub struct Item {
     pub is_dir: bool,
 }
 
+/// Why the picker is open — decides what happens when a file is chosen.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BrowsePurpose {
+    /// Import + load a preset/profile (`.fac` / APO `.txt` / `.toml`).
+    LoadPreset,
+    /// Load a measurement curve into the reference overlay (`.txt` / `.csv`).
+    LoadMeasurement,
+}
+
 pub struct Browser {
     pub cwd: PathBuf,
     pub entries: Vec<Item>,
     pub cursor: usize,
     /// Preview lines for the currently selected entry.
     pub preview: Vec<String>,
+    pub purpose: BrowsePurpose,
 }
 
 impl Browser {
     pub fn new(start: PathBuf) -> Self {
+        Self::with_purpose(start, BrowsePurpose::LoadPreset)
+    }
+
+    /// A picker for loading a measurement curve into the reference overlay.
+    pub fn new_measurement(start: PathBuf) -> Self {
+        Self::with_purpose(start, BrowsePurpose::LoadMeasurement)
+    }
+
+    fn with_purpose(start: PathBuf, purpose: BrowsePurpose) -> Self {
         let cwd = if start.is_dir() {
             start
         } else {
@@ -32,13 +51,14 @@ impl Browser {
             entries: Vec::new(),
             cursor: 0,
             preview: Vec::new(),
+            purpose,
         };
         b.reload();
         b
     }
 
     fn reload(&mut self) {
-        self.entries = read_entries(&self.cwd);
+        self.entries = read_entries(&self.cwd, self.purpose);
         self.cursor = 0;
         self.update_preview();
     }
@@ -83,9 +103,10 @@ impl Browser {
     }
 }
 
-/// Directory listing: `..` (if any), then sub-directories, then `.fac`/`.txt`
-/// files. Hidden entries skipped. Each group sorted case-insensitively.
-fn read_entries(dir: &Path) -> Vec<Item> {
+/// Directory listing: `..` (if any), then sub-directories, then the files this
+/// picker accepts (preset vs measurement extensions). Hidden entries skipped.
+/// Each group sorted case-insensitively.
+fn read_entries(dir: &Path, purpose: BrowsePurpose) -> Vec<Item> {
     let mut dirs: Vec<Item> = Vec::new();
     let mut files: Vec<Item> = Vec::new();
 
@@ -99,7 +120,7 @@ fn read_entries(dir: &Path) -> Vec<Item> {
             let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
             if is_dir {
                 dirs.push(Item { name, path, is_dir });
-            } else if is_preset(&name) {
+            } else if accepts(&name, purpose) {
                 files.push(Item { name, path, is_dir });
             }
         }
@@ -122,8 +143,17 @@ fn read_entries(dir: &Path) -> Vec<Item> {
     out
 }
 
-fn is_preset(name: &str) -> bool {
-    name.ends_with(".fac") || name.ends_with(".txt") || name.ends_with(".toml")
+/// Which files a picker lists, by purpose: presets are `.fac`/APO `.txt`/
+/// `.toml`; measurement curves are `.txt`/`.csv`. Keeping these separate stops
+/// the preset picker from offering `.csv` curves (which the importer rejects)
+/// and the measurement picker from offering `.fac`/`.toml` (which it can't parse).
+fn accepts(name: &str, purpose: BrowsePurpose) -> bool {
+    match purpose {
+        BrowsePurpose::LoadPreset => {
+            name.ends_with(".fac") || name.ends_with(".txt") || name.ends_with(".toml")
+        }
+        BrowsePurpose::LoadMeasurement => name.ends_with(".txt") || name.ends_with(".csv"),
+    }
 }
 
 /// Read at most `max` bytes of a file as lossy UTF-8 (for bounded previews).
