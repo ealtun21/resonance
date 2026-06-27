@@ -77,6 +77,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, fps_override: Option<u64>) -> Re
         let poll_timeout = frame.min(Duration::from_millis(33));
 
         app.animate_spectrum();
+        app.pump_autoeq();
         let mut frame_area = app.last_frame;
         terminal.draw(|f| {
             frame_area = f.area();
@@ -256,6 +257,7 @@ fn handle_settings(app: &mut App, key: KeyEvent) {
         KeyCode::Char('3') => app.settings_set_tab(2),
         KeyCode::Char('4') => app.settings_set_tab(3),
         KeyCode::Char('5') => app.settings_set_tab(4),
+        KeyCode::Char('6') => app.settings_set_tab(5),
         KeyCode::Up | KeyCode::Char('k') => app.settings_move(-1),
         KeyCode::Down | KeyCode::Char('j') => app.settings_move(1),
         KeyCode::Enter | KeyCode::Char(' ') => app.settings_enter(),

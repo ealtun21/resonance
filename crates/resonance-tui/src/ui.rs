@@ -5,6 +5,7 @@ use crate::{
     settings::{ConfirmAction, SettingsState, TABS},
 };
 use resonance_ipc::{ChannelMask, RoutingMatrix};
+use resonance_reference::reference::SeriesRole;
 
 use ratatui::{
     Frame,
@@ -100,7 +101,8 @@ fn render_help(frame: &mut Frame, area: Rect) {
         key("w", "swap L/R channels (≥2ch)"),
         key("l", "load preset (file browser)"),
         key("o", "select output device"),
-        key("s", "settings (profiles / mappings)"),
+        key("s", "settings — profiles, devices, reference + Auto-EQ"),
+        key("s → 6", "Reference tab: target curve, measurement, Auto-EQ"),
         Line::raw(""),
         Line::from(Span::styled(
             "  press any key to close",
@@ -296,8 +298,28 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
 
 fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
     let focused = app.focus == Panel::Bands;
+    // Title carries a colour key for the reference overlay when it's active.
+    let mut title = vec![Span::styled(
+        " EQ Frequency Response ",
+        Style::default().fg(Color::Magenta),
+    )];
+    if app.reference.active() {
+        title.push(Span::styled(
+            "· target",
+            Style::default().fg(Color::Magenta),
+        ));
+        title.push(Span::styled("  result", Style::default().fg(Color::White)));
+        if app.reference.show_measurement {
+            title.push(Span::styled(
+                "  meas ",
+                Style::default().fg(Color::DarkGray),
+            ));
+        } else {
+            title.push(Span::raw(" "));
+        }
+    }
     let block = Block::default()
-        .title(Line::from(" EQ Frequency Response ").fg(Color::Magenta))
+        .title(Line::from(title))
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(if focused {
@@ -364,9 +386,41 @@ fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
         ),
     ];
 
+    // Reference overlay (target / measurement / result), when active. Each
+    // series is a polyline in the same (log10 freq, dB) space as the EQ curve;
+    // clamp dB to the chart's ±range so an out-of-range curve doesn't jump.
+    let ref_runs: Vec<(Color, Vec<(f64, f64)>)> = app
+        .reference
+        .series(
+            &bands,
+            sr,
+            n_points,
+            log_min,
+            log_max,
+            if app.reference.normalized { 1.0 } else { 0.0 },
+        )
+        .iter()
+        .map(|s| {
+            // Result is white (the curve you shape onto the target); yellow is
+            // reserved for the selected band marker, so avoid it here.
+            let color = match s.role {
+                SeriesRole::Target => Color::Magenta,
+                SeriesRole::Result => Color::White,
+                SeriesRole::Measurement => Color::DarkGray,
+            };
+            let pts: Vec<(f64, f64)> = s
+                .pts
+                .iter()
+                .map(|&(x, y)| (x, y.clamp(-DB_RANGE, DB_RANGE)))
+                .collect();
+            (color, pts)
+        })
+        .collect();
+
     // Colour-code the response by gain sign: boost green, cut red, neutral cyan
     // near 0 dB (matches the GUI's gain-signed curve tint). Build it from the
-    // zero reference, the coloured curve runs, then the band markers.
+    // zero reference, the coloured curve runs, the reference overlay, then the
+    // band markers (on top).
     let runs = curve_runs(&curve_data);
     let mut datasets = vec![
         Dataset::default()
@@ -376,6 +430,15 @@ fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
             .data(&zero_pts),
     ];
     for (color, pts) in &runs {
+        datasets.push(
+            Dataset::default()
+                .marker(symbols::Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Style::default().fg(*color))
+                .data(pts),
+        );
+    }
+    for (color, pts) in &ref_runs {
         datasets.push(
             Dataset::default()
                 .marker(symbols::Marker::Braille)
@@ -992,8 +1055,12 @@ fn render_browser(b: &Browser, frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, dialog);
 
     let cwd = b.cwd.display().to_string();
+    let verb = match b.purpose {
+        crate::browser::BrowsePurpose::LoadPreset => "Load Preset",
+        crate::browser::BrowsePurpose::LoadMeasurement => "Load Measurement",
+    };
     let block = Block::default()
-        .title(Line::from(format!(" Load Preset — {cwd} ")).fg(Color::Yellow))
+        .title(Line::from(format!(" {verb} — {cwd} ")).fg(Color::Yellow))
         .title_bottom(
             Line::from(" ↑↓ move   →/Enter open   ← back   Esc cancel ").fg(Color::DarkGray),
         )
@@ -1245,13 +1312,14 @@ fn render_settings(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect) 
 }
 
 fn settings_footer_hint(s: &SettingsState) -> String {
-    let base = " [Tab/←→/1-5] switch  [↑↓] select  [Esc] close";
+    let base = " [Tab/←→/1-6] switch  [↑↓] select  [Esc] close";
     let ctx = match s.tab {
         0 => "  •  [Enter] load  [n] save  [e] export  [r] rename  [d] delete",
         1 => "  •  [m] map  [d] unmap",
         2 => "  •  [Enter] route  [m] map to profile",
         3 => "  •  [Enter/Space] edit/toggle",
         4 => "  •  [Enter] run action",
+        5 => "  •  [Enter] toggle / cycle / load / fit",
         _ => "",
     };
     format!("{base}{ctx}")
@@ -1285,7 +1353,80 @@ fn render_settings_content(s: &SettingsState, app: &App, frame: &mut Frame, area
         2 => render_tab_devices(s, app, frame, area),
         3 => render_tab_prefs(s, app, frame, area),
         4 => render_tab_daemon(s, app, frame, area),
+        5 => render_tab_reference(s, app, frame, area),
         _ => {}
+    }
+}
+
+fn render_tab_reference(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect) {
+    let r = &app.reference;
+    let on = |b: bool| if b { "[on] " } else { "[off]" };
+    let meas = match (&r.measurement, r.measurement_name.is_empty()) {
+        (Some(_), false) => r.measurement_name.clone(),
+        (Some(_), true) => "(loaded)".to_string(),
+        (None, _) => "none".to_string(),
+    };
+    let autoeq = if app.autoeq_busy {
+        "fitting…".to_string()
+    } else {
+        "fit measurement → target".to_string()
+    };
+    let rows: [(&str, String, &str); 6] = [
+        (
+            "Reference",
+            on(r.enabled).to_string(),
+            "(overlay on the FR graph; needs a measurement)",
+        ),
+        (
+            "Target",
+            r.target_label(),
+            "(Enter cycles the target curve)",
+        ),
+        ("Measurement", meas, "(Enter to load a freq/dB .txt)"),
+        ("Auto-EQ", autoeq, "(Enter fits a 10-band correction)"),
+        (
+            "Show raw measurement",
+            on(r.show_measurement).to_string(),
+            "(draw the un-EQ'd curve too)",
+        ),
+        (
+            "Normalize",
+            on(r.normalized).to_string(),
+            "(re-baseline onto the target → flat 0)",
+        ),
+    ];
+
+    for (i, (label, value, desc)) in rows.iter().enumerate() {
+        let y = area.y + i as u16;
+        if y >= area.y + area.height {
+            break;
+        }
+        let row = Rect::new(area.x, y, area.width, 1);
+        let selected = s.cursor == i;
+        let marker = if selected { "▶" } else { " " };
+        let label_style = if selected {
+            Style::default().fg(Color::Yellow).bold()
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let line = Line::from(vec![
+            Span::styled(format!("{marker} {label:<22} "), label_style),
+            Span::styled(value.clone(), Style::default().fg(Color::Cyan)),
+            Span::styled(format!("  {desc}"), Style::default().fg(Color::DarkGray)),
+        ]);
+        frame.render_widget(Paragraph::new(line), row);
+    }
+
+    // Hint when enabled but nothing to show yet (no measurement → inactive).
+    if r.enabled && !r.active() {
+        let y = area.y + 7;
+        if y < area.y + area.height {
+            frame.render_widget(
+                Paragraph::new("  load a measurement to see the overlay")
+                    .style(Style::default().fg(Color::DarkGray).italic()),
+                Rect::new(area.x, y, area.width, 1),
+            );
+        }
     }
 }
 
@@ -1911,6 +2052,47 @@ mod tests {
             text.contains("CH60"),
             "list did not scroll to cursor:\n{text}"
         );
+    }
+
+    #[test]
+    fn reference_tab_renders_controls() {
+        let mut app = App::new();
+        app.state = Some(fixture(2));
+        let mut ss = crate::settings::SettingsState::new(vec![], vec![], vec![]);
+        ss.tab = 5; // Reference
+        app.mode = InputMode::Settings(ss);
+        let text = render_to_text(&app, 120, 44);
+        for needle in ["Reference", "Target", "Measurement", "Auto-EQ", "Normalize"] {
+            assert!(
+                text.contains(needle),
+                "reference tab missing {needle}:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn active_reference_overlay_renders_without_panic() {
+        use resonance_ipc::curve::RefCurve;
+        use resonance_reference::reference::TargetSel;
+        let mut app = App::new();
+        app.state = Some(fixture(2));
+        // A flat measurement + a real target makes the reference overlay active.
+        let flat = RefCurve::from_points(vec![(20.0, 0.0), (1000.0, 0.0), (20000.0, 0.0)]);
+        app.reference
+            .set_measurement("test".to_string(), false, flat, None);
+        if let Some((_, sel)) = app
+            .reference
+            .target_options()
+            .into_iter()
+            .find(|(_, s)| *s != TargetSel::None)
+        {
+            app.reference.set_target(sel);
+        }
+        app.reference.enabled = true;
+        assert!(app.reference.active(), "measurement + enabled → active");
+        // The overlay path must render without panicking.
+        let text = render_to_text(&app, 120, 44);
+        assert!(!text.trim().is_empty());
     }
 
     #[test]
