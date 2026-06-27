@@ -261,6 +261,9 @@ fn handle_settings(app: &mut App, key: KeyEvent) {
         KeyCode::Up | KeyCode::Char('k') => app.settings_move(-1),
         KeyCode::Down | KeyCode::Char('j') => app.settings_move(1),
         KeyCode::Enter | KeyCode::Char(' ') => app.settings_enter(),
+        // Adjust the customizer value under the cursor (Reference tab).
+        KeyCode::Char('+') | KeyCode::Char('=') => app.settings_adjust(1.0),
+        KeyCode::Char('-') => app.settings_adjust(-1.0),
         KeyCode::Char('n') => app.settings_key_n(),
         KeyCode::Char('e') => app.settings_key_e(),
         KeyCode::Char('r') => app.settings_key_r(),

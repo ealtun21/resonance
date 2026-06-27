@@ -1289,8 +1289,40 @@ impl App {
             3 => self.run_autoeq(),
             4 => self.reference.show_measurement = !self.reference.show_measurement,
             5 => self.reference.normalized = !self.reference.normalized,
+            6 => self.reference.show_bounds = !self.reference.show_bounds,
+            11 => {
+                // Reset the customizer to a flat (no-adjustment) target.
+                self.reference.adj_tilt = 0.0;
+                self.reference.adj_bass = 0.0;
+                self.reference.adj_ear = 0.0;
+                self.reference.adj_treble = 0.0;
+                self.reference.rebuild_target();
+            }
             _ => {}
         }
+    }
+
+    /// Adjust the value under the settings cursor by a direction (`±1`). Only the
+    /// Reference tab's customizer rows respond; `+`/`-` are no-ops elsewhere.
+    pub fn settings_adjust(&mut self, dir: f64) {
+        let (tab, cursor) = match &self.mode {
+            InputMode::Settings(s) => (s.tab, s.cursor),
+            _ => return,
+        };
+        if tab != 5 {
+            return;
+        }
+        let r = &mut self.reference;
+        match cursor {
+            // Tilt is gentle (dB/oct), the gain bands coarser (dB). Ranges mirror
+            // the GUI customizer sliders.
+            7 => r.adj_tilt = (r.adj_tilt + dir * 0.1).clamp(-2.0, 1.0),
+            8 => r.adj_bass = (r.adj_bass + dir * 0.5).clamp(-12.0, 18.0),
+            9 => r.adj_ear = (r.adj_ear + dir * 0.5).clamp(-12.0, 12.0),
+            10 => r.adj_treble = (r.adj_treble + dir * 0.5).clamp(-12.0, 12.0),
+            _ => return,
+        }
+        self.reference.rebuild_target();
     }
 
     /// Daemon tab actions: Start / Stop / Restart / toggle Autostart.
