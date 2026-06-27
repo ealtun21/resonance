@@ -63,21 +63,30 @@ pub fn band_type_full(width: u16) -> bool {
 }
 
 /// Column rectangles for one band row (or the header row): #, Type, Freq,
-/// Gain, Q, Enable, and a gain bar that absorbs the remaining width.
-/// The Type column widens to fit full names on wide terminals.
-pub fn band_columns(row: Rect) -> Rc<[Rect]> {
+/// Gain, Q, Enable, an optional per-band channel-target column (multichannel
+/// only), and a gain bar that absorbs the remaining width. The Type column
+/// widens to fit full names on wide terminals.
+///
+/// Rect indices are stable for the fixed columns regardless of `show_ch`
+/// (0=#, 1=Type, 2=Freq, 3=Gain, 4=Q, 5=spacer, 6=Enable). When `show_ch` the
+/// Ch column is rect 7 and the gain bar follows it; otherwise the gain bar is
+/// rect 7. The bar is always the last rect.
+pub fn band_columns(row: Rect, show_ch: bool) -> Rc<[Rect]> {
     let type_w = if band_type_full(row.width) { 11 } else { 5 };
-    let cols = [
-        Constraint::Length(3),      // #
-        Constraint::Length(type_w), // Type
-        Constraint::Length(8),      // Freq
-        Constraint::Length(7),      // Gain
-        Constraint::Length(6),      // Q
-        Constraint::Length(2),      // spacer (extra gap before Enable)
-        Constraint::Length(7),      // Enable
-        Constraint::Min(0),         // gain bar (fills the rest)
+    let mut cons = vec![
+        Constraint::Length(3),      // 0 #
+        Constraint::Length(type_w), // 1 Type
+        Constraint::Length(8),      // 2 Freq
+        Constraint::Length(7),      // 3 Gain
+        Constraint::Length(6),      // 4 Q
+        Constraint::Length(2),      // 5 spacer (extra gap before Enable)
+        Constraint::Length(7),      // 6 Enable
     ];
-    Layout::horizontal(cols).spacing(1).split(row)
+    if show_ch {
+        cons.push(Constraint::Length(8)); // 7 Ch (per-band channel target)
+    }
+    cons.push(Constraint::Min(0)); // gain bar (fills the rest), always last
+    Layout::horizontal(cons).spacing(1).split(row)
 }
 
 /// First band scroll offset so the cursor stays visible.

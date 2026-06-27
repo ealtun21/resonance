@@ -1,6 +1,7 @@
 use ratatui::layout::Rect;
 use resonance_ipc::{
-    BandState, Command, DaemonState, EffectsState, FxEffectId, Response,
+    BandState, ChannelMask, Command, DaemonState, EffectsState, FxEffectId, Response,
+    RoutingMatrix,
     transport::{SyncClient as IpcClient, TransportError},
 };
 use std::time::{Duration, Instant};
@@ -31,13 +32,26 @@ enum BandHit {
     Type,
     Field(BandField),
     Toggle,
+    /// The per-band channel-target cell (multichannel only).
+    Channels,
 }
 
 pub enum InputMode {
     Normal,
     Browse(crate::browser::Browser),
-    SelectOutput { sinks: Vec<String>, cursor: usize },
+    SelectOutput {
+        sinks: Vec<String>,
+        cursor: usize,
+    },
     Settings(crate::settings::SettingsState),
+    /// Per-band channel-target picker (multichannel only): toggle which channels
+    /// the selected band's filter applies to. `mask` is edited live; `cursor`
+    /// indexes `0..channels`.
+    SelectBandChannels {
+        index: usize,
+        mask: ChannelMask,
+        cursor: usize,
+    },
     Help,
 }
 
@@ -564,13 +578,17 @@ impl App {
             return None;
         }
         let row_rect = ratatui::layout::Rect::new(inner.x, row, inner.width, 1);
-        let cols = crate::layout::band_columns(row_rect);
+        let show_ch = self.show_ch();
+        let cols = crate::layout::band_columns(row_rect, show_ch);
         let hit = match cols.iter().position(|c| crate::layout::hit(*c, col, row)) {
             Some(1) => BandHit::Type,
             Some(2) => BandHit::Field(BandField::Freq),
             Some(3) => BandHit::Field(BandField::Gain),
             Some(4) => BandHit::Field(BandField::Q),
             Some(6) => BandHit::Toggle, // 5 is the spacer column
+            // The Ch column is rect 7 only when shown; otherwise rect 7 is the
+            // gain bar (→ Row). The fixed columns 0–6 are unaffected.
+            Some(7) if show_ch => BandHit::Channels,
             _ => BandHit::Row,
         };
         Some((idx, hit))
@@ -590,6 +608,8 @@ impl App {
                 BandHit::Field(f) => self.band_field = f,
                 BandHit::Type => self.cycle_band_type(),
                 BandHit::Toggle => self.toggle_selected(),
+                // Click the Ch cell → open the picker (band_cursor already set).
+                BandHit::Channels => self.begin_select_band_channels(),
                 BandHit::Row => {}
             }
         }
@@ -685,6 +705,132 @@ impl App {
                 self.refresh_state();
             }
         }
+    }
+
+    // ── Channel targeting / routing (multichannel) ──────────────────────────
+
+    /// Whether per-channel controls should surface. Progressive disclosure:
+    /// stereo/mono users never see the channel column or the picker — only
+    /// >2-channel devices reveal per-band channel targeting.
+    pub(crate) fn show_ch(&self) -> bool {
+        self.state.as_ref().map(|s| s.channels > 2).unwrap_or(false)
+    }
+
+    /// Open the per-band channel-target picker (`c`) for the selected band.
+    /// No-op on ≤2-channel devices (feature hidden) or with no bands.
+    pub fn begin_select_band_channels(&mut self) {
+        if self.focus != Panel::Bands || !self.show_ch() {
+            return;
+        }
+        let idx = self.band_cursor;
+        let mask = match self.state.as_ref().and_then(|s| s.bands.get(idx)) {
+            Some(b) => b.channels,
+            None => return,
+        };
+        self.mode = InputMode::SelectBandChannels {
+            index: idx,
+            mask,
+            cursor: 0,
+        };
+    }
+
+    pub fn band_channels_move(&mut self, delta: i32) {
+        let channels = self.state.as_ref().map(|s| s.channels).unwrap_or(0);
+        if let InputMode::SelectBandChannels { cursor, .. } = &mut self.mode {
+            if channels == 0 {
+                return;
+            }
+            let max = channels as i32 - 1;
+            *cursor = (*cursor as i32 + delta).clamp(0, max) as usize;
+        }
+    }
+
+    /// Toggle the channel under the cursor in the live mask.
+    pub fn band_channels_toggle(&mut self) {
+        let channels = self.state.as_ref().map(|s| s.channels).unwrap_or(0);
+        if let InputMode::SelectBandChannels { mask, cursor, .. } = &mut self.mode {
+            let c = *cursor;
+            if c >= channels {
+                return;
+            }
+            // The default ALL mask sets every bit (count-independent); normalise
+            // it to the concrete in-range set before clearing one channel, so the
+            // result is an exact "all but c" rather than still-global.
+            let mut m = if mask.is_global(channels) {
+                ChannelMask::from_indices(0..channels)
+            } else {
+                *mask
+            };
+            m = if m.contains(c) {
+                m.without(c)
+            } else {
+                m.with(c)
+            };
+            *mask = m;
+        }
+    }
+
+    pub fn band_channels_set_all(&mut self) {
+        if let InputMode::SelectBandChannels { mask, .. } = &mut self.mode {
+            *mask = ChannelMask::ALL;
+        }
+    }
+
+    pub fn band_channels_set_none(&mut self) {
+        if let InputMode::SelectBandChannels { mask, .. } = &mut self.mode {
+            *mask = ChannelMask::NONE;
+        }
+    }
+
+    /// Apply the edited mask to the band and close the picker (Enter).
+    pub fn band_channels_apply(&mut self) {
+        let channels = self.state.as_ref().map(|s| s.channels).unwrap_or(0);
+        let (index, mask) = match &self.mode {
+            InputMode::SelectBandChannels { index, mask, .. } => (*index, *mask),
+            _ => return,
+        };
+        // Collapse "every channel selected" back to the canonical ALL.
+        let mask = if mask.is_global(channels) {
+            ChannelMask::ALL
+        } else {
+            mask
+        };
+        self.mode = InputMode::Normal;
+        self.push_undo();
+        self.send(Command::SetBandChannels {
+            index,
+            channels: mask,
+        });
+        self.refresh_state();
+    }
+
+    /// Toggle a front L/R swap (`w`). If the routing is already exactly the L/R
+    /// swap, clear it (back to straight passthrough); otherwise install it.
+    /// Mirrors the GUI's "Swap L/R" control; available from 2 channels up.
+    pub fn toggle_swap_lr(&mut self) {
+        // Resolve channel count + current swap state up front so the immutable
+        // borrow of `self.state` ends before we mutate via `send`. Only build
+        // the swap matrix at ≥2 channels (it indexes channels 0 and 1).
+        let (channels, is_swapped) = match &self.state {
+            Some(s) if s.channels >= 2 => {
+                let swap = RoutingMatrix::swap(s.channels, 0, 1);
+                (s.channels, s.routing.as_ref() == Some(&swap))
+            }
+            Some(s) => (s.channels, false),
+            None => return,
+        };
+        if channels < 2 {
+            self.set_status("swap needs ≥2 channels");
+            return;
+        }
+        if is_swapped {
+            self.send(Command::ClearRouting);
+            self.set_status("routing cleared");
+        } else {
+            self.send(Command::SwapChannels { a: 0, b: 1 });
+            self.set_status("swapped L/R");
+        }
+        self.refresh_state();
     }
 
     pub fn preamp_adjust(&mut self, delta: f64) {

@@ -116,6 +116,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         InputMode::Browse(_) => handle_browse(app, key),
         InputMode::SelectOutput { .. } => handle_select_output(app, key),
         InputMode::Settings(_) => handle_settings(app, key),
+        InputMode::SelectBandChannels { .. } => handle_band_channels(app, key),
         // Any key dismisses the help overlay.
         InputMode::Help => app.cancel_input(),
     }
@@ -164,8 +165,27 @@ fn handle_normal(app: &mut App, key: KeyEvent) {
         KeyCode::Char('a') if app.focus == app::Panel::Bands => app.add_band(),
         KeyCode::Char('d') | KeyCode::Delete if app.focus == app::Panel::Bands => app.remove_band(),
         KeyCode::Char('t') if app.focus == app::Panel::Bands => app.cycle_band_type(),
+        // Per-band channel targeting (multichannel only; gated inside the call).
+        KeyCode::Char('c') if app.focus == app::Panel::Bands => app.begin_select_band_channels(),
+        // L/R channel swap (≥2 channels; gated inside the call).
+        KeyCode::Char('w') => app.toggle_swap_lr(),
         KeyCode::Char('o') => app.begin_select_output(),
         KeyCode::Char('?') => app.show_help(),
+        _ => {}
+    }
+}
+
+/// Per-band channel-target picker: ↑↓/jk move, Space toggles the channel under
+/// the cursor, `a`/`n` select all/none, Enter applies, Esc cancels.
+fn handle_band_channels(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => app.cancel_input(),
+        KeyCode::Up | KeyCode::Char('k') => app.band_channels_move(-1),
+        KeyCode::Down | KeyCode::Char('j') => app.band_channels_move(1),
+        KeyCode::Char(' ') => app.band_channels_toggle(),
+        KeyCode::Char('a') => app.band_channels_set_all(),
+        KeyCode::Char('n') => app.band_channels_set_none(),
+        KeyCode::Enter => app.band_channels_apply(),
         _ => {}
     }
 }

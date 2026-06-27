@@ -4,6 +4,8 @@ use crate::{
     curve,
     settings::{ConfirmAction, SettingsState, TABS},
 };
+use resonance_ipc::{ChannelMask, RoutingMatrix};
+
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
@@ -36,6 +38,14 @@ pub fn render(app: &App, frame: &mut Frame) {
     }
     if let InputMode::Settings(s) = &app.mode {
         render_settings(s, app, frame, frame.area());
+    }
+    if let InputMode::SelectBandChannels {
+        index,
+        mask,
+        cursor,
+    } = &app.mode
+    {
+        render_band_channels(*index, *mask, *cursor, app, frame, frame.area());
     }
     if let InputMode::Help = &app.mode {
         render_help(frame, frame.area());
@@ -82,10 +92,12 @@ fn render_help(frame: &mut Frame, area: Rect) {
         key("a", "add band"),
         key("d / Del", "remove band"),
         key("t", "cycle band type"),
+        key("c", "channel targeting (multichannel)"),
         Line::raw(""),
         head("Global"),
         key("+ / -", "preamp ±0.5 dB"),
         key("p", "power on/off"),
+        key("w", "swap L/R channels (≥2ch)"),
         key("l", "load preset (file browser)"),
         key("o", "select output device"),
         key("s", "settings (profiles / mappings)"),
@@ -111,10 +123,17 @@ fn render_help(frame: &mut Frame, area: Rect) {
 
 fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
     let common = "[Tab] focus  [↑↓] select  [←→] adjust  [+/-] preamp  [Space] toggle  [l] load  [s] settings  [o] output  [p] power  [?] help  [q] quit";
-    let ctx = match app.focus {
-        Panel::Effects => "  •  [←→] intensity",
-        Panel::Bands => "  •  [a] add  [d] del  [t] type",
+    let mut ctx = match app.focus {
+        Panel::Effects => "  •  [←→] intensity".to_string(),
+        Panel::Bands => "  •  [a] add  [d] del  [t] type".to_string(),
     };
+    // Channel hints only when relevant (progressive disclosure).
+    if app.focus == Panel::Bands && app.show_ch() {
+        ctx.push_str("  [c] chans");
+    }
+    if app.state.as_ref().map(|s| s.channels >= 2).unwrap_or(false) {
+        ctx.push_str("  [w] swap L/R");
+    }
     let line = Line::from(vec![
         Span::styled(format!(" {common}"), Style::default().fg(Color::DarkGray)),
         Span::styled(ctx, Style::default().fg(Color::Cyan)),
@@ -212,6 +231,29 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         Color::DarkGray
     };
 
+    // Channel / routing summary — surfaced only when it's not plain stereo
+    // passthrough (progressive disclosure: stereo users see nothing here).
+    let ch_str = app.state.as_ref().and_then(|s| {
+        let routed = s.routing.is_some();
+        let swapped =
+            s.channels >= 2 && s.routing.as_ref() == Some(&RoutingMatrix::swap(s.channels, 0, 1));
+        let interesting = s.channels != 2 || s.out_channels != s.channels || routed;
+        if !interesting {
+            return None;
+        }
+        let mut t = if s.out_channels != 0 && s.out_channels != s.channels {
+            format!("{}→{}ch", s.channels, s.out_channels)
+        } else {
+            format!("{}ch", s.channels)
+        };
+        if swapped {
+            t.push_str(" L⇄R");
+        } else if routed {
+            t.push_str(" routed");
+        }
+        Some(t)
+    });
+
     let sep = || Span::styled(" │ ", Style::default().fg(Color::DarkGray));
 
     let mut spans = vec![
@@ -224,13 +266,17 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         sep(),
         Span::styled(preamp, Style::default().fg(preamp_color)),
         sep(),
-        Span::styled(in_str, Style::default().fg(level_color)),
-        sep(),
-        Span::styled(out_str, Style::default().fg(level_color)),
-        sep(),
-        Span::styled(dsp_str, Style::default().fg(dsp_color)),
-        sep(),
     ];
+    if let Some(ch) = ch_str {
+        spans.push(Span::styled(ch, Style::default().fg(Color::Cyan)));
+        spans.push(sep());
+    }
+    spans.push(Span::styled(in_str, Style::default().fg(level_color)));
+    spans.push(sep());
+    spans.push(Span::styled(out_str, Style::default().fg(level_color)));
+    spans.push(sep());
+    spans.push(Span::styled(dsp_str, Style::default().fg(dsp_color)));
+    spans.push(sep());
     // Always reserve the clip slot so it flips OK→CLIP in place without shifting.
     if clip_active {
         spans.push(Span::styled("CLIP", Style::default().fg(Color::Red).bold()));
@@ -318,28 +364,40 @@ fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
         ),
     ];
 
-    let datasets = vec![
+    // Colour-code the response by gain sign: boost green, cut red, neutral cyan
+    // near 0 dB (matches the GUI's gain-signed curve tint). Build it from the
+    // zero reference, the coloured curve runs, then the band markers.
+    let runs = curve_runs(&curve_data);
+    let mut datasets = vec![
         Dataset::default()
             .marker(symbols::Marker::Braille)
             .graph_type(GraphType::Line)
             .style(Style::default().fg(Color::DarkGray))
             .data(&zero_pts),
-        Dataset::default()
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(Color::Cyan))
-            .data(&curve_data),
+    ];
+    for (color, pts) in &runs {
+        datasets.push(
+            Dataset::default()
+                .marker(symbols::Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Style::default().fg(*color))
+                .data(pts),
+        );
+    }
+    datasets.push(
         Dataset::default()
             .marker(symbols::Marker::Dot)
             .graph_type(GraphType::Scatter)
             .style(Style::default().fg(Color::DarkGray))
             .data(&markers_other),
+    );
+    datasets.push(
         Dataset::default()
             .marker(symbols::Marker::Dot)
             .graph_type(GraphType::Scatter)
             .style(Style::default().fg(Color::Yellow).bold())
             .data(&marker_sel),
-    ];
+    );
 
     let chart = Chart::new(datasets)
         .x_axis(
@@ -356,6 +414,47 @@ fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
         );
 
     frame.render_widget(chart, inner);
+}
+
+/// Split the response polyline into contiguous colour runs by gain sign so the
+/// curve renders boost-green / cut-red / neutral-cyan. Each run repeats the
+/// previous run's last point so the coloured segments join seamlessly.
+fn curve_runs(points: &[(f64, f64)]) -> Vec<(Color, Vec<(f64, f64)>)> {
+    fn bucket(g: f64) -> u8 {
+        if g >= 1.0 {
+            2
+        } else if g <= -1.0 {
+            0
+        } else {
+            1
+        }
+    }
+    fn colour(bk: u8) -> Color {
+        match bk {
+            2 => Color::Green,
+            0 => Color::LightRed,
+            _ => Color::Cyan,
+        }
+    }
+    let mut runs: Vec<(Color, Vec<(f64, f64)>)> = Vec::new();
+    let mut cur: Option<u8> = None;
+    for &p in points {
+        let bk = bucket(p.1);
+        if cur == Some(bk) {
+            runs.last_mut().unwrap().1.push(p);
+        } else {
+            // Bridge to the previous run's endpoint so the line stays continuous
+            // across the colour change.
+            let mut seg = Vec::new();
+            if let Some(prev) = runs.last().and_then(|r| r.1.last().copied()) {
+                seg.push(prev);
+            }
+            seg.push(p);
+            runs.push((colour(bk), seg));
+            cur = Some(bk);
+        }
+    }
+    runs
 }
 
 // ── Spectrum analyzer ────────────────────────────────────────────────────
@@ -595,8 +694,8 @@ fn render_bands(app: &App, frame: &mut Frame, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let bands = match &app.state {
-        Some(s) if !s.bands.is_empty() => s.bands.clone(),
+    let (bands, channels, layout) = match &app.state {
+        Some(s) if !s.bands.is_empty() => (s.bands.clone(), s.channels, s.channel_layout.clone()),
         _ => {
             frame.render_widget(
                 Paragraph::new(" (no bands — press 'a' to add, or load a preset)")
@@ -611,49 +710,64 @@ fn render_bands(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
 
+    // Progressive disclosure: the per-band channel column only appears on
+    // >2-channel devices so stereo users get a clean table.
+    let show_ch = channels > 2;
     let full_names = crate::layout::band_type_full(inner.width);
 
-    // Per-column alignment: numbers right, enable centred, type/bar left.
-    let align = |c: usize| match c {
-        0 | 2 | 3 | 4 => Alignment::Right,
-        5 => Alignment::Center,
-        _ => Alignment::Left,
+    // One cell renderer for both header and data rows.
+    let put = |frame: &mut Frame, rect: Rect, text: &str, style: Style, align: Alignment| {
+        frame.render_widget(Paragraph::new(text).style(style).alignment(align), rect);
     };
-    // band_columns has a spacer rect at index 5; map logical column → rect index.
-    let ri = |c: usize| if c >= 5 { c + 1 } else { c };
 
     // ── Header row ──
     let header_rect = Rect::new(inner.x, inner.y, inner.width, 1);
-    let hcols = crate::layout::band_columns(header_rect);
-    let headers: [&str; 7] = if full_names {
-        ["#", "Type", "Freq", "Gain", "Q", "Enabled", "Gain Graph"]
-    } else {
-        ["#", "Type", "Hz", "dB", "Q", "On", ""]
-    };
-    let hdr_style = Style::default().bold().fg(Color::DarkGray);
-    for (c, h) in headers.iter().enumerate() {
-        // Highlight the active field's column header when focused.
-        let active = focused
-            && matches!(
-                (c, app.band_field),
-                (2, BandField::Freq) | (3, BandField::Gain) | (4, BandField::Q)
-            );
-        let style = if active {
-            Style::default().bold().fg(Color::Yellow)
+    let hcols = crate::layout::band_columns(header_rect, show_ch);
+    let bar_idx = hcols.len() - 1; // gain bar is always the last rect
+    let ch_idx = if show_ch { Some(7usize) } else { None };
+
+    let hdr = Style::default().bold().fg(Color::DarkGray);
+    let active_hdr = Style::default().bold().fg(Color::Yellow);
+    let field_hdr = |field: BandField| {
+        if focused && app.band_field == field {
+            active_hdr
         } else {
-            hdr_style
-        };
-        // Type/Freq/Gain headers track their data alignment; the rest centre.
-        let halign = match c {
-            1 => Alignment::Left,          // Type
-            0 | 2 | 3 => Alignment::Right, // #, Freq, Gain
-            _ => Alignment::Center,        // Q, Enabled, Level
-        };
-        frame.render_widget(
-            Paragraph::new(*h).style(style).alignment(halign),
-            hcols[ri(c)],
-        );
+            hdr
+        }
+    };
+    put(frame, hcols[0], "#", hdr, Alignment::Right);
+    put(frame, hcols[1], "Type", hdr, Alignment::Left);
+    let (h_freq, h_gain, h_en, h_bar) = if full_names {
+        ("Freq", "Gain", "Enabled", "Gain Graph")
+    } else {
+        ("Hz", "dB", "On", "")
+    };
+    put(
+        frame,
+        hcols[2],
+        h_freq,
+        field_hdr(BandField::Freq),
+        Alignment::Right,
+    );
+    put(
+        frame,
+        hcols[3],
+        h_gain,
+        field_hdr(BandField::Gain),
+        Alignment::Right,
+    );
+    put(
+        frame,
+        hcols[4],
+        "Q",
+        field_hdr(BandField::Q),
+        Alignment::Center,
+    );
+    put(frame, hcols[6], h_en, hdr, Alignment::Center);
+    if let Some(ci) = ch_idx {
+        put(frame, hcols[ci], "Ch", hdr, Alignment::Left);
     }
+    put(frame, hcols[bar_idx], h_bar, hdr, Alignment::Center);
 
     // ── Data rows (with scroll) ──
     let visible = (inner.height - 1) as usize;
@@ -663,16 +777,30 @@ fn render_bands(app: &App, frame: &mut Frame, area: Rect) {
         let b = &bands[i];
         let y = inner.y + 1 + vis as u16;
         let row_rect = Rect::new(inner.x, y, inner.width, 1);
-        let cols = crate::layout::band_columns(row_rect);
+        let cols = crate::layout::band_columns(row_rect, show_ch);
+        let bar_rect = cols[cols.len() - 1];
         let selected = focused && app.band_cursor == i;
 
-        // Subtle stripe + arrow on the selected row so it reads as a row, not a cell.
+        // Subtle stripe on the selected row so it reads as a row, not a cell.
         if selected {
             frame.render_widget(
                 Block::default().style(Style::default().bg(Color::Rgb(28, 28, 36))),
                 row_rect,
             );
         }
+
+        // Active field → strong highlight; disabled band → grey; else colour by
+        // meaning. Selected rows are bold.
+        let field_style = Style::default().fg(Color::Black).bg(Color::Yellow).bold();
+        let cell = |fg: Color| {
+            let s = if b.enabled {
+                Style::default().fg(fg)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            if selected { s.bold() } else { s }
+        };
+        let active = |field: BandField| selected && app.band_field == field;
 
         let type_name = if full_names {
             b.band_type.full().to_string()
@@ -686,48 +814,97 @@ fn render_bands(app: &App, frame: &mut Frame, area: Rect) {
         } else {
             "○"
         };
-        let bar = gain_bar(b.gain_db, cols[ri(6)].width as usize);
-        let cells = [
-            format!("{}", i + 1),
-            type_name,
-            fmt_freq(b.freq),
-            format!("{:+.1}", b.gain_db),
-            format!("{:.2}", b.q),
-            enable.to_string(),
-            bar,
-        ];
 
-        for (c, text) in cells.iter().enumerate() {
-            let field_active = selected
-                && matches!(
-                    (c, app.band_field),
-                    (2, BandField::Freq) | (3, BandField::Gain) | (4, BandField::Q)
-                );
-
-            // Active field gets a strong highlight; disabled bands grey out;
-            // otherwise colour Freq/Gain by meaning.
-            let style = if field_active {
-                Style::default().fg(Color::Black).bg(Color::Yellow).bold()
-            } else if !b.enabled {
-                Style::default().fg(Color::DarkGray)
+        put(
+            frame,
+            cols[0],
+            &format!("{}", i + 1),
+            cell(Color::Gray),
+            Alignment::Right,
+        );
+        put(
+            frame,
+            cols[1],
+            &type_name,
+            cell(Color::Cyan),
+            Alignment::Left,
+        );
+        put(
+            frame,
+            cols[2],
+            &fmt_freq(b.freq),
+            if active(BandField::Freq) {
+                field_style
             } else {
-                let fg = match c {
-                    1 => Color::Cyan,               // type
-                    2 => freq_color(b.freq),        // freq across the spectrum
-                    3 | 6 => gain_color(b.gain_db), // gain text + bar
-                    5 => Color::Green,              // enabled dot
-                    _ => Color::Gray,               // # and Q
-                };
-                let s = Style::default().fg(fg);
-                if selected { s.bold() } else { s }
+                cell(freq_color(b.freq))
+            },
+            Alignment::Right,
+        );
+        put(
+            frame,
+            cols[3],
+            &format!("{:+.1}", b.gain_db),
+            if active(BandField::Gain) {
+                field_style
+            } else {
+                cell(gain_color(b.gain_db))
+            },
+            Alignment::Right,
+        );
+        put(
+            frame,
+            cols[4],
+            &format!("{:.2}", b.q),
+            if active(BandField::Q) {
+                field_style
+            } else {
+                cell(Color::Gray)
+            },
+            Alignment::Right,
+        );
+        put(
+            frame,
+            cols[6],
+            enable,
+            cell(Color::Green),
+            Alignment::Center,
+        );
+        if let Some(ci) = ch_idx {
+            let tag = channel_tag(b.channels, &layout, channels);
+            // Global (the common default) reads as dim "no override"; a real
+            // subset stands out in cyan.
+            let col = if b.channels.is_global(channels) {
+                Color::DarkGray
+            } else {
+                Color::Cyan
             };
-            frame.render_widget(
-                Paragraph::new(text.as_str())
-                    .style(style)
-                    .alignment(align(c)),
-                cols[ri(c)],
-            );
+            put(frame, cols[ci], &tag, cell(col), Alignment::Left);
         }
+        let bar = gain_bar(b.gain_db, bar_rect.width as usize);
+        put(
+            frame,
+            bar_rect,
+            &bar,
+            cell(gain_color(b.gain_db)),
+            Alignment::Left,
+        );
+    }
+}
+
+/// Short label for a band's channel target: `all` / `FL` / `FL FR` / `FL +2`
+/// / `none`. Mirrors the GUI's per-band channel tag (multichannel only).
+fn channel_tag(mask: ChannelMask, layout: &[String], channels: usize) -> String {
+    if mask.is_global(channels) {
+        return "all".to_string();
+    }
+    let names: Vec<&str> = (0..channels)
+        .filter(|&c| mask.contains(c))
+        .map(|c| layout.get(c).map(String::as_str).unwrap_or("?"))
+        .collect();
+    match names.len() {
+        0 => "none".to_string(),
+        1 | 2 => names.join(" "),
+        _ => format!("{} +{}", names[0], names.len() - 1),
     }
 }
 
@@ -935,6 +1112,78 @@ fn render_output_selector(
 
     let mut list_state = ListState::default();
     list_state.select(Some(cursor));
+    let list = List::new(items)
+        .highlight_symbol("▶ ")
+        .highlight_style(Style::default().fg(Color::Yellow).bold());
+    frame.render_stateful_widget(list, inner, &mut list_state);
+}
+
+// ── Per-band channel-target picker ──────────────────────────────────────────
+
+fn render_band_channels(
+    index: usize,
+    mask: ChannelMask,
+    cursor: usize,
+    app: &App,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let (channels, layout) = app
+        .state
+        .as_ref()
+        .map(|s| (s.channels, s.channel_layout.clone()))
+        .unwrap_or((0, vec![]));
+
+    // Grow to fit the channel list, but never past the screen: clamp the height
+    // to `area` and recentre so the bottom border + keybind footer stay visible.
+    // The inner List then scrolls (ListState keeps the cursor in view) for high
+    // channel counts instead of rendering rows off-screen.
+    let base = centered_rect(area, 44, 60);
+    let min_h = (channels as u16 + 4).max(6);
+    let w = base.width.max(28).min(area.width);
+    let h = base.height.max(min_h).min(area.height);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let dialog = Rect::new(x, y, w, h);
+    frame.render_widget(Clear, dialog);
+
+    let block = Block::default()
+        .title(Line::from(format!(" Band {} channels ", index + 1)).fg(Color::Yellow))
+        .title_bottom(
+            Line::from(" ↑↓ move  Space toggle  a all  n none  Enter ok  Esc cancel ")
+                .fg(Color::DarkGray),
+        )
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(dialog);
+    frame.render_widget(block, dialog);
+
+    if channels == 0 {
+        frame.render_widget(
+            Paragraph::new(" (no channels)").style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+        return;
+    }
+
+    let items: Vec<ListItem> = (0..channels)
+        .map(|c| {
+            let name = layout.get(c).map(String::as_str).unwrap_or("?");
+            // A global (ALL) mask shows every channel as selected.
+            let on = mask.is_global(channels) || mask.contains(c);
+            let check = if on { "[x]" } else { "[ ]" };
+            let style = if on {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            ListItem::new(format!("{check} {name}")).style(style)
+        })
+        .collect();
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(cursor.min(channels - 1)));
     let list = List::new(items)
         .highlight_symbol("▶ ")
         .highlight_style(Style::default().fg(Color::Yellow).bold());
@@ -1468,5 +1717,228 @@ fn fmt_freq(hz: f64) -> String {
         format!("{:.1}kHz", hz / 1000.0)
     } else {
         format!("{:.0}Hz", hz)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use resonance_ipc::default_channel_layout;
+
+    fn layout6() -> Vec<String> {
+        default_channel_layout(6) // FL FR FC LFE RL RR
+    }
+
+    #[test]
+    fn channel_tag_global_is_all() {
+        assert_eq!(channel_tag(ChannelMask::ALL, &layout6(), 6), "all");
+        // A concrete full set also reads as "all".
+        assert_eq!(
+            channel_tag(ChannelMask::from_indices(0..6), &layout6(), 6),
+            "all"
+        );
+    }
+
+    #[test]
+    fn channel_tag_empty_is_none() {
+        assert_eq!(channel_tag(ChannelMask::NONE, &layout6(), 6), "none");
+    }
+
+    #[test]
+    fn channel_tag_single_and_pair_name_channels() {
+        assert_eq!(channel_tag(ChannelMask::single(0), &layout6(), 6), "FL");
+        assert_eq!(
+            channel_tag(ChannelMask::from_indices([0, 1]), &layout6(), 6),
+            "FL FR"
+        );
+    }
+
+    #[test]
+    fn channel_tag_many_summarises_with_count() {
+        // 3+ channels collapse to "<first> +N".
+        assert_eq!(
+            channel_tag(ChannelMask::from_indices([0, 2, 4]), &layout6(), 6),
+            "FL +2"
+        );
+    }
+
+    #[test]
+    fn channel_tag_unknown_layout_index_is_placeholder() {
+        // A non-global mask targeting a channel with no layout label → "?".
+        assert_eq!(
+            channel_tag(ChannelMask::single(1), &["FL".to_string()], 2),
+            "?"
+        );
+    }
+
+    // ── Headless render smoke tests (TestBackend) ──────────────────────────
+
+    use crate::app::{App, InputMode, Panel};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use resonance_ipc::{BandState, BandType, DaemonState, EffectsState, Meters};
+
+    fn band(freq: f64, channels: ChannelMask) -> BandState {
+        BandState {
+            band_type: BandType::Peaking,
+            freq,
+            gain_db: 3.0,
+            q: 1.4,
+            enabled: true,
+            channels,
+        }
+    }
+
+    fn fixture(channels: usize) -> DaemonState {
+        DaemonState {
+            enabled: true,
+            preamp_db: 0.0,
+            eq_enabled: true,
+            bands: vec![
+                band(100.0, ChannelMask::ALL),
+                band(1000.0, ChannelMask::single(2)), // targets FC on ≥3ch
+            ],
+            effects: EffectsState::default(),
+            current_preset: None,
+            sample_rate: 48000.0,
+            capture_rate: 48000.0,
+            channels,
+            out_channels: channels,
+            channel_layout: default_channel_layout(channels),
+            routing: None,
+            spectrum: vec![0.0; 16],
+            active_output: None,
+            mapped_profile: None,
+            available_sinks: vec![],
+            sink_descriptions: vec![],
+            preferred_output: None,
+            meters: Meters::default(),
+        }
+    }
+
+    fn buffer_text(buf: &Buffer) -> String {
+        let area = buf.area;
+        let mut s = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                s.push_str(buf[(x, y)].symbol());
+            }
+            s.push('\n');
+        }
+        s
+    }
+
+    fn render_to_text(app: &App, w: u16, h: u16) -> String {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| render(app, f)).unwrap();
+        buffer_text(term.backend().buffer())
+    }
+
+    #[test]
+    fn multichannel_shows_channel_column_and_status() {
+        let mut app = App::new();
+        app.state = Some(fixture(6));
+        app.focus = Panel::Bands;
+        let text = render_to_text(&app, 120, 44);
+        // Ch column header + the per-band FC tag are present on >2ch.
+        assert!(text.contains(" Ch "), "missing Ch header:\n{text}");
+        assert!(text.contains("FC"), "missing FC channel tag:\n{text}");
+        // Channel summary surfaces in the status bar.
+        assert!(text.contains("6ch"), "missing 6ch status:\n{text}");
+    }
+
+    #[test]
+    fn stereo_hides_channel_column() {
+        let mut app = App::new();
+        app.state = Some(fixture(2));
+        app.focus = Panel::Bands;
+        let text = render_to_text(&app, 120, 44);
+        // Progressive disclosure: no Ch column, no >2ch position labels, and no
+        // channel summary in the status (plain stereo passthrough).
+        assert!(!text.contains("FC"), "stereo leaked a >2ch label:\n{text}");
+        assert!(
+            !text.contains("2ch"),
+            "stereo showed a channel summary:\n{text}"
+        );
+    }
+
+    #[test]
+    fn channel_picker_renders_checkboxes() {
+        let mut app = App::new();
+        app.state = Some(fixture(6));
+        app.focus = Panel::Bands;
+        app.mode = InputMode::SelectBandChannels {
+            index: 1,
+            mask: ChannelMask::single(2),
+            cursor: 0,
+        };
+        let text = render_to_text(&app, 120, 44);
+        assert!(
+            text.contains("Band 2 channels"),
+            "missing picker title:\n{text}"
+        );
+        assert!(text.contains("[x]"), "missing checked box:\n{text}");
+        assert!(text.contains("[ ]"), "missing unchecked box:\n{text}");
+    }
+
+    #[test]
+    fn channel_picker_fits_small_terminal_with_many_channels() {
+        let mut app = App::new();
+        app.state = Some(fixture(64));
+        app.focus = Panel::Bands;
+        app.mode = InputMode::SelectBandChannels {
+            index: 0,
+            mask: ChannelMask::ALL,
+            cursor: 60,
+        };
+        // 24-row terminal with 64 channels: the dialog must clamp to the screen
+        // so the bottom border + keybind footer stay visible (and the inner list
+        // scrolls instead of rendering rows off-screen). No panic either.
+        let text = render_to_text(&app, 100, 24);
+        // The footer row is on-screen (its text may be horizontally truncated by
+        // the dialog width, like any ratatui title); the title shows up top; and
+        // the list scrolled to keep the cursor channel visible (not off-screen).
+        assert!(
+            text.contains("↑↓ move"),
+            "picker footer row clipped:\n{text}"
+        );
+        assert!(
+            text.contains("Band 1 channels"),
+            "picker title clipped:\n{text}"
+        );
+        assert!(
+            text.contains("CH60"),
+            "list did not scroll to cursor:\n{text}"
+        );
+    }
+
+    #[test]
+    fn curve_runs_flat_is_single_neutral_run() {
+        let pts = vec![(0.0, 0.0), (1.0, 0.0), (2.0, 0.5)];
+        let runs = curve_runs(&pts);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].0, Color::Cyan);
+        assert_eq!(runs[0].1, pts);
+    }
+
+    #[test]
+    fn curve_runs_split_by_sign_and_bridge_for_continuity() {
+        // neutral, neutral, boost, boost, cut.
+        let pts = vec![(0.0, 0.0), (1.0, 0.0), (2.0, 5.0), (3.0, 5.0), (4.0, -5.0)];
+        let runs = curve_runs(&pts);
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0].0, Color::Cyan);
+        assert_eq!(runs[1].0, Color::Green);
+        assert_eq!(runs[2].0, Color::LightRed);
+        // Each run begins at the previous run's last point so the coloured
+        // segments join with no visible gap.
+        assert_eq!(runs[1].1[0], *runs[0].1.last().unwrap());
+        assert_eq!(runs[2].1[0], *runs[1].1.last().unwrap());
+        // Dropping the bridge point reconstructs the original point sequence.
+        let mut rebuilt = runs[0].1.clone();
+        rebuilt.extend(runs[1].1.iter().skip(1).copied());
+        rebuilt.extend(runs[2].1.iter().skip(1).copied());
+        assert_eq!(rebuilt, pts);
     }
 }
