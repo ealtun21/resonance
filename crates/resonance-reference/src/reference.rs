@@ -19,11 +19,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 /// A serialisable snapshot of the reference overlay — the active measurement,
-/// target selection and customizer — persisted by the GUI across sessions so a
-/// loaded measurement (and the EQ context it belongs to) survives a restart,
-/// even when reference mode is currently off. Stored via eframe's app storage.
+/// target selection and customizer — persisted by the client across sessions so
+/// a loaded measurement (and the EQ context it belongs to) survives a restart,
+/// even when reference mode is currently off.
 #[derive(Serialize, Deserialize, Default)]
-pub(crate) struct PersistedReference {
+pub struct PersistedReference {
     enabled: bool,
     show_measurement: bool,
     normalized: bool,
@@ -75,7 +75,7 @@ const DF_NAME: &str = "Diffuse Field";
 /// preference research, so the band widens broadly above ~2.5 kHz. These are a
 /// shaped approximation (no proprietary preference dataset is reproduced), safe
 /// to ship.
-pub(crate) fn preference_bounds(f: f64) -> (f64, f64) {
+pub fn preference_bounds(f: f64) -> (f64, f64) {
     // smoothstep between edges `e0`→`e1` (works in either direction).
     let ss = |e0: f64, e1: f64, x: f64| {
         let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
@@ -90,14 +90,14 @@ pub(crate) fn preference_bounds(f: f64) -> (f64, f64) {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Channel {
+pub enum Channel {
     Avg,
     Left,
     Right,
 }
 
 impl Channel {
-    pub(crate) fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Channel::Avg => "L+R",
             Channel::Left => "L",
@@ -110,7 +110,7 @@ impl Channel {
 /// adjustments stack on top of whichever target is active, so there's no
 /// separate "custom" entry — any target is editable.
 #[derive(Clone, PartialEq)]
-pub(crate) enum TargetSel {
+pub enum TargetSel {
     None,
     /// A named curve from `targets` (built-in or user file).
     File(String),
@@ -121,7 +121,7 @@ pub(crate) enum TargetSel {
 
 /// Which tab the "Manage targets" dialog is showing.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ManageTab {
+pub enum ManageTab {
     /// squig.link target curves (parsed from each site's config.js).
     Targets,
     /// squig.link headphone/IEM measurements, added as a target (L+R averaged).
@@ -132,7 +132,7 @@ pub(crate) enum ManageTab {
 
 /// One row in the "Your targets" library list: a selectable target plus how to
 /// remove it (delete a user file, or hide a built-in/generated one).
-pub(crate) struct LibEntry {
+pub struct LibEntry {
     pub label: String,
     /// `true` for the embedded defaults / generated PEQdB targets (removed by
     /// hiding, restorable via "Reset to defaults"); `false` for user files.
@@ -141,7 +141,7 @@ pub(crate) struct LibEntry {
 
 /// Role of a drawn reference series — `curve_view` maps it to colour/style.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SeriesRole {
+pub enum SeriesRole {
     /// The target line (dashed; flat 0 in the normalised view).
     Target,
     /// Measurement + current EQ — the line you shape onto the target.
@@ -150,14 +150,14 @@ pub(crate) enum SeriesRole {
     Measurement,
 }
 
-pub(crate) struct RefSeries {
+pub struct RefSeries {
     pub role: SeriesRole,
     /// `(log10 freq, dB)` on the requested grid.
     pub pts: Vec<(f64, f64)>,
 }
 
 /// One entry in the target-curve library.
-pub(crate) struct TargetItem {
+pub struct TargetItem {
     pub name: String,
     pub curve: RefCurve,
     /// Embedded default (can't be deleted); user-dir curves can.
@@ -166,7 +166,7 @@ pub(crate) struct TargetItem {
     pub path: Option<std::path::PathBuf>,
 }
 
-pub(crate) struct ReferenceState {
+pub struct ReferenceState {
     /// Master switch — off means the graph is pure EQ (no overlays, clean UI).
     pub enabled: bool,
     /// Toggle: draw the raw (un-EQ'd) measurement next to the result.
@@ -254,14 +254,14 @@ impl Default for ReferenceState {
 
 impl ReferenceState {
     /// True when overlays should be drawn (enabled + something to show).
-    pub(crate) fn active(&self) -> bool {
+    pub fn active(&self) -> bool {
         // Overlays only make sense against a measurement — comparing the bare EQ
         // curve to a target tells you nothing.
         self.enabled && self.measurement.is_some()
     }
 
     /// The normalised view only applies with a measurement to deviate.
-    pub(crate) fn norm_view(&self) -> bool {
+    pub fn norm_view(&self) -> bool {
         self.normalized && self.measurement.is_some()
     }
 
@@ -283,7 +283,7 @@ impl ReferenceState {
     /// Selectable targets for the dropdown — only the *visible* library, i.e.
     /// everything except entries the user has removed (`hidden`). Defaults
     /// (built-ins + generated) first, then user/added curves.
-    pub(crate) fn target_options(&self) -> Vec<(String, TargetSel)> {
+    pub fn target_options(&self) -> Vec<(String, TargetSel)> {
         let visible = |name: &str| !self.hidden.contains(name);
         let mut opts = vec![("None".to_string(), TargetSel::None)];
         for t in self
@@ -312,7 +312,7 @@ impl ReferenceState {
     /// The visible target library as removable rows ("Your targets" tab). Built
     /// from [`target_options`] minus the `None` entry, tagging each as a
     /// built-in/generated default (hidden to remove) or a user file (deleted).
-    pub(crate) fn library_entries(&self) -> Vec<LibEntry> {
+    pub fn library_entries(&self) -> Vec<LibEntry> {
         self.target_options()
             .into_iter()
             .filter(|(_, sel)| !matches!(sel, TargetSel::None))
@@ -329,16 +329,16 @@ impl ReferenceState {
 
     /// Count of currently-hidden defaults (shown in the manage dialog so the
     /// "Reset to defaults" button reads as actionable).
-    pub(crate) fn hidden_count(&self) -> usize {
+    pub fn hidden_count(&self) -> usize {
         self.hidden.len()
     }
 
     /// Whether the active target can be removed (anything but "None").
-    pub(crate) fn active_target_removable(&self) -> bool {
+    pub fn active_target_removable(&self) -> bool {
         !matches!(self.target_sel, TargetSel::None)
     }
 
-    pub(crate) fn label_for(sel: &TargetSel) -> String {
+    pub fn label_for(sel: &TargetSel) -> String {
         match sel {
             TargetSel::None => "None".to_string(),
             TargetSel::File(n) => n.clone(),
@@ -347,7 +347,7 @@ impl ReferenceState {
         }
     }
 
-    pub(crate) fn target_label(&self) -> String {
+    pub fn target_label(&self) -> String {
         Self::label_for(&self.target_sel)
     }
 
@@ -369,13 +369,13 @@ impl ReferenceState {
         }
     }
 
-    pub(crate) fn set_target(&mut self, sel: TargetSel) {
+    pub fn set_target(&mut self, sel: TargetSel) {
         self.target_sel = sel;
         self.rebuild_target();
     }
 
     /// Re-resolve `self.target` = base (from selection) + customizer adjustments.
-    pub(crate) fn rebuild_target(&mut self) {
+    pub fn rebuild_target(&mut self) {
         let base = self.resolve(&self.target_sel.clone());
         self.target = match base {
             None => None,
@@ -389,7 +389,7 @@ impl ReferenceState {
     }
 
     /// Re-scan the curve library (after a save / dropped-in file) and re-resolve.
-    pub(crate) fn reload_targets(&mut self) {
+    pub fn reload_targets(&mut self) {
         self.targets = load_targets();
         self.rebuild_target();
     }
@@ -404,7 +404,7 @@ impl ReferenceState {
     /// Write a curve to the user library as `<name>.txt` and reload the library.
     /// Un-hides the name (adding implies showing it). Returns the sanitized name
     /// on success. Does **not** change the active selection.
-    pub(crate) fn write_target(&mut self, name: &str, curve: &RefCurve) -> Option<String> {
+    pub fn write_target(&mut self, name: &str, curve: &RefCurve) -> Option<String> {
         let dir = resonance_ipc::paths::user_curve_dir();
         if std::fs::create_dir_all(&dir).is_err() {
             return None;
@@ -436,7 +436,7 @@ impl ReferenceState {
 
     /// Write a curve to the library, clear the customizer, and select it (the
     /// customizer's Save flow — its adjustments are baked into the saved curve).
-    pub(crate) fn save_target(&mut self, name: &str, curve: &RefCurve) {
+    pub fn save_target(&mut self, name: &str, curve: &RefCurve) {
         if let Some(name) = self.write_target(name, curve) {
             self.reset_adjust();
             self.set_target(TargetSel::File(name));
@@ -446,7 +446,7 @@ impl ReferenceState {
     /// Remove a target from the library by its selector label: delete the file
     /// for a user curve, or hide a built-in/generated default (restorable via
     /// [`reset_targets_to_defaults`](Self::reset_targets_to_defaults)).
-    pub(crate) fn remove_target_label(&mut self, label: &str) {
+    pub fn remove_target_label(&mut self, label: &str) {
         let user_path = self
             .targets
             .iter()
@@ -469,7 +469,7 @@ impl ReferenceState {
 
     /// Restore the default library: un-hide every built-in/generated target.
     /// User-added curves are kept (remove those individually).
-    pub(crate) fn reset_targets_to_defaults(&mut self) {
+    pub fn reset_targets_to_defaults(&mut self) {
         self.hidden.clear();
         self.save_hidden();
         self.reload_targets();
@@ -483,7 +483,7 @@ impl ReferenceState {
     }
 
     /// Snapshot the overlay for cross-session persistence.
-    pub(crate) fn to_persisted(&self) -> PersistedReference {
+    pub fn to_persisted(&self) -> PersistedReference {
         let (left, right) = match &self.measurement_lr {
             Some((l, r)) => (Some(l.clone()), r.clone()),
             None => (None, None),
@@ -518,7 +518,7 @@ impl ReferenceState {
     /// Restore a persisted overlay (on GUI startup). The measurement is loaded
     /// regardless of `enabled`, so re-enabling reference mode shows the same
     /// measurement the EQ was built against.
-    pub(crate) fn restore(&mut self, p: PersistedReference) {
+    pub fn restore(&mut self, p: PersistedReference) {
         self.enabled = p.enabled;
         self.show_measurement = p.show_measurement;
         self.normalized = p.normalized;
@@ -549,7 +549,7 @@ impl ReferenceState {
     }
 
     /// Load a local measurement file (`freq dB` text) as the active measurement.
-    pub(crate) fn load_measurement_file(&mut self, path: &std::path::Path) -> bool {
+    pub fn load_measurement_file(&mut self, path: &std::path::Path) -> bool {
         let Some(curve) = std::fs::read_to_string(path)
             .ok()
             .and_then(|t| RefCurve::parse(&t))
@@ -567,7 +567,7 @@ impl ReferenceState {
     }
 
     /// Import a local target file into the user library and select it.
-    pub(crate) fn import_target_file(&mut self, path: &std::path::Path) -> bool {
+    pub fn import_target_file(&mut self, path: &std::path::Path) -> bool {
         let Some(curve) = std::fs::read_to_string(path)
             .ok()
             .and_then(|t| RefCurve::parse(&t))
@@ -584,20 +584,14 @@ impl ReferenceState {
     }
 
     /// Install a freshly loaded measurement (L/mono + optional R).
-    pub(crate) fn set_measurement(
-        &mut self,
-        name: String,
-        iem: bool,
-        l: RefCurve,
-        r: Option<RefCurve>,
-    ) {
+    pub fn set_measurement(&mut self, name: String, iem: bool, l: RefCurve, r: Option<RefCurve>) {
         self.measurement_name = name;
         self.measurement_iem = iem;
         self.measurement_lr = Some((l, r));
         self.rebuild_measurement();
     }
 
-    pub(crate) fn clear_measurement(&mut self) {
+    pub fn clear_measurement(&mut self) {
         self.measurement_lr = None;
         self.measurement = None;
         self.measurement_name.clear();
@@ -605,7 +599,7 @@ impl ReferenceState {
     }
 
     /// Re-resolve `self.measurement` from channel choice + smoothing.
-    pub(crate) fn rebuild_measurement(&mut self) {
+    pub fn rebuild_measurement(&mut self) {
         self.measurement = self.measurement_lr.as_ref().map(|(l, r)| {
             let picked = match (self.channel, r) {
                 (Channel::Left, _) | (_, None) => l.clone(),
@@ -623,7 +617,7 @@ impl ReferenceState {
 
     /// Build the series to draw over `[vlo, vhi]` (log10 Hz) at `n` points,
     /// given the live EQ `bands`. Empty when nothing is active.
-    pub(crate) fn series(
+    pub fn series(
         &self,
         bands: &[BandState],
         sample_rate: f64,
@@ -786,4 +780,60 @@ fn load_targets() -> Vec<TargetItem> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preference_bounds_tight_mids_wider_extremes() {
+        let (lo_m, hi_m) = preference_bounds(1000.0);
+        // Midrange is tight and symmetric (~±1 dB).
+        assert!((lo_m - 1.0).abs() < 1e-9 && (hi_m - 1.0).abs() < 1e-9);
+
+        let (lo_b, hi_b) = preference_bounds(20.0);
+        // Bass tolerates more boost than cut, and is wider than the mids.
+        assert!(hi_b > lo_b, "bass skews toward boost");
+        assert!(lo_b > lo_m && hi_b > hi_m, "bass band wider than mids");
+
+        let (lo_t, hi_t) = preference_bounds(15000.0);
+        // Treble widens symmetrically (no bass skew up there).
+        assert!(lo_t > lo_m && hi_t > hi_m, "treble band wider than mids");
+        assert!((lo_t - hi_t).abs() < 1e-9, "treble widening is symmetric");
+    }
+
+    #[test]
+    fn default_state_inactive_and_emits_no_series() {
+        let s = ReferenceState::default();
+        // No measurement loaded → overlays are meaningless, so inactive.
+        assert!(!s.active());
+        assert!(!s.norm_view());
+        assert!(
+            s.series(&[], 48000.0, 64, LOG_MIN, LOG_MAX, 0.0).is_empty(),
+            "an inactive reference emits no series"
+        );
+    }
+
+    #[test]
+    fn persist_round_trip_preserves_toggles_and_customizer() {
+        let s = ReferenceState {
+            enabled: true,
+            show_measurement: true,
+            normalized: true,
+            show_bounds: true,
+            adj_tilt: -0.8,
+            adj_bass: 2.0,
+            ..ReferenceState::default()
+        };
+        let p = s.to_persisted();
+        let mut s2 = ReferenceState::default();
+        s2.restore(p);
+        assert_eq!(s2.enabled, s.enabled);
+        assert_eq!(s2.show_measurement, s.show_measurement);
+        assert_eq!(s2.normalized, s.normalized);
+        assert_eq!(s2.show_bounds, s.show_bounds);
+        assert_eq!(s2.adj_tilt, s.adj_tilt);
+        assert_eq!(s2.adj_bass, s.adj_bass);
+    }
 }

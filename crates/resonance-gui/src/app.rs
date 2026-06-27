@@ -296,12 +296,12 @@ pub struct GuiApp {
     pub(crate) migrate_settle: Option<u8>,
     /// Reference / measurement overlay state (target curve, headphone
     /// measurement, customizer, overlay-vs-deviation view).
-    pub(crate) reference: crate::reference::ReferenceState,
+    pub(crate) reference: resonance_reference::reference::ReferenceState,
     /// squig.link measurement downloader: command channel, event channel, and
     /// the last catalog snapshot + status it published.
-    pub(crate) dl_tx: std::sync::mpsc::Sender<crate::download::DlCmd>,
-    pub(crate) dl_rx: std::sync::mpsc::Receiver<crate::download::DlEvent>,
-    pub(crate) catalog: Option<crate::download::Catalog>,
+    pub(crate) dl_tx: std::sync::mpsc::Sender<resonance_reference::download::DlCmd>,
+    pub(crate) dl_rx: std::sync::mpsc::Receiver<resonance_reference::download::DlEvent>,
+    pub(crate) catalog: Option<resonance_reference::download::Catalog>,
     pub(crate) dl_status: String,
     pub(crate) dl_busy: bool,
     /// Background Auto-EQ fit: result channel + in-flight flag (the fit runs off
@@ -529,12 +529,17 @@ impl GuiApp {
         let (cmd_tx, ipc_rx) = std::sync::mpsc::channel::<WorkerCmd>();
         let shared = Arc::new(Mutex::new(GuiShared::default()));
         spawn_ipc_worker(ipc_rx, shared.clone(), cc.egui_ctx.clone());
-        let (dl_tx, dl_rx) = crate::download::spawn(cc.egui_ctx.clone());
+        // Wake the egui event loop whenever the downloader emits an event (it
+        // runs on a background thread). The shared crate is UI-agnostic, so we
+        // hand it a repaint closure rather than the egui Context itself.
+        let dl_ctx = cc.egui_ctx.clone();
+        let wake: resonance_reference::download::Wake = Arc::new(move || dl_ctx.request_repaint());
+        let (dl_tx, dl_rx) = resonance_reference::download::spawn(wake);
         // Warm the target/measurement catalog at startup from the on-disk cache
         // (instant) so the Manage/Browse dialogs open already populated; the
         // worker's `IfStale` policy silently re-fetches anything older than the
         // TTL in the background. Manual "Refresh" still forces a full re-fetch.
-        let _ = dl_tx.send(crate::download::DlCmd::Init);
+        let _ = dl_tx.send(resonance_reference::download::DlCmd::Init);
         let (autoeq_tx, autoeq_rx) = std::sync::mpsc::channel::<AutoEqOutcome>();
 
         let mut app = Self {
@@ -581,7 +586,7 @@ impl GuiApp {
             matugen_mtime: crate::theme::matugen_source_mtime(),
             last_matugen_check: Instant::now(),
             migrate_settle: None,
-            reference: crate::reference::ReferenceState::default(),
+            reference: resonance_reference::reference::ReferenceState::default(),
             dl_tx,
             dl_rx,
             catalog: None,
@@ -640,16 +645,16 @@ impl GuiApp {
     pub(crate) fn pump_downloads(&mut self) {
         while let Ok(ev) = self.dl_rx.try_recv() {
             match ev {
-                crate::download::DlEvent::Catalog(c) => self.catalog = Some(c),
-                crate::download::DlEvent::Status(s) => self.dl_status = s,
-                crate::download::DlEvent::Busy(b) => self.dl_busy = b,
-                crate::download::DlEvent::Fetched(f) => {
+                resonance_reference::download::DlEvent::Catalog(c) => self.catalog = Some(c),
+                resonance_reference::download::DlEvent::Status(s) => self.dl_status = s,
+                resonance_reference::download::DlEvent::Busy(b) => self.dl_busy = b,
+                resonance_reference::download::DlEvent::Fetched(f) => {
                     self.reference.enabled = true;
                     self.reference
                         .set_measurement(f.name, f.iem, f.left, f.right);
                     self.reference.show_browser = false;
                 }
-                crate::download::DlEvent::FetchedTarget { name, curve } => {
+                resonance_reference::download::DlEvent::FetchedTarget { name, curve } => {
                     // Added from the Manage-targets dialog; keep the dialog open
                     // so the user can add several in a row.
                     self.reference.write_target(&name, &curve);

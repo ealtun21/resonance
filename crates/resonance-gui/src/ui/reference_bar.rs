@@ -3,8 +3,6 @@
 //! graph stays pure EQ until the user opts in — keeping the main UI clean.
 
 use crate::app::GuiApp;
-use crate::download::{DlCmd, ModelEntry, TargetEntry};
-use crate::reference::{Channel, ManageTab};
 use crate::state::Snapshot;
 use crate::ui::icons::Icon;
 use crate::ui::kit;
@@ -12,6 +10,8 @@ use crate::ui::widgets::{dialog_window, ellipsize};
 use eframe::egui;
 use resonance_autoeq::{BandKind, Smoothing};
 use resonance_ipc::{BandState, BandType};
+use resonance_reference::download::{DlCmd, ModelEntry, TargetEntry};
+use resonance_reference::reference::{Channel, ManageTab};
 
 /// The three logical sections of the reference bar, drawn left→right with a
 /// hairline between them.
