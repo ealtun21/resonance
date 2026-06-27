@@ -320,6 +320,10 @@ pub struct GuiApp {
     /// Brief grace window to let a queued "Save & Quit" reach the daemon before
     /// the window actually closes.
     pub(crate) quit_deadline: Option<Instant>,
+    /// Opt-in: reveal per-band channel targeting even on ≤2-channel devices
+    /// (the per-band `Ch` column is otherwise hidden until >2ch, progressive
+    /// disclosure). Lets stereo users do per-channel (L/R) EQ. Persisted.
+    pub(crate) per_channel_eq: bool,
 }
 
 /// Messages from the UI thread to the IPC worker.
@@ -600,6 +604,11 @@ impl GuiApp {
             quit_save_name: String::new(),
             allow_close: false,
             quit_deadline: None,
+            per_channel_eq: cc
+                .storage
+                .and_then(|s| s.get_string("per_channel_eq"))
+                .map(|v| v == "true")
+                .unwrap_or(false),
         };
         if let Some(p) = persisted_ref.and_then(|j| serde_json::from_str(&j).ok()) {
             app.reference.restore(p);
@@ -852,6 +861,7 @@ impl eframe::App for GuiApp {
         if let Ok(j) = serde_json::to_string(&self.reference.to_persisted()) {
             storage.set_string("reference", j);
         }
+        storage.set_string("per_channel_eq", self.per_channel_eq.to_string());
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

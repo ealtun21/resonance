@@ -86,6 +86,9 @@ struct FilterData {
     routed: Vec<f64>,
     /// Live meters published to the IPC thread.
     meters: Arc<AtomicMeters>,
+    /// Last sample rate logged (so the *actual* negotiated graph rate is logged
+    /// once when it settles/changes, not the requested constant).
+    logged_rate: f64,
 }
 
 /// Pre-allocated scratch capacity: a generous upper bound on the PipeWire quantum
@@ -128,6 +131,7 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
         scratch: vec![0.0; MAX_QUANTUM * channels],
         routed: vec![0.0; MAX_QUANTUM * channels],
         meters,
+        logged_rate: 0.0,
     });
     let gs = Arc::new(Mutex::new(GraphState {
         raw_core: 0,
@@ -376,7 +380,8 @@ fn build_and_run(fd_ptr: *mut FilterData, gs: &Arc<Mutex<GraphState>>) -> Result
         .into_result()?;
 
     info!(
-        "PipeWire ready — 'Resonance EQ' is now the default output ({}ch [{}] @ {} Hz)",
+        "PipeWire ready — 'Resonance EQ' is now the default output ({}ch [{}], requested {} Hz; \
+         actual graph rate logged once negotiated)",
         channels, position, SAMPLE_RATE
     );
 
@@ -743,6 +748,17 @@ unsafe extern "C" fn filter_process_cb(data: *mut c_void, position: *mut spa_io_
         // resampling happens here — capture == DSP.
         fd.meters.set_sample_rate(fd.chain.sample_rate);
         fd.meters.set_capture_rate(fd.chain.sample_rate);
+        // Log the ACTUAL negotiated graph rate once it settles/changes (the
+        // "ready" line above only knew the requested rate). Guarded so it fires
+        // on startup + rare renegotiations, never per block.
+        if (fd.chain.sample_rate - fd.logged_rate).abs() > 0.5 {
+            fd.logged_rate = fd.chain.sample_rate;
+            info!(
+                "PipeWire graph rate: {:.0} Hz ({} ch)",
+                fd.chain.sample_rate,
+                fd.in_ports.len()
+            );
+        }
 
         // Gather the per-channel DSP buffers onto the stack (no heap on the RT
         // path). `channels` is fixed at the FilterData's port count.

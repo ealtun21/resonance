@@ -4246,6 +4246,7 @@ dependencies = [
  "resonance-preset",
  "resonance-reference",
  "serde",
+ "serde_json",
  "toml",
  "tracing-subscriber",
 ]
