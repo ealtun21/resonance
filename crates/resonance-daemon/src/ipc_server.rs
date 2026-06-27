@@ -2,6 +2,7 @@ use crate::config::{self, KnownSinks, Mappings, Profile};
 use crate::state::{AudioCommand, SharedState};
 use anyhow::Result;
 use resonance_dsp::chain::ProcessorChain;
+use resonance_dsp::channel::{ChannelMask as DspMask, ChannelMatrix};
 use resonance_dsp::filter::{ApoFilter, FilterError, FilterType};
 use resonance_ipc::{AbSlot, BandType, Command, Response};
 use resonance_preset::model::{ApoFilterType, EqBand};
@@ -317,8 +318,11 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
                 },
                 |chain| {
                     if let Some(f) = chain.filters.get(index) {
-                        let (ft, en) = (f.filter_type, f.enabled);
-                        if let Ok(new_f) = build_band(chain, ft, freq, gain_db, q, en) {
+                        // Preserve the band's channel mask across a param edit —
+                        // build_band makes a fresh filter, which would otherwise
+                        // reset it to global.
+                        let (ft, en, mask) = (f.filter_type, f.enabled, f.mask);
+                        if let Ok(new_f) = build_band(chain, ft, freq, gain_db, q, en, mask) {
                             chain.filters[index] = new_f;
                         }
                     }
@@ -350,7 +354,16 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
                     q,
                 },
                 |chain| {
-                    if let Ok(nf) = build_band(chain, band_type.into(), freq, gain_db, q, true) {
+                    // New bands are global by default; retarget with SetBandChannels.
+                    if let Ok(nf) = build_band(
+                        chain,
+                        band_type.into(),
+                        freq,
+                        gain_db,
+                        q,
+                        true,
+                        DspMask::ALL,
+                    ) {
                         chain.filters.push(nf);
                     }
                 },
@@ -370,11 +383,64 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
         Command::SetBandType { index, band_type } => {
             state.send(AudioCommand::SetBandType { index, band_type }, |chain| {
                 if let Some(f) = chain.filters.get(index) {
-                    let (freq, gain_db, q, en) = (f.freq, f.gain_db, f.q, f.enabled);
-                    if let Ok(nf) = build_band(chain, band_type.into(), freq, gain_db, q, en) {
+                    let (freq, gain_db, q, en, mask) = (f.freq, f.gain_db, f.q, f.enabled, f.mask);
+                    if let Ok(nf) = build_band(chain, band_type.into(), freq, gain_db, q, en, mask)
+                    {
                         chain.filters[index] = nf;
                     }
                 }
+            });
+            Response::Ok
+        }
+
+        Command::SetBandChannels { index, channels } => {
+            let mask = channels.to_dsp();
+            state.send(
+                AudioCommand::SetBandChannels { index, mask },
+                move |chain| {
+                    if let Some(f) = chain.filters.get_mut(index) {
+                        f.mask = mask;
+                    }
+                },
+            );
+            Response::Ok
+        }
+
+        Command::SetChannelRouting { matrix } => match matrix.to_dsp() {
+            Some(m) => {
+                state.send(
+                    AudioCommand::SetRouting {
+                        matrix: Some(m.clone()),
+                    },
+                    move |chain| chain.routing = Some(m),
+                );
+                Response::Ok
+            }
+            None => Response::Error("invalid routing matrix dimensions".to_string()),
+        },
+
+        Command::SwapChannels { a, b } => {
+            // Swap two of the processing channels (square remap at the current
+            // channel count). Replaces any existing routing.
+            let channels = state.0.lock().unwrap().chain.channels;
+            if a >= channels || b >= channels {
+                return Response::Error(format!(
+                    "channel index out of range (chain has {channels} channels)"
+                ));
+            }
+            let m = ChannelMatrix::swap(channels, a, b);
+            state.send(
+                AudioCommand::SetRouting {
+                    matrix: Some(m.clone()),
+                },
+                move |chain| chain.routing = Some(m),
+            );
+            Response::Ok
+        }
+
+        Command::ClearRouting => {
+            state.send(AudioCommand::SetRouting { matrix: None }, |chain| {
+                chain.routing = None;
             });
             Response::Ok
         }
@@ -470,7 +536,8 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
     }
 }
 
-/// Build an `ApoFilter` matching the chain's sample rate / channel count.
+/// Build an `ApoFilter` matching the chain's sample rate / channel count, with an
+/// explicit channel target (`DspMask::ALL` for a global band).
 fn build_band(
     chain: &ProcessorChain,
     filter_type: FilterType,
@@ -478,6 +545,7 @@ fn build_band(
     gain_db: f64,
     q: f64,
     enabled: bool,
+    mask: DspMask,
 ) -> Result<ApoFilter, FilterError> {
     ApoFilter::builder()
         .filter_type(filter_type)
@@ -487,6 +555,7 @@ fn build_band(
         .enabled(enabled)
         .channels(chain.channels)
         .sample_rate(chain.sample_rate)
+        .channel_mask(mask)
         .build()
 }
 
@@ -529,6 +598,7 @@ fn export_apo_text(snap: &resonance_ipc::DaemonState) -> String {
             gain_db: b.gain_db,
             q: b.q,
             enabled: b.enabled,
+            channels: b.channels.0,
         })
         .collect();
     write_apo(snap.preamp_db, &bands)

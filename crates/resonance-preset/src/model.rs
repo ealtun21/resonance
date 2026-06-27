@@ -1,8 +1,15 @@
 use resonance_dsp::{
     chain::{FxEffect, ProcessorChain, ProcessorChainBuilder},
+    channel::ChannelMask,
     filter::{ApoFilter, FilterType},
 };
 use serde::{Deserialize, Serialize};
+
+/// `serde(default)` for `EqBand::channels`: a band with no stored channel target
+/// applies to every channel (`ChannelMask::ALL`'s bit pattern).
+fn all_channels_bits() -> u64 {
+    u64::MAX
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Preset {
@@ -20,6 +27,10 @@ pub struct EqBand {
     pub gain_db: f64,
     pub q: f64,
     pub enabled: bool,
+    /// Channel-target bitset (`ChannelMask` bits). `#[serde(default)]` →
+    /// presets/files predating per-channel EQ load as a global band (all bits).
+    #[serde(default = "all_channels_bits")]
+    pub channels: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -103,6 +114,7 @@ impl Preset {
                     .enabled(band.enabled)
                     .channels(channels)
                     .sample_rate(sample_rate)
+                    .channel_mask(ChannelMask::from_bits(band.channels))
                     .build()
                 {
                     builder = builder.add_filter(filter);

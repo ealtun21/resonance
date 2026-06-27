@@ -10,7 +10,7 @@
 
 use resonance_dsp::chain::{FxEffect, ProcessorChain};
 use resonance_dsp::filter::{ApoFilter, FilterType};
-use resonance_ipc::{BandState, BandType, DaemonState, EffectsState, FxEffectId};
+use resonance_ipc::{BandState, BandType, ChannelMask, DaemonState, EffectsState, FxEffectId};
 use resonance_preset::model::Preset;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -54,6 +54,7 @@ impl Profile {
                     gain_db: b.gain_db,
                     q: b.q,
                     enabled: b.enabled,
+                    channels: ChannelMask(b.channels),
                 }
             })
             .collect();
@@ -97,6 +98,7 @@ impl Profile {
                 .enabled(b.enabled)
                 .channels(channels)
                 .sample_rate(sample_rate)
+                .channel_mask(b.channels.to_dsp())
                 .build()
             {
                 builder = builder.add_filter(filter);
@@ -350,6 +352,7 @@ mod tests {
                 gain_db: 3.0,
                 q: 0.7,
                 enabled: true,
+                channels: u64::MAX,
             }],
             effects: FxEffects {
                 fidelity: EffectState {
@@ -374,6 +377,70 @@ mod tests {
         assert!((p.effects.fidelity_intensity - 0.5).abs() < 1e-9);
         assert!((p.effects.bass_intensity - 0.25).abs() < 1e-9);
         assert!(!p.effects.surround_enabled);
+    }
+
+    #[test]
+    fn profile_loads_legacy_toml_without_channels_as_global() {
+        // A profile saved before per-channel EQ has no `channels` key on its
+        // bands; `#[serde(default)]` must load them as global (ALL).
+        let toml = "preamp_db = -3.0\n\
+             enabled = true\n\
+             \n\
+             [effects]\n\
+             fidelity_intensity = 0.0\n\
+             fidelity_enabled = false\n\
+             ambience_intensity = 0.0\n\
+             ambience_enabled = false\n\
+             surround_intensity = 0.0\n\
+             surround_enabled = false\n\
+             dynamic_boost_intensity = 0.0\n\
+             dynamic_boost_enabled = false\n\
+             bass_intensity = 0.0\n\
+             bass_enabled = false\n\
+             \n\
+             [[bands]]\n\
+             band_type = \"Peaking\"\n\
+             freq = 1000.0\n\
+             gain_db = 3.0\n\
+             q = 1.0\n\
+             enabled = true\n";
+        let p: Profile = toml::from_str(toml).unwrap();
+        assert_eq!(p.bands.len(), 1);
+        assert_eq!(p.bands[0].channels, ChannelMask::ALL);
+    }
+
+    #[test]
+    fn profile_with_per_channel_band_round_trips_toml() {
+        // The global default is u64::MAX, which exceeds TOML's i64 range; the
+        // ChannelMask i64 bit-cast serde impl must let it serialize + reload.
+        let profile = Profile {
+            preamp_db: 0.0,
+            enabled: true,
+            effects: EffectsState::default(),
+            bands: vec![
+                BandState {
+                    band_type: BandType::Peaking,
+                    freq: 1000.0,
+                    gain_db: 3.0,
+                    q: 1.0,
+                    enabled: true,
+                    channels: ChannelMask::ALL,
+                },
+                BandState {
+                    band_type: BandType::Peaking,
+                    freq: 2000.0,
+                    gain_db: -2.0,
+                    q: 1.0,
+                    enabled: true,
+                    channels: ChannelMask::single(0),
+                },
+            ],
+        };
+        let text =
+            toml::to_string_pretty(&profile).expect("serialize (u64::MAX must not overflow)");
+        let back: Profile = toml::from_str(&text).unwrap();
+        assert_eq!(back.bands[0].channels, ChannelMask::ALL);
+        assert_eq!(back.bands[1].channels, ChannelMask::single(0));
     }
 
     #[test]

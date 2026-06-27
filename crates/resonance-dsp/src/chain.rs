@@ -1,3 +1,4 @@
+use crate::channel::ChannelMatrix;
 use crate::effects::{
     AmbienceEffect, BassBoostEffect, DynamicBoostEffect, Effect, FidelityEffect, SurroundEffect,
 };
@@ -36,6 +37,11 @@ pub struct ProcessorChain {
     pub surround: SurroundEffect,
     pub dynamic_boost: DynamicBoostEffect,
     pub bass: BassBoostEffect,
+    /// Optional output remap applied *after* EQ + effects, mapping the `channels`
+    /// processed channels to a (possibly different) output channel count: swap,
+    /// permutation, duplication, drop, up/downmix. `None` (or a square identity)
+    /// is a zero-cost passthrough — see [`ProcessorChain::route`].
+    pub routing: Option<ChannelMatrix>,
 }
 
 impl ProcessorChain {
@@ -65,8 +71,14 @@ impl ProcessorChain {
             let frames = buf.len() / channels;
             for frame in 0..frames {
                 for ch in 0..channels {
-                    buf[frame * channels + ch] =
-                        filter.process_channel(buf[frame * channels + ch], ch);
+                    // Per-channel EQ: a band only touches the channels its mask
+                    // selects; excluded channels pass through and their biquad
+                    // state for this band stays at rest. `ChannelMask::ALL` (the
+                    // default) makes this a no-op branch — the global case.
+                    if filter.mask.contains(ch) {
+                        let idx = frame * channels + ch;
+                        buf[idx] = filter.process_channel(buf[idx], ch);
+                    }
                 }
             }
         }
@@ -151,6 +163,53 @@ impl ProcessorChain {
             carry_settings(&self.dynamic_boost, DynamicBoostEffect::new(sample_rate));
         self.bass = carry_settings(&self.bass, BassBoostEffect::new(ch, sample_rate));
     }
+
+    /// Rebind every channel-count-dependent buffer to a new processing channel
+    /// count (device renegotiation: stereo → 5.1, mono SCO → stereo A2DP, …).
+    ///
+    /// Filter per-channel state is resized in place (kept channels keep history);
+    /// effects are rebuilt at the new count, carrying intensity + enabled (their
+    /// sample history resets, unavoidable on a layout change). Band channel masks
+    /// are untouched — a band targeting channel 0 still targets channel 0. No-op
+    /// when the count is unchanged or zero.
+    pub fn set_channels(&mut self, channels: usize) {
+        if channels == 0 || self.channels == channels {
+            return;
+        }
+        self.channels = channels;
+        for f in self.filters.iter_mut() {
+            f.set_channels(channels);
+        }
+        let sr = self.sample_rate;
+        self.fidelity = carry_settings(&self.fidelity, FidelityEffect::new(channels, sr));
+        self.ambience = carry_settings(&self.ambience, AmbienceEffect::new(channels, sr));
+        self.surround = carry_settings(&self.surround, SurroundEffect::new(sr));
+        self.dynamic_boost = carry_settings(&self.dynamic_boost, DynamicBoostEffect::new(sr));
+        self.bass = carry_settings(&self.bass, BassBoostEffect::new(channels, sr));
+    }
+
+    /// The channel count the chain emits: the routing matrix's output width when
+    /// one is set, otherwise the processing channel count.
+    pub fn out_channels(&self) -> usize {
+        self.routing
+            .as_ref()
+            .map_or(self.channels, ChannelMatrix::out_ch)
+    }
+
+    /// Apply the output routing matrix, writing `processed` (the in-place result
+    /// of [`ProcessorChain::process`], `frames * channels` interleaved) into
+    /// `out` (`frames * out_channels()`). With no matrix — or a square identity —
+    /// this is a straight copy, the zero-cost common path. Allocation-free; the
+    /// caller owns `out` and sizes it to `out_channels()`.
+    pub fn route(&self, processed: &[f64], out: &mut [f64]) {
+        match &self.routing {
+            Some(m) if !m.is_identity() => m.apply(processed, out),
+            _ => {
+                let n = processed.len().min(out.len());
+                out[..n].copy_from_slice(&processed[..n]);
+            }
+        }
+    }
 }
 
 /// Copy intensity + enabled from an existing effect onto a freshly-built one.
@@ -218,6 +277,7 @@ impl ProcessorChainBuilder {
             surround: SurroundEffect::new(sr),
             dynamic_boost: DynamicBoostEffect::new(sr),
             bass: BassBoostEffect::new(channels, sr),
+            routing: None,
         }
     }
 }

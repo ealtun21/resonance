@@ -160,6 +160,14 @@ pub fn apply_command(chain: &mut ProcessorChain, cmd: AudioCommand) {
                 let _ = f.update(band_type.into(), f.freq, f.gain_db, f.q, sr);
             }
         }
+        AudioCommand::SetBandChannels { index, mask } => {
+            if let Some(f) = chain.filters.get_mut(index) {
+                f.mask = mask;
+            }
+        }
+        AudioCommand::SetRouting { matrix } => {
+            chain.routing = matrix;
+        }
     }
 }
 
