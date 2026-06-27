@@ -141,37 +141,42 @@ fn handle_normal(app: &mut App, key: KeyEvent) {
             _ => {}
         }
     }
+    // Band-editing keys work from either the Bands table or the Graph.
+    let band_focus = matches!(app.focus, app::Panel::Bands | app::Panel::Graph);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     match key.code {
         KeyCode::Tab => app.next_panel(),
         KeyCode::Char('p') => app.toggle_power(),
         KeyCode::Char('l') => app.begin_load_preset(),
         KeyCode::Char('s') => app.begin_settings(),
+        // ── Graph panel: arrows drag the selected node in 2 axes ──
+        KeyCode::Up if app.focus == app::Panel::Graph => {
+            app.graph_nudge(if shift { 1.0 } else { 0.5 }, 0.0)
+        }
+        KeyCode::Down if app.focus == app::Panel::Graph => {
+            app.graph_nudge(if shift { -1.0 } else { -0.5 }, 0.0)
+        }
+        KeyCode::Left if app.focus == app::Panel::Graph => {
+            app.graph_nudge(0.0, if shift { -2.0 } else { -1.0 })
+        }
+        KeyCode::Right if app.focus == app::Panel::Graph => {
+            app.graph_nudge(0.0, if shift { 2.0 } else { 1.0 })
+        }
+        KeyCode::Char('[') if app.focus == app::Panel::Graph => app.graph_select(-1),
+        KeyCode::Char(']') if app.focus == app::Panel::Graph => app.graph_select(1),
+        // ── Effects / Bands: select + adjust active field ──
         KeyCode::Up => app.cursor_up(),
         KeyCode::Down => app.cursor_down(),
-        KeyCode::Right => {
-            let delta = if key.modifiers.contains(KeyModifiers::SHIFT) {
-                0.10
-            } else {
-                0.05
-            };
-            app.adjust(delta);
-        }
-        KeyCode::Left => {
-            let delta = if key.modifiers.contains(KeyModifiers::SHIFT) {
-                0.10
-            } else {
-                0.05
-            };
-            app.adjust(-delta);
-        }
+        KeyCode::Right => app.adjust(if shift { 0.10 } else { 0.05 }),
+        KeyCode::Left => app.adjust(if shift { -0.10 } else { -0.05 }),
         KeyCode::Char('+') | KeyCode::Char('=') => app.preamp_adjust(0.5),
         KeyCode::Char('-') => app.preamp_adjust(-0.5),
         KeyCode::Char(' ') | KeyCode::Enter => app.toggle_selected(),
-        KeyCode::Char('a') if app.focus == app::Panel::Bands => app.add_band(),
-        KeyCode::Char('d') | KeyCode::Delete if app.focus == app::Panel::Bands => app.remove_band(),
-        KeyCode::Char('t') if app.focus == app::Panel::Bands => app.cycle_band_type(),
+        KeyCode::Char('a') if band_focus => app.add_band(),
+        KeyCode::Char('d') | KeyCode::Delete if band_focus => app.remove_band(),
+        KeyCode::Char('t') if band_focus => app.cycle_band_type(),
         // Per-band channel targeting (multichannel only; gated inside the call).
-        KeyCode::Char('c') if app.focus == app::Panel::Bands => app.begin_select_band_channels(),
+        KeyCode::Char('c') if band_focus => app.begin_select_band_channels(),
         // L/R channel swap (≥2 channels; gated inside the call).
         KeyCode::Char('w') => app.toggle_swap_lr(),
         KeyCode::Char('o') => app.begin_select_output(),
@@ -319,16 +324,46 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
     if !app.mode.is_normal() {
         return;
     }
+    let (col, row) = (mouse.column, mouse.row);
+
+    // FR-graph node editing: left-press grabs the nearest node (freq+gain drag),
+    // right-press tunes Q, wheel nudges gain. A drag in progress keeps receiving
+    // moves/release even if the cursor leaves the panel.
+    let on_graph = app.in_eq_panel(col, row);
+    if on_graph || app.is_graph_dragging() {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) if on_graph => {
+                app.graph_press(col, row, false);
+                return;
+            }
+            MouseEventKind::Down(MouseButton::Right) if on_graph => {
+                app.graph_press(col, row, true);
+                return;
+            }
+            MouseEventKind::Drag(_) if app.is_graph_dragging() => {
+                app.graph_drag_to(col, row);
+                return;
+            }
+            MouseEventKind::Up(_) if app.is_graph_dragging() => {
+                app.graph_release();
+                return;
+            }
+            MouseEventKind::ScrollUp if on_graph => {
+                app.graph_scroll(col, row, 0.5);
+                return;
+            }
+            MouseEventKind::ScrollDown if on_graph => {
+                app.graph_scroll(col, row, -0.5);
+                return;
+            }
+            _ => {}
+        }
+    }
+
     match mouse.kind {
-        MouseEventKind::Down(MouseButton::Left) => {
-            app.mouse_click(mouse.column, mouse.row);
-        }
-        MouseEventKind::ScrollUp => {
-            app.mouse_scroll(mouse.column, mouse.row, 0.05);
-        }
-        MouseEventKind::ScrollDown => {
-            app.mouse_scroll(mouse.column, mouse.row, -0.05);
-        }
+        MouseEventKind::Down(MouseButton::Left) => app.mouse_click(col, row),
+        MouseEventKind::ScrollUp => app.mouse_scroll(col, row, 0.05),
+        MouseEventKind::ScrollDown => app.mouse_scroll(col, row, -0.05),
         _ => {}
     }
 }
