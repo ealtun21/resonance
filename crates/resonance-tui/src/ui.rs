@@ -1,5 +1,7 @@
 use crate::{
-    app::{App, BandField, EFFECT_NAMES, InputMode, Panel, fx_enabled, fx_intensity, fx_min},
+    app::{
+        App, BandField, EFFECT_NAMES, InputMode, Panel, SquigTab, fx_enabled, fx_intensity, fx_min,
+    },
     browser::Browser,
     curve,
     settings::{ConfirmAction, SettingsState, TABS},
@@ -47,6 +49,9 @@ pub fn render(app: &App, frame: &mut Frame) {
     } = &app.mode
     {
         render_band_channels(*index, *mask, *cursor, app, frame, frame.area());
+    }
+    if let InputMode::SquigBrowse { tab, query, cursor } = &app.mode {
+        render_squig_browse(*tab, query, *cursor, app, frame, frame.area());
     }
     if let InputMode::Help = &app.mode {
         render_help(frame, frame.area());
@@ -1291,6 +1296,125 @@ fn render_band_channels(
     frame.render_stateful_widget(list, inner, &mut list_state);
 }
 
+// ── squig.link online browser ───────────────────────────────────────────────
+
+fn render_squig_browse(
+    tab: SquigTab,
+    query: &str,
+    cursor: usize,
+    app: &App,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let dialog = centered_rect(area, 78, 80);
+    frame.render_widget(Clear, dialog);
+
+    let which = match tab {
+        SquigTab::Models => "Measurements",
+        SquigTab::Targets => "Targets",
+    };
+    let block = Block::default()
+        .title(Line::from(format!(" Browse squig.link — {which} ")).fg(Color::Yellow))
+        .title_bottom(
+            Line::from(
+                " type=search  ↑↓ move  Enter load  Tab models/targets  F5/^R refresh  Esc close ",
+            )
+            .fg(Color::DarkGray),
+        )
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(dialog);
+    frame.render_widget(block, dialog);
+
+    let rows = Layout::vertical([
+        Constraint::Length(1), // search
+        Constraint::Length(1), // status
+        Constraint::Min(1),    // list
+    ])
+    .split(inner);
+
+    // Search line (with a fake caret) + a busy spinner.
+    let busy = if app.dl_busy { "  ⟳ loading…" } else { "" };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("search ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{query}█"), Style::default().fg(Color::White)),
+            Span::styled(busy, Style::default().fg(Color::Cyan)),
+        ])),
+        rows[0],
+    );
+
+    // Status line (worker messages, or a warming hint before the catalog lands).
+    let status = if !app.dl_status.is_empty() {
+        app.dl_status.clone()
+    } else if app.catalog.is_none() {
+        "warming catalog from squig.link…".to_string()
+    } else {
+        String::new()
+    };
+    frame.render_widget(
+        Paragraph::new(format!(" {status}")).style(Style::default().fg(Color::DarkGray)),
+        rows[1],
+    );
+
+    let Some(cat) = &app.catalog else {
+        frame.render_widget(
+            Paragraph::new(" (loading squig.link catalog…)")
+                .style(Style::default().fg(Color::DarkGray)),
+            rows[2],
+        );
+        return;
+    };
+
+    let items: Vec<ListItem> = match tab {
+        SquigTab::Models => crate::app::squig_filter_models(cat, query)
+            .iter()
+            .map(|m| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(m.display.clone(), Style::default().fg(Color::White)),
+                    Span::styled(
+                        format!("  · {}", m.source),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]))
+            })
+            .collect(),
+        SquigTab::Targets => crate::app::squig_filter_targets(cat, query)
+            .iter()
+            .map(|t| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(t.name.clone(), Style::default().fg(Color::White)),
+                    Span::styled(
+                        format!("  · {}", t.source),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]))
+            })
+            .collect(),
+    };
+
+    if items.is_empty() {
+        let msg = if cat.models.is_empty() && cat.targets.is_empty() {
+            " (catalog empty — try ^R to refresh)"
+        } else {
+            " (no matches for the search)"
+        };
+        frame.render_widget(
+            Paragraph::new(msg).style(Style::default().fg(Color::DarkGray)),
+            rows[2],
+        );
+        return;
+    }
+
+    let mut st = ListState::default();
+    st.select(Some(cursor.min(items.len() - 1)));
+    let list = List::new(items)
+        .highlight_symbol("▶ ")
+        .highlight_style(Style::default().fg(Color::Yellow).bold());
+    frame.render_stateful_widget(list, rows[2], &mut st);
+}
+
 // ── Settings popup ─────────────────────────────────────────────────────────
 
 fn render_settings(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect) {
@@ -1405,7 +1529,7 @@ fn render_tab_reference(s: &SettingsState, app: &App, frame: &mut Frame, area: R
     } else {
         "fit measurement → target".to_string()
     };
-    let rows: [(&str, String, &str); 12] = [
+    let rows: [(&str, String, &str); 13] = [
         (
             "Reference",
             on(r.enabled).to_string(),
@@ -1417,6 +1541,11 @@ fn render_tab_reference(s: &SettingsState, app: &App, frame: &mut Frame, area: R
             "(Enter cycles the target curve)",
         ),
         ("Measurement", meas, "(Enter to load a freq/dB .txt)"),
+        (
+            "Browse online",
+            "squig.link".to_string(),
+            "(Enter: search + load measurements/targets)",
+        ),
         ("Auto-EQ", autoeq, "(Enter fits a 10-band correction)"),
         (
             "Show raw measurement",
@@ -1979,7 +2108,7 @@ mod tests {
 
     // ── Headless render smoke tests (TestBackend) ──────────────────────────
 
-    use crate::app::{App, InputMode, Panel};
+    use crate::app::{App, InputMode, Panel, SquigTab};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
@@ -2131,6 +2260,7 @@ mod tests {
             "Reference",
             "Target",
             "Measurement",
+            "Browse online",
             "Auto-EQ",
             "Normalize",
             "Preference bounds",
@@ -2152,7 +2282,7 @@ mod tests {
         app.state = Some(fixture(2));
         let mut ss = crate::settings::SettingsState::new(vec![], vec![], vec![]);
         ss.tab = 5;
-        ss.cursor = 7; // Tilt
+        ss.cursor = 8; // Tilt (Browse online at row 3 shifted customizer to 8–11)
         app.mode = InputMode::Settings(ss);
         app.settings_adjust(1.0);
         assert!(app.reference.adj_tilt > 0.0, "tilt should increase");
@@ -2167,6 +2297,68 @@ mod tests {
             app.reference.adj_tilt, before,
             "customizer adjust only applies on the Reference tab"
         );
+    }
+
+    #[test]
+    fn squig_filter_matches_display_and_source() {
+        use resonance_reference::download::{Catalog, ModelEntry};
+        let m = |source: &str, display: &str| ModelEntry {
+            source: source.into(),
+            display: display.into(),
+            file: "f".into(),
+            base_url: String::new(),
+            kind: String::new(),
+        };
+        let cat = Catalog {
+            sources: vec![],
+            models: vec![
+                m("dhrme", "Sennheiser HD600"),
+                m("precog", "Moondrop Blessing"),
+            ],
+            targets: vec![],
+        };
+        assert_eq!(crate::app::squig_filter_models(&cat, "moon").len(), 1);
+        assert_eq!(crate::app::squig_filter_models(&cat, "dhrme").len(), 1); // by source
+        assert_eq!(crate::app::squig_filter_models(&cat, "").len(), 2);
+        assert_eq!(crate::app::squig_filter_models(&cat, "zzz").len(), 0);
+    }
+
+    #[test]
+    fn squig_browse_renders_catalog() {
+        use resonance_reference::download::{Catalog, ModelEntry, TargetEntry};
+        let mut app = App::new();
+        app.state = Some(fixture(2));
+        app.catalog = Some(Catalog {
+            sources: vec![],
+            models: vec![ModelEntry {
+                source: "dhrme".into(),
+                display: "Sennheiser HD600".into(),
+                file: "HD600".into(),
+                base_url: "https://x/".into(),
+                kind: "Headphones".into(),
+            }],
+            targets: vec![TargetEntry {
+                source: "dhrme".into(),
+                name: "Harman 2019".into(),
+                base_url: "https://x/".into(),
+            }],
+        });
+        app.mode = InputMode::SquigBrowse {
+            tab: SquigTab::Models,
+            query: String::new(),
+            cursor: 0,
+        };
+        let text = render_to_text(&app, 120, 44);
+        assert!(text.contains("Browse squig.link"), "no title:\n{text}");
+        assert!(text.contains("HD600"), "model not listed:\n{text}");
+        // The Targets tab lists target curves instead.
+        app.mode = InputMode::SquigBrowse {
+            tab: SquigTab::Targets,
+            query: String::new(),
+            cursor: 0,
+        };
+        let text2 = render_to_text(&app, 120, 44);
+        assert!(text2.contains("Harman 2019"), "target not listed:\n{text2}");
     }
 
     #[test]

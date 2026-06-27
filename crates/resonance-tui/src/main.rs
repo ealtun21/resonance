@@ -78,6 +78,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, fps_override: Option<u64>) -> Re
 
         app.animate_spectrum();
         app.pump_autoeq();
+        app.pump_downloads();
         let mut frame_area = app.last_frame;
         terminal.draw(|f| {
             frame_area = f.area();
@@ -118,6 +119,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         InputMode::SelectOutput { .. } => handle_select_output(app, key),
         InputMode::Settings(_) => handle_settings(app, key),
         InputMode::SelectBandChannels { .. } => handle_band_channels(app, key),
+        InputMode::SquigBrowse { .. } => handle_squig_browse(app, key),
         // Any key dismisses the help overlay.
         InputMode::Help => app.cancel_input(),
     }
@@ -172,6 +174,31 @@ fn handle_normal(app: &mut App, key: KeyEvent) {
         KeyCode::Char('w') => app.toggle_swap_lr(),
         KeyCode::Char('o') => app.begin_select_output(),
         KeyCode::Char('?') => app.show_help(),
+        _ => {}
+    }
+}
+
+/// squig.link online browser: type to search, ↑↓ move, Enter loads the
+/// selected entry, Tab switches measurements/targets, Ctrl-R refreshes.
+fn handle_squig_browse(app: &mut App, key: KeyEvent) {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        if key.code == KeyCode::Char('r') {
+            app.squig_refresh();
+        }
+        return;
+    }
+    match key.code {
+        KeyCode::Esc => app.cancel_input(),
+        KeyCode::Up => app.squig_move(-1),
+        KeyCode::Down => app.squig_move(1),
+        KeyCode::PageUp => app.squig_move(-10),
+        KeyCode::PageDown => app.squig_move(10),
+        KeyCode::Tab => app.squig_switch_tab(),
+        KeyCode::F(5) => app.squig_refresh(),
+        KeyCode::Enter => app.squig_enter(),
+        KeyCode::Backspace => app.squig_backspace(),
+        // Everything printable types into the search box (Alt-modified ignored).
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::ALT) => app.squig_query_char(c),
         _ => {}
     }
 }
@@ -274,9 +301,19 @@ fn handle_settings(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_mouse(app: &mut App, mouse: MouseEvent) {
-    // Mouse targets are the main-screen panels only; while a modal (browser,
-    // settings, output picker, help) is open, ignore clicks/scrolls so they
-    // can't mutate EQ state hidden behind the dialog.
+    // The squig browser is a long scrollable list, so allow the wheel to move
+    // its cursor even though it's a modal (clicks still ignored).
+    if matches!(app.mode, InputMode::SquigBrowse { .. }) {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => app.squig_move(-1),
+            MouseEventKind::ScrollDown => app.squig_move(1),
+            _ => {}
+        }
+        return;
+    }
+    // Mouse targets are the main-screen panels only; while any other modal
+    // (browser, settings, output picker, help) is open, ignore clicks/scrolls
+    // so they can't mutate EQ state hidden behind the dialog.
     if !app.mode.is_normal() {
         return;
     }
