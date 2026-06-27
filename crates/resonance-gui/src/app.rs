@@ -324,6 +324,9 @@ pub struct GuiApp {
     /// (the per-band `Ch` column is otherwise hidden until >2ch, progressive
     /// disclosure). Lets stereo users do per-channel (L/R) EQ. Persisted.
     pub(crate) per_channel_eq: bool,
+    /// Graph series the user has hidden via the legend's eye toggles (keyed by
+    /// the legend label, e.g. "FL"/"Result FR"/"Target"). Session-only.
+    pub(crate) hidden_curves: std::collections::HashSet<String>,
 }
 
 /// Messages from the UI thread to the IPC worker.
@@ -609,6 +612,7 @@ impl GuiApp {
                 .and_then(|s| s.get_string("per_channel_eq"))
                 .map(|v| v == "true")
                 .unwrap_or(false),
+            hidden_curves: std::collections::HashSet::new(),
         };
         if let Some(p) = persisted_ref.and_then(|j| serde_json::from_str(&j).ok()) {
             app.reference.restore(p);

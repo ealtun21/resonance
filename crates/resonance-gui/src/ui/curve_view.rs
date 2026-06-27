@@ -14,6 +14,9 @@ use std::time::Instant;
 const SPECTRUM_ATTACK_TAU: f32 = 0.020;
 const SPECTRUM_DECAY_TAU: f32 = 0.20;
 
+/// A per-channel result curve: (legend label, colour, points).
+type ChCurve = (String, egui::Color32, Vec<(f64, f64)>);
+
 impl GuiApp {
     // ── EQ response curve (draggable nodes) ─────────────────────────────────
 
@@ -75,24 +78,74 @@ impl GuiApp {
             Vec::new()
         };
         let show_ref = !ref_series.is_empty();
-        // Legend for the overlay lines (drawn at the bottom, on top of everything).
-        // In the normalised view the target IS the flat 0-line, so there's no
-        // separate target line to key — only the result (+ raw measurement).
-        let legend: Vec<(&str, egui::Color32, bool)> = if show_ref {
-            let mut v = vec![("Result", pal.highlight, false)];
-            if !self.reference.norm_view() && self.reference.target.is_some() {
-                v.push(("Target", pal.accent, true));
-            }
-            if self.reference.show_bounds && self.reference.target.is_some() {
-                v.push(("Bounds", pal.accent.gamma_multiply(0.5), false));
-            }
-            if self.reference.show_measurement {
-                v.push(("Measured", pal.neutral.gamma_multiply(0.7), false));
-            }
-            v
+        // Per-channel result curves in reference mode: each channel's measurement
+        // shaped by *its* EQ, so per-channel divergence shows even with a
+        // target/measurement overlay (the single all-bands "Result" is replaced).
+        let per_channel_results: Vec<ChCurve> = if show_ref && per_channel {
+            use resonance_reference::reference::SeriesRole;
+            (0..channels)
+                .map(|c| {
+                    let cbands: Vec<_> = bands
+                        .iter()
+                        .filter(|b| b.channels.contains(c))
+                        .cloned()
+                        .collect();
+                    let pts = self
+                        .reference
+                        .series(&cbands, state.sample_rate, 240, vlo, vhi, na)
+                        .into_iter()
+                        .find(|s| s.role == SeriesRole::Result)
+                        .map(|s| s.pts)
+                        .unwrap_or_default();
+                    let label = state
+                        .channel_layout
+                        .get(c)
+                        .map(String::as_str)
+                        .unwrap_or("?");
+                    (format!("Result {label}"), channel_color(c), pts)
+                })
+                .collect()
         } else {
             Vec::new()
         };
+        // Unified legend entries `(label, colour, dashed)` — each gets an eye
+        // toggle. In the normalised view the target IS the flat 0-line, so it's
+        // not keyed separately.
+        let legend_entries: Vec<(String, egui::Color32, bool)> = if show_ref {
+            let mut v: Vec<(String, egui::Color32, bool)> = Vec::new();
+            if per_channel {
+                for (key, col, _) in &per_channel_results {
+                    v.push((key.clone(), *col, false));
+                }
+            } else {
+                v.push(("Result".into(), pal.highlight, false));
+            }
+            if !self.reference.norm_view() && self.reference.target.is_some() {
+                v.push(("Target".into(), pal.accent, true));
+            }
+            if self.reference.show_bounds && self.reference.target.is_some() {
+                v.push(("Bounds".into(), pal.accent.gamma_multiply(0.5), false));
+            }
+            if self.reference.show_measurement {
+                v.push(("Measured".into(), pal.neutral.gamma_multiply(0.7), false));
+            }
+            v
+        } else if per_channel {
+            (0..channels)
+                .map(|c| {
+                    let name = state
+                        .channel_layout
+                        .get(c)
+                        .map(String::as_str)
+                        .unwrap_or("?")
+                        .to_string();
+                    (name, channel_color(c), false)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let legend_rect = legend_box_rect(plot, &painter, &legend_entries);
         // Loudest point the axis must show (any band gain, curve peak, or overlay
         // extent) + 5 dB headroom. Includes the dragged band, so the axis expands
         // live as you drag a node up and contracts as you bring it down.
@@ -295,19 +348,63 @@ impl GuiApp {
         // into the "result" series, so we draw the overlays instead of the bare
         // curve; otherwise draw the colour-coded EQ response (boost green / cut
         // red, neutral near 0 dB) as usual.
+        let hidden = &self.hidden_curves;
         if show_ref {
+            use resonance_reference::reference::SeriesRole;
+            let role_key = |r: SeriesRole| match r {
+                SeriesRole::Result => "Result",
+                SeriesRole::Target => "Target",
+                SeriesRole::Measurement => "Measured",
+            };
+            // Draw the overlay, skipping eye-hidden roles. In per-channel mode the
+            // single all-bands Result is dropped (replaced by per-channel ones).
+            let filtered: Vec<_> = ref_series
+                .iter()
+                .filter(|s| {
+                    !(hidden.contains(role_key(s.role))
+                        || (per_channel && s.role == SeriesRole::Result))
+                })
+                .map(|s| resonance_reference::reference::RefSeries {
+                    role: s.role,
+                    pts: s.pts.clone(),
+                })
+                .collect();
+            let show_bounds = self.reference.show_bounds && !hidden.contains("Bounds");
             draw_reference(
                 &painter,
-                &ref_series,
+                &filtered,
                 na as f32,
-                self.reference.show_bounds,
+                show_bounds,
                 &x_of,
                 &y_of,
                 &pal,
             );
+            // Per-channel result curves (channel-coloured), each eye-toggleable.
+            for (key, col, cpts) in &per_channel_results {
+                if hidden.contains(key) {
+                    continue;
+                }
+                for w in cpts.windows(2) {
+                    painter.line_segment(
+                        [
+                            egui::pos2(x_of(w[0].0), y_of(w[0].1)),
+                            egui::pos2(x_of(w[1].0), y_of(w[1].1)),
+                        ],
+                        egui::Stroke::new(2.0, *col),
+                    );
+                }
+            }
         } else if per_channel {
             // One response per channel, from only the bands targeting it.
             for c in 0..channels {
+                let label = state
+                    .channel_layout
+                    .get(c)
+                    .map(String::as_str)
+                    .unwrap_or("?");
+                if hidden.contains(label) {
+                    continue;
+                }
                 let cbands: Vec<_> = bands
                     .iter()
                     .filter(|b| b.channels.contains(c))
@@ -333,6 +430,14 @@ impl GuiApp {
         }
 
         use egui::PointerButton::{Primary, Secondary};
+
+        // The legend (with its eye toggles) sits inside the graph; a click there
+        // must toggle a curve, not grab/create a node. Skip node interactions
+        // whose pointer is over the legend box.
+        let over_legend = response
+            .interact_pointer_pos()
+            .map(|p| legend_rect.contains(p))
+            .unwrap_or(false);
 
         // ── Zoom ────────────────────────────────────────────────────────────
         // Scroll wheel over the graph zooms the x-axis around the pointer;
@@ -427,7 +532,7 @@ impl GuiApp {
         // Double-right-click a node → toggle vertical-lock (gain-only) movement.
         // Shift+double-right-click → toggle gain-lock (freq+Q only, gain pinned).
         // The two locks are mutually exclusive.
-        if response.double_clicked_by(Secondary) {
+        if response.double_clicked_by(Secondary) && !over_legend {
             if let Some(p) = response.interact_pointer_pos() {
                 if let Some(i) = nearest_band(state, p, &x_of, &y_of) {
                     if ui.input(|inp| inp.modifiers.shift) {
@@ -447,7 +552,7 @@ impl GuiApp {
         // gain axis only. Pick the nearest node on press.
         let started_primary = response.drag_started_by(Primary);
         let started_secondary = response.drag_started_by(Secondary);
-        if (started_primary || started_secondary) && self.zoom_sel.is_none() {
+        if (started_primary || started_secondary) && self.zoom_sel.is_none() && !over_legend {
             if let Some(p) = response.interact_pointer_pos() {
                 if let Some(i) = nearest_band(state, p, &x_of, &y_of) {
                     self.drag_band = Some(i);
@@ -521,7 +626,7 @@ impl GuiApp {
             ui.ctx().request_repaint();
         }
         // Double-left-click empty area → add a peaking band there.
-        if response.double_clicked_by(Primary) {
+        if response.double_clicked_by(Primary) && !over_legend {
             if let Some(p) = response.interact_pointer_pos() {
                 let freq = 10f64.powf(logf_of(p.x)).clamp(20.0, 20000.0);
                 let gain = db_of(p.y).clamp(-GAIN_LIMIT, GAIN_LIMIT);
@@ -633,23 +738,17 @@ impl GuiApp {
             );
         }
 
-        // Legend (top-right, on top of everything). The reference overlay legend
-        // wins; otherwise, in the per-channel view, key the channel curves.
-        if !legend.is_empty() {
-            draw_legend(&painter, plot, &pal, &legend);
-        } else if per_channel {
-            let chan_legend: Vec<(&str, egui::Color32, bool)> = (0..channels)
-                .map(|c| {
-                    let name = state
-                        .channel_layout
-                        .get(c)
-                        .map(String::as_str)
-                        .unwrap_or("?");
-                    (name, channel_color(c), false)
-                })
-                .collect();
-            draw_legend(&painter, plot, &pal, &chan_legend);
-        }
+        // Interactive legend (bottom-right): an eye toggle per series to
+        // show/hide it — making it easy to isolate one channel/curve while
+        // editing. Empty in the plain single-curve view.
+        legend_with_eyes(
+            &mut self.hidden_curves,
+            ui,
+            &painter,
+            legend_rect,
+            &pal,
+            &legend_entries,
+        );
     }
 }
 
@@ -771,37 +870,58 @@ fn draw_reference(
     }
 }
 
-/// A compact legend box in the plot's top-right naming the overlay lines, drawn
-/// over a translucent panel so it reads on any background. `entries` are
-/// `(label, colour, dashed)`; returns nothing (positioned by the caller).
-fn draw_legend(
-    painter: &egui::Painter,
+/// Legend geometry constants: padding, row height, eye glyph, line swatch, gaps.
+const LG: (f32, f32, f32, f32, f32) = (6.0, 15.0, 12.0, 16.0, 6.0);
+
+/// The legend box rectangle (bottom-right of the plot), so graph interactions
+/// can avoid stealing clicks meant for the legend's eye toggles.
+fn legend_box_rect(
     plot: egui::Rect,
-    pal: &crate::theme::Palette,
-    entries: &[(&str, egui::Color32, bool)],
-) {
+    painter: &egui::Painter,
+    entries: &[(String, egui::Color32, bool)],
+) -> egui::Rect {
+    if entries.is_empty() {
+        return egui::Rect::NOTHING;
+    }
+    let (pad, row_h, eye_w, sw, gap) = LG;
     let font = egui::FontId::monospace(9.5);
-    let (pad, row_h, sw, gap) = (6.0_f32, 14.0_f32, 16.0_f32, 6.0_f32);
-    let label_col = contrast_color(pal.graph_bg);
     let max_w = entries
         .iter()
         .map(|(l, _, _)| {
             painter
-                .layout_no_wrap(l.to_string(), font.clone(), label_col)
+                .layout_no_wrap(l.clone(), font.clone(), egui::Color32::WHITE)
                 .rect
                 .width()
         })
         .fold(0.0_f32, f32::max);
-    let box_w = pad + sw + gap + max_w + pad;
+    let box_w = pad + eye_w + gap + sw + gap + max_w + pad;
     let box_h = pad * 2.0 + entries.len() as f32 * row_h;
-    // Bottom-right, lifted above the frequency-tick label row so it never collides
-    // with the top region labels / zoom readout (which sit at the top).
     let right = plot.right() - 4.0;
     let bottom = plot.bottom() - 16.0;
-    let rect = egui::Rect::from_min_max(
+    egui::Rect::from_min_max(
         egui::pos2(right - box_w, bottom - box_h),
         egui::pos2(right, bottom),
-    );
+    )
+}
+
+/// Draw the legend with a clickable eye toggle per row: clicking a row hides or
+/// shows that curve (tracked in `hidden`, keyed by label). Hidden rows render
+/// dimmed with a closed-eye glyph. `entries` are `(label, colour, dashed)`.
+#[allow(clippy::too_many_arguments)]
+fn legend_with_eyes(
+    hidden: &mut std::collections::HashSet<String>,
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    pal: &crate::theme::Palette,
+    entries: &[(String, egui::Color32, bool)],
+) {
+    if entries.is_empty() {
+        return;
+    }
+    let (pad, row_h, eye_w, sw, gap) = LG;
+    let font = egui::FontId::monospace(9.5);
+    let label_col = contrast_color(pal.graph_bg);
     let [r, g, b, _] = pal.graph_bg.to_array();
     painter.rect_filled(
         rect,
@@ -815,9 +935,40 @@ fn draw_legend(
         egui::StrokeKind::Inside,
     );
     for (i, (label, color, dashed)) in entries.iter().enumerate() {
-        let cy = rect.top() + pad + row_h * i as f32 + row_h * 0.5;
-        let (x0, x1) = (rect.left() + pad, rect.left() + pad + sw);
-        let stroke = egui::Stroke::new(2.0, *color);
+        let row_top = rect.top() + pad + row_h * i as f32;
+        let cy = row_top + row_h * 0.5;
+        let row_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.left(), row_top),
+            egui::pos2(rect.right(), row_top + row_h),
+        );
+        let resp = ui.interact(
+            row_rect,
+            ui.id().with(("legend-eye", label.as_str())),
+            egui::Sense::click(),
+        );
+        if resp.clicked() && !hidden.remove(label) {
+            hidden.insert(label.clone());
+        }
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        let off = hidden.contains(label);
+        let dim = |c: egui::Color32| if off { c.gamma_multiply(0.35) } else { c };
+        // Eye glyph: open (round eye + pupil) when visible, a line when hidden.
+        let eye = egui::pos2(rect.left() + pad + eye_w * 0.5, cy);
+        if off {
+            painter.line_segment(
+                [egui::pos2(eye.x - 4.0, cy), egui::pos2(eye.x + 4.0, cy)],
+                egui::Stroke::new(1.4, dim(label_col)),
+            );
+        } else {
+            painter.circle_stroke(eye, 4.0, egui::Stroke::new(1.2, label_col));
+            painter.circle_filled(eye, 1.6, label_col);
+        }
+        // Colour swatch.
+        let x0 = rect.left() + pad + eye_w + gap;
+        let x1 = x0 + sw;
+        let stroke = egui::Stroke::new(2.0, dim(*color));
         if *dashed {
             painter.add(egui::Shape::dashed_line(
                 &[egui::pos2(x0, cy), egui::pos2(x1, cy)],
@@ -833,7 +984,7 @@ fn draw_legend(
             egui::Align2::LEFT_CENTER,
             label,
             font.clone(),
-            label_col,
+            dim(label_col),
         );
     }
 }
