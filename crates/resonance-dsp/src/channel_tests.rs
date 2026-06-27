@@ -354,3 +354,194 @@ fn chain_route_identity_matrix_is_copy() {
     chain.route(&processed, &mut out);
     assert_eq!(out, processed);
 }
+
+// ── Per-channel EQ: frequency-response isolation ─────────────────────────────
+
+/// Steady-state gain (dB) of channel `ch` at `freq`, feeding the same tone on
+/// every channel through the chain. Measures the second half (post-settle).
+fn chain_channel_gain_db(chain: &mut ProcessorChain, ch: usize, channels: usize, freq: f64) -> f64 {
+    chain.reset();
+    let total = (SR * 0.4) as usize;
+    let omega = 2.0 * std::f64::consts::PI * freq / SR;
+    let mut buf = vec![0.0f64; total * channels];
+    for f in 0..total {
+        let s = (omega * f as f64).sin();
+        for c in 0..channels {
+            buf[f * channels + c] = s;
+        }
+    }
+    chain.process(&mut buf);
+    let half = total / 2;
+    let (mut in_sq, mut out_sq) = (0.0f64, 0.0f64);
+    for f in half..total {
+        let x = (omega * f as f64).sin();
+        let y = buf[f * channels + ch];
+        in_sq += x * x;
+        out_sq += y * y;
+    }
+    20.0 * (out_sq / in_sq).sqrt().log10()
+}
+
+#[test]
+fn per_channel_eq_fr_isolated_to_masked_channel() {
+    // +12 dB @ 1 kHz on channel 0 only, 4-channel chain.
+    let mut chain = ProcessorChain::builder()
+        .channels(4)
+        .sample_rate(SR)
+        .add_filter(peaking_band(1000.0, 12.0, 4, ChannelMask::single(0)))
+        .build();
+    assert!(
+        (chain_channel_gain_db(&mut chain, 0, 4, 1000.0) - 12.0).abs() < 1.0,
+        "ch0 @1k +12"
+    );
+    assert!(
+        chain_channel_gain_db(&mut chain, 0, 4, 10000.0).abs() < 1.0,
+        "ch0 @10k flat"
+    );
+    assert!(
+        chain_channel_gain_db(&mut chain, 1, 4, 1000.0).abs() < 0.1,
+        "ch1 @1k untouched"
+    );
+    assert!(
+        chain_channel_gain_db(&mut chain, 3, 4, 1000.0).abs() < 0.1,
+        "ch3 @1k untouched"
+    );
+}
+
+#[test]
+fn multiple_per_channel_bands_target_distinct_channels() {
+    // Band A: +6 @ 1 kHz on ch0; Band B: +6 @ 5 kHz on ch1.
+    let mut chain = ProcessorChain::builder()
+        .channels(4)
+        .sample_rate(SR)
+        .add_filter(peaking_band(1000.0, 6.0, 4, ChannelMask::single(0)))
+        .add_filter(peaking_band(5000.0, 6.0, 4, ChannelMask::single(1)))
+        .build();
+    assert!(
+        (chain_channel_gain_db(&mut chain, 0, 4, 1000.0) - 6.0).abs() < 1.0,
+        "ch0 @1k +6"
+    );
+    assert!(
+        chain_channel_gain_db(&mut chain, 0, 4, 5000.0).abs() < 1.0,
+        "ch0 @5k flat"
+    );
+    assert!(
+        (chain_channel_gain_db(&mut chain, 1, 4, 5000.0) - 6.0).abs() < 1.0,
+        "ch1 @5k +6"
+    );
+    assert!(
+        chain_channel_gain_db(&mut chain, 1, 4, 1000.0).abs() < 1.0,
+        "ch1 @1k flat"
+    );
+    assert!(
+        chain_channel_gain_db(&mut chain, 2, 4, 1000.0).abs() < 0.1,
+        "ch2 untouched"
+    );
+}
+
+#[test]
+fn masked_band_still_targets_channel_after_widen() {
+    let mut chain = ProcessorChain::builder()
+        .channels(2)
+        .sample_rate(SR)
+        .add_filter(peaking_band(1000.0, 12.0, 2, ChannelMask::single(0)))
+        .build();
+    chain.set_channels(6);
+    assert!(
+        (chain_channel_gain_db(&mut chain, 0, 6, 1000.0) - 12.0).abs() < 1.0,
+        "ch0 still +12"
+    );
+    for c in 1..6 {
+        assert!(
+            chain_channel_gain_db(&mut chain, c, 6, 1000.0).abs() < 0.1,
+            "ch{c} untouched after widen"
+        );
+    }
+}
+
+// ── ChannelMatrix edge cases ─────────────────────────────────────────────────
+
+#[test]
+fn matrix_swap_edge_cases() {
+    assert!(
+        ChannelMatrix::swap(2, 0, 0).is_identity(),
+        "swap(a,a) = identity"
+    );
+    assert!(
+        ChannelMatrix::swap(2, 0, 5).is_identity(),
+        "out-of-range index leaves identity"
+    );
+    assert!(!ChannelMatrix::swap(4, 0, 1).is_identity());
+}
+
+#[test]
+fn matrix_swap_correct_over_many_frames() {
+    let m = ChannelMatrix::swap(4, 0, 2); // swap ch0 ↔ ch2
+    let frames = 1000;
+    let mut src = vec![0.0f64; frames * 4];
+    for f in 0..frames {
+        for c in 0..4 {
+            src[f * 4 + c] = (f * 4 + c) as f64; // unique per slot
+        }
+    }
+    let mut dst = vec![0.0f64; frames * 4];
+    m.apply(&src, &mut dst);
+    for f in 0..frames {
+        assert_eq!(dst[f * 4], src[f * 4 + 2], "frame {f}: ch0←ch2");
+        assert_eq!(dst[f * 4 + 2], src[f * 4], "frame {f}: ch2←ch0");
+        assert_eq!(dst[f * 4 + 1], src[f * 4 + 1], "frame {f}: ch1 kept");
+        assert_eq!(dst[f * 4 + 3], src[f * 4 + 3], "frame {f}: ch3 kept");
+    }
+}
+
+#[test]
+fn matrix_rectangular_3_to_2() {
+    // out0 = in0 + in1; out1 = in0 + in2.
+    let m = ChannelMatrix::new(3, 2, vec![1.0, 1.0, 0.0, 1.0, 0.0, 1.0]).unwrap();
+    let src = vec![1.0, 2.0, 3.0]; // one frame
+    let mut dst = vec![0.0; 2];
+    m.apply(&src, &mut dst);
+    assert_eq!(dst, vec![3.0, 4.0]);
+}
+
+#[test]
+fn out_channels_reflects_routing() {
+    let mut chain = ProcessorChain::builder()
+        .channels(2)
+        .sample_rate(SR)
+        .build();
+    assert_eq!(chain.out_channels(), 2, "no routing → processing width");
+    chain.routing = Some(ChannelMatrix::new(2, 1, vec![0.5, 0.5]).unwrap());
+    assert_eq!(chain.out_channels(), 1, "downmix → 1");
+    chain.routing = Some(ChannelMatrix::swap(2, 0, 1));
+    assert_eq!(chain.out_channels(), 2, "square swap → 2");
+}
+
+// ── reset clears running state ────────────────────────────────────────────────
+
+#[test]
+fn reset_clears_effect_tail() {
+    let mut chain = ProcessorChain::builder()
+        .channels(2)
+        .sample_rate(SR)
+        .build();
+    chain.set_effect_enabled(FxEffect::Ambience, true);
+    chain.set_effect_intensity(FxEffect::Ambience, 0.8);
+    // Build a reverb tail with a loud burst.
+    let mut burst = vec![0.5f64; 4096];
+    chain.process(&mut burst);
+    // Sanity: a clone fed silence still rings (tail present).
+    let mut probe = chain.clone();
+    let mut tail = vec![0.0f64; 4096];
+    probe.process(&mut tail);
+    assert!(
+        tail.iter().map(|x| x * x).sum::<f64>() > 1e-6,
+        "ambience should leave a tail"
+    );
+    // After reset, silence is silent.
+    chain.reset();
+    let mut after = vec![0.0f64; 4096];
+    chain.process(&mut after);
+    let e: f64 = after.iter().map(|x| x * x).sum();
+    assert!(e < 1e-9, "reset must clear the reverb tail, got {e}");
+}

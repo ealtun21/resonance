@@ -269,4 +269,77 @@ mod tests {
         assert!((c.preamp_db + 6.0).abs() < 1e-9);
         assert!(!c.enabled);
     }
+
+    #[test]
+    fn set_band_channels_retargets_mask() {
+        use resonance_dsp::channel::ChannelMask;
+        let mut c = chain();
+        apply_command(
+            &mut c,
+            AudioCommand::AddBand {
+                band_type: BandType::Peaking,
+                freq: 1000.0,
+                gain_db: 6.0,
+                q: 1.0,
+            },
+        );
+        assert_eq!(c.filters[0].mask, ChannelMask::ALL, "new band is global");
+        apply_command(
+            &mut c,
+            AudioCommand::SetBandChannels {
+                index: 0,
+                mask: ChannelMask::single(1),
+            },
+        );
+        assert_eq!(c.filters[0].mask, ChannelMask::single(1));
+    }
+
+    #[test]
+    fn set_band_preserves_mask_on_param_edit() {
+        use resonance_dsp::channel::ChannelMask;
+        let mut c = chain();
+        apply_command(
+            &mut c,
+            AudioCommand::AddBand {
+                band_type: BandType::Peaking,
+                freq: 1000.0,
+                gain_db: 6.0,
+                q: 1.0,
+            },
+        );
+        apply_command(
+            &mut c,
+            AudioCommand::SetBandChannels {
+                index: 0,
+                mask: ChannelMask::single(0),
+            },
+        );
+        // A freq/gain/q edit must NOT reset the channel target.
+        apply_command(
+            &mut c,
+            AudioCommand::SetBand {
+                index: 0,
+                freq: 2000.0,
+                gain_db: 3.0,
+                q: 1.5,
+            },
+        );
+        assert_eq!(c.filters[0].mask, ChannelMask::single(0), "mask preserved");
+        assert!((c.filters[0].freq - 2000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn set_routing_installs_and_clears() {
+        use resonance_dsp::channel::ChannelMatrix;
+        let mut c = chain();
+        apply_command(
+            &mut c,
+            AudioCommand::SetRouting {
+                matrix: Some(ChannelMatrix::swap(2, 0, 1)),
+            },
+        );
+        assert!(c.routing.as_ref().is_some_and(|m| !m.is_identity()));
+        apply_command(&mut c, AudioCommand::SetRouting { matrix: None });
+        assert!(c.routing.is_none());
+    }
 }
