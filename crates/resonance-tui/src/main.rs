@@ -100,6 +100,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal, fps_override: Option<u64>) -> Re
         }
     }
 
+    // Persist the reference overlay so a loaded measurement/target survives.
+    app.save_reference();
     Ok(())
 }
 

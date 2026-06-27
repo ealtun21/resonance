@@ -6,7 +6,7 @@ use resonance_ipc::{
     transport::{SyncClient as IpcClient, TransportError},
 };
 use resonance_reference::download::{self, Catalog, DlCmd, DlEvent, ModelEntry, TargetEntry};
-use resonance_reference::reference::ReferenceState;
+use resonance_reference::reference::{PersistedReference, ReferenceState};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -141,6 +141,12 @@ struct Snapshot {
 impl App {
     pub fn new() -> Self {
         let prefs = crate::prefs::Prefs::load();
+        // Restore the reference overlay (loaded measurement, target, customizer)
+        // from the last session, like the GUI does.
+        let mut reference = ReferenceState::default();
+        if let Some(p) = Self::load_reference() {
+            reference.restore(p);
+        }
         let (autoeq_tx, autoeq_rx) = std::sync::mpsc::channel();
         // Spawn the squig.link downloader worker idle (no Init yet — the catalog
         // is warmed lazily the first time the online browser opens, so a plain
@@ -166,7 +172,7 @@ impl App {
             redo_stack: Vec::new(),
             clip_until: None,
             daemon_status: resonance_ipc::service::Status::default(),
-            reference: ReferenceState::default(),
+            reference,
             autoeq_tx,
             autoeq_rx,
             autoeq_busy: false,
@@ -917,6 +923,9 @@ impl App {
             // load_measurement_file already enables the overlay.
             let name = self.reference.measurement_name.clone();
             self.set_status(format!("loaded measurement: {name} (overlay on)"));
+            // Persist now so a loaded measurement survives even a non-graceful
+            // exit (the exit-time save still runs on a normal quit).
+            self.save_reference();
         } else {
             self.set_status("failed to load measurement (expected a freq/dB curve)");
         }
@@ -1062,6 +1071,8 @@ impl App {
                     if matches!(self.mode, InputMode::SquigBrowse { .. }) {
                         self.mode = InputMode::Normal;
                     }
+                    // Persist the freshly-downloaded measurement immediately.
+                    self.save_reference();
                 }
                 DlEvent::FetchedTarget { name, curve } => {
                     self.reference.write_target(&name, &curve);
@@ -1159,6 +1170,33 @@ impl App {
             } else {
                 "fetching measurement…"
             });
+        }
+    }
+
+    // ── Reference-overlay persistence ────────────────────────────────────────
+
+    /// Where the reference overlay snapshot is stored. JSON (not TOML): the
+    /// `PersistedReference` has scalar fields after table-valued ones, which
+    /// TOML can't serialise.
+    fn reference_path() -> std::path::PathBuf {
+        crate::prefs::Prefs::config_dir().join("tui-reference.json")
+    }
+
+    fn load_reference() -> Option<PersistedReference> {
+        std::fs::read_to_string(Self::reference_path())
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+    }
+
+    /// Persist the reference overlay (called on exit) so a loaded measurement +
+    /// target + customizer survive a restart.
+    pub fn save_reference(&self) {
+        let path = Self::reference_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(s) = serde_json::to_string(&self.reference.to_persisted()) {
+            let _ = std::fs::write(path, s);
         }
     }
 

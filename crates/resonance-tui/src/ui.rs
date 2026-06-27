@@ -2362,6 +2362,25 @@ mod tests {
     }
 
     #[test]
+    fn reference_persists_as_json_round_trip() {
+        use resonance_reference::reference::{PersistedReference, ReferenceState};
+        let r = ReferenceState {
+            enabled: true,
+            adj_bass: 3.0,
+            ..ReferenceState::default()
+        };
+        let p = r.to_persisted();
+        // JSON must succeed — TOML would fail here (PersistedReference has scalar
+        // fields after its table-valued Option<RefCurve> fields).
+        let s = serde_json::to_string(&p).expect("reference persists as JSON");
+        let p2: PersistedReference = serde_json::from_str(&s).unwrap();
+        let mut r2 = ReferenceState::default();
+        r2.restore(p2);
+        assert!(r2.enabled);
+        assert_eq!(r2.adj_bass, 3.0);
+    }
+
+    #[test]
     fn active_reference_overlay_renders_without_panic() {
         use resonance_ipc::curve::RefCurve;
         use resonance_reference::reference::TargetSel;
