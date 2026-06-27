@@ -224,6 +224,10 @@ impl GuiApp {
                 accordion(ui, "acc_map_v3", "Device mapping", false, |ui| {
                     self.device_mapping_section(ui)
                 });
+                accordion(ui, "acc_prof_v3", "Profiles", false, |ui| {
+                    self.profiles_panel(ui)
+                });
+                // Channels below Profiles (matches the wide layout).
                 if let Some(s) = state {
                     if s.channels >= 2 {
                         accordion(ui, "acc_ch_v3", "Channels", false, |ui| {
@@ -231,9 +235,6 @@ impl GuiApp {
                         });
                     }
                 }
-                accordion(ui, "acc_prof_v3", "Profiles", false, |ui| {
-                    self.profiles_panel(ui)
-                });
             });
     }
 }

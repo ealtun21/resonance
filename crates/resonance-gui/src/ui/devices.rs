@@ -13,17 +13,17 @@ impl GuiApp {
 
     pub(crate) fn devices_profiles(&mut self, ui: &mut egui::Ui) {
         section(ui, "Device mapping", |ui| self.device_mapping_section(ui));
-        // Channel routing surfaces only on multi-channel-capable devices
-        // (progressive disclosure — stereo users don't see it for >2ch features,
-        // but the L/R swap is useful from 2ch up).
+        ui.add_space(12.0);
+        section(ui, "Profiles", |ui| self.profiles_panel(ui));
+        // Channels sits below Profiles. Channel routing surfaces only on
+        // multi-channel-capable devices (progressive disclosure — stereo users
+        // don't see it for >2ch features, but the L/R swap is useful from 2ch up).
         if let Some(s) = self.state.clone() {
             if s.channels >= 2 {
                 ui.add_space(12.0);
                 section(ui, "Channels", |ui| self.channels_section(ui, &s));
             }
         }
-        ui.add_space(12.0);
-        section(ui, "Profiles", |ui| self.profiles_panel(ui));
     }
 
     /// Channel layout + routing controls: shows the in→out channel counts +
@@ -154,19 +154,21 @@ impl GuiApp {
                 let active = current.as_deref() == Some(name.as_str());
                 let editing = matches!(&self.rename, Some((from, _)) if from == name);
 
-                // Selection affordance: the active profile shows a greyed,
-                // unpressable OPEN folder ("this one's loaded"); every other row is
-                // a pressable CLOSED folder that loads it — so the list reads as a
-                // selection, not ten identical buttons.
-                if active {
-                    kit::icon_btn_enabled(
+                // Selection affordance: the active profile shows an OPEN folder
+                // ("this one's loaded"); every other row is a CLOSED folder. Both
+                // are clickable — loading a profile, including re-loading the
+                // active one, restores it (discarding any in-progress edits).
+                let load = if active {
+                    kit::icon_btn(
                         ui,
                         Icon::FolderOpen,
                         kit::CTRL_H,
-                        false,
-                        "Currently loaded",
-                    );
-                } else if kit::icon_btn(ui, Icon::Folder, kit::CTRL_H, "Load this profile") {
+                        "Loaded — click to restore (discard edits)",
+                    )
+                } else {
+                    kit::icon_btn(ui, Icon::Folder, kit::CTRL_H, "Load this profile")
+                };
+                if load {
                     self.queue(Command::LoadProfile { name: name.clone() });
                     self.dirty = false; // loaded profile is the new baseline
                 }
