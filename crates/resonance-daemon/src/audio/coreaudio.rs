@@ -461,12 +461,10 @@ fn build_output_stream(
 }
 
 /// Map the processed interleaved-stereo buffer (`stereo`, `frames*2`) onto the
-/// output device's `channels` layout, writing exactly `data.len()` samples:
-///   - 1ch  → L/R average (mono downmix)
-///   - 2ch  → straight copy
-///   - N>2  → stereo on ch0/ch1, the rest silent (the upmix; true surround needs
-///            a real source, which the system tap doesn't provide).
-/// Pure (no device/RT state) so it's unit-testable without an audio device.
+/// output device's `channels` layout, writing exactly `data.len()` samples. 1ch
+/// = L/R average (mono downmix); 2ch = straight copy; N>2 = stereo on ch0/ch1
+/// with the rest silent (the upmix — true surround needs a real source the system
+/// tap doesn't provide). Pure (no device/RT state) so it's unit-testable.
 fn render_stereo_to_output(stereo: &[f32], data: &mut [f32], channels: usize) {
     match channels {
         0 => {}
