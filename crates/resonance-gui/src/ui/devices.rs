@@ -32,24 +32,27 @@ impl GuiApp {
     /// square remaps; swap covers the common case) — CLI `channel route` remains
     /// for power users.
     pub(crate) fn channels_section(&mut self, ui: &mut egui::Ui, s: &DaemonState) {
-        let line = if s.out_channels != 0 && s.out_channels != s.channels {
-            format!("in {} → out {}", s.channels, s.out_channels)
-        } else {
-            format!("{} ch", s.channels)
-        };
-        let layout = s.channel_layout.join(" ");
+        // Layout summary: channel count (with in→out when a routing matrix
+        // up/downmixes) and the position labels.
         ui.horizontal_wrapped(|ui| {
-            ui.weak(line);
+            ui.spacing_mut().item_spacing.x = kit::SP_S;
+            let count = if s.out_channels != 0 && s.out_channels != s.channels {
+                format!("{} → {} ch", s.channels, s.out_channels)
+            } else {
+                format!("{} ch", s.channels)
+            };
+            ui.strong(count);
+            let layout = s.channel_layout.join("  ");
             if !layout.is_empty() {
-                ui.weak("·");
                 ui.weak(layout);
             }
         });
         if s.channels < 2 {
             return;
         }
-        ui.add_space(kit::SP_XS);
-        // The L/R swap is exactly the swap(channels, 0, 1) routing matrix.
+
+        ui.add_space(kit::SP_S);
+        // L/R swap row (the swap(channels, 0, 1) routing matrix).
         let swap = RoutingMatrix::swap(s.channels, 0, 1);
         let is_swapped = s.routing.as_ref() == Some(&swap);
         ui.horizontal(|ui| {
@@ -78,20 +81,33 @@ impl GuiApp {
                 self.queue(Command::ClearRouting);
             }
         });
-        // Opt-in per-channel EQ: reveals a per-band channel-target column so a
-        // band can be aimed at specific channels (e.g. L-only / R-only). On
-        // >2ch the column shows automatically, so the toggle only matters at 2ch.
-        ui.add_space(kit::SP_XS);
-        let mut per_ch = self.per_channel_eq;
-        if ui
-            .checkbox(&mut per_ch, "Per-channel EQ")
-            .on_hover_text(
-                "Show a per-band channel column so a band can target specific \
-                 channels (e.g. left- or right-only). Always on for >2 channels.",
-            )
-            .changed()
-        {
-            self.per_channel_eq = per_ch;
+
+        ui.add_space(kit::SP_S);
+        // Per-channel EQ: reveals the per-band channel-target column + per-channel
+        // FR curves. Always on for >2 channels; an opt-in toggle at 2ch (a styled
+        // switch matching the rest of the UI, not a bare checkbox).
+        if s.channels > 2 {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = kit::SP_S;
+                let mut on = true;
+                ui.add_enabled_ui(false, |ui| {
+                    kit::toggle(ui, &mut on);
+                });
+                ui.label("Per-channel EQ");
+                ui.weak("(multichannel)");
+            });
+        } else {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = kit::SP_S;
+                let mut per_ch = self.per_channel_eq;
+                if kit::toggle(ui, &mut per_ch) {
+                    self.per_channel_eq = per_ch;
+                }
+                ui.label("Per-channel EQ").on_hover_text(
+                    "Aim individual bands at specific channels (e.g. left- or right-only).",
+                );
+            });
+            ui.weak("Per-band channel targeting + L/R curves on the graph.");
         }
     }
 
