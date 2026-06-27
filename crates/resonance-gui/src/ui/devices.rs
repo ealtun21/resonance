@@ -6,15 +6,78 @@ use crate::ui::icons::Icon;
 use crate::ui::kit;
 use crate::ui::widgets::section;
 use eframe::egui;
-use resonance_ipc::{Command, DaemonState};
+use resonance_ipc::{Command, DaemonState, RoutingMatrix};
 
 impl GuiApp {
     // ── Right column: devices → profiles + profile list ─────────────────────
 
     pub(crate) fn devices_profiles(&mut self, ui: &mut egui::Ui) {
         section(ui, "Device mapping", |ui| self.device_mapping_section(ui));
+        // Channel routing surfaces only on multi-channel-capable devices
+        // (progressive disclosure — stereo users don't see it for >2ch features,
+        // but the L/R swap is useful from 2ch up).
+        if let Some(s) = self.state.clone() {
+            if s.channels >= 2 {
+                ui.add_space(12.0);
+                section(ui, "Channels", |ui| self.channels_section(ui, &s));
+            }
+        }
         ui.add_space(12.0);
         section(ui, "Profiles", |ui| self.profiles_panel(ui));
+    }
+
+    /// Channel layout + routing controls: shows the in→out channel counts +
+    /// position labels, an L/R swap toggle, and a clear-routing button. The full
+    /// N×N matrix editor is intentionally omitted (the in-place backends only do
+    /// square remaps; swap covers the common case) — CLI `channel route` remains
+    /// for power users.
+    pub(crate) fn channels_section(&mut self, ui: &mut egui::Ui, s: &DaemonState) {
+        let line = if s.out_channels != 0 && s.out_channels != s.channels {
+            format!("in {} → out {}", s.channels, s.out_channels)
+        } else {
+            format!("{} ch", s.channels)
+        };
+        let layout = s.channel_layout.join(" ");
+        ui.horizontal_wrapped(|ui| {
+            ui.weak(line);
+            if !layout.is_empty() {
+                ui.weak("·");
+                ui.weak(layout);
+            }
+        });
+        if s.channels < 2 {
+            return;
+        }
+        ui.add_space(kit::SP_XS);
+        // The L/R swap is exactly the swap(channels, 0, 1) routing matrix.
+        let swap = RoutingMatrix::swap(s.channels, 0, 1);
+        let is_swapped = s.routing.as_ref() == Some(&swap);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = kit::SP_S;
+            if ui
+                .selectable_label(is_swapped, "Swap L/R")
+                .on_hover_text("Swap the front-left and front-right channels")
+                .clicked()
+            {
+                if is_swapped {
+                    self.queue(Command::ClearRouting);
+                } else {
+                    self.queue(Command::SwapChannels { a: 0, b: 1 });
+                }
+            }
+            if s.routing.is_some()
+                && kit::icon_text_btn(
+                    ui,
+                    Icon::Close,
+                    "Clear",
+                    false,
+                    true,
+                    "Remove channel routing (straight passthrough)",
+                )
+            {
+                self.queue(Command::ClearRouting);
+            }
+        });
     }
 
     /// Device → profile mapping table: every output device we've ever seen, each

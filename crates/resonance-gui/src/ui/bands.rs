@@ -9,18 +9,40 @@ use crate::ui::icons::Icon;
 use crate::ui::kit;
 use crate::ui::widgets::gain_bar;
 use eframe::egui;
-use resonance_ipc::{BandType, Command, DaemonState};
+use resonance_ipc::{BandType, ChannelMask, Command, DaemonState};
 
 const IDX_W: f32 = 26.0;
 const ON_W: f32 = 36.0;
 const FREQ_W: f32 = 58.0;
 const GAIN_W: f32 = 54.0;
 const Q_W: f32 = 50.0;
+const CH_W: f32 = 64.0;
 const X_W: f32 = 24.0;
+
+/// Short label for a band's channel target, e.g. `all` / `FL` / `FL FR` /
+/// `FL +2` / `none`. Used in the per-band channel column (multichannel only).
+pub(crate) fn channel_tag(mask: ChannelMask, layout: &[String], channels: usize) -> String {
+    if mask.is_global(channels) {
+        return "all".to_string();
+    }
+    let names: Vec<&str> = (0..channels)
+        .filter(|&c| mask.contains(c))
+        .map(|c| layout.get(c).map(String::as_str).unwrap_or("?"))
+        .collect();
+    match names.len() {
+        0 => "none".to_string(),
+        1 | 2 => names.join(" "),
+        _ => format!("{} +{}", names[0], names.len() - 1),
+    }
+}
 
 impl GuiApp {
     pub(crate) fn bands_section(&mut self, ui: &mut egui::Ui, state: &DaemonState) {
         let avail = ui.available_width();
+        // Per-channel EQ is a multichannel feature: the channel-target column only
+        // appears on >2-channel devices, so stereo users get a clean table
+        // (progressive disclosure).
+        let show_ch = state.channels > 2;
         // Collapse columns as the table narrows: drop the gain graph first, then
         // the Type combo (abbreviated when tight).
         let show_graph = avail >= 480.0;
@@ -28,9 +50,15 @@ impl GuiApp {
         let abbrev_type = avail < 560.0;
         let type_w = if abbrev_type { 56.0 } else { 96.0 };
         let gap = kit::SP_S;
-        let n_cols = 6 + show_type as usize + show_graph as usize;
-        let fixed =
-            IDX_W + ON_W + if show_type { type_w } else { 0.0 } + FREQ_W + GAIN_W + Q_W + X_W;
+        let n_cols = 6 + show_type as usize + show_graph as usize + show_ch as usize;
+        let fixed = IDX_W
+            + ON_W
+            + if show_type { type_w } else { 0.0 }
+            + FREQ_W
+            + GAIN_W
+            + Q_W
+            + if show_ch { CH_W } else { 0.0 }
+            + X_W;
         let graph_w = (avail - fixed - gap * (n_cols as f32 - 1.0)).max(60.0);
 
         // Header captions, aligned to the same column widths as the rows.
@@ -55,6 +83,9 @@ impl GuiApp {
             cap(ui, FREQ_W, "Freq");
             cap(ui, GAIN_W, "Gain");
             cap(ui, Q_W, "Q");
+            if show_ch {
+                cap(ui, CH_W, "Ch");
+            }
             if show_graph {
                 cap(ui, graph_w, "Graph");
             }
@@ -152,6 +183,43 @@ impl GuiApp {
                         gain_db: gain,
                         q,
                     });
+                }
+
+                if show_ch {
+                    // Channel-target menu: a checkbox per channel. Collect the
+                    // edit and queue it after the menu closure so the menu's
+                    // closure never borrows `self`.
+                    let mut new_mask: Option<ChannelMask> = None;
+                    let tag = channel_tag(b.channels, &state.channel_layout, state.channels);
+                    ui.allocate_ui(egui::vec2(CH_W, 22.0), |ui| {
+                        ui.menu_button(tag, |ui| {
+                            let mut mask = b.channels;
+                            for c in 0..state.channels {
+                                let label = state
+                                    .channel_layout
+                                    .get(c)
+                                    .cloned()
+                                    .unwrap_or_else(|| format!("ch{c}"));
+                                let mut on = mask.contains(c);
+                                if ui.checkbox(&mut on, label).changed() {
+                                    mask = if on { mask.with(c) } else { mask.without(c) };
+                                    new_mask = Some(mask);
+                                }
+                            }
+                        });
+                    });
+                    if let Some(m) = new_mask {
+                        // Collapse "every channel" back to the canonical ALL.
+                        let m = if m.is_global(state.channels) {
+                            ChannelMask::ALL
+                        } else {
+                            m
+                        };
+                        self.queue_edit(Command::SetBandChannels {
+                            index: i,
+                            channels: m,
+                        });
+                    }
                 }
 
                 if show_graph {
