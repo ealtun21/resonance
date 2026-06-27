@@ -17,13 +17,19 @@ pub struct Panes {
 
 /// Split the full frame: status / EQ curve / spectrum on top (full width),
 /// then Effects | Bands side by side, then a footer.
-pub fn panes(area: Rect) -> Panes {
+///
+/// The EQ curve is the elastic hero (`Fill(3)` vs the controls' `Fill(2)`), so
+/// it takes the lion's share of the height and grows with the window. The
+/// spectrum is a fixed strip that collapses to nothing when `show_spectrum` is
+/// off, handing its rows to the graph.
+pub fn panes(area: Rect, show_spectrum: bool) -> Panes {
+    let spectrum_h = if show_spectrum { 13 } else { 0 };
     let v = Layout::vertical([
-        Constraint::Length(1),  // status
-        Constraint::Length(12), // EQ curve (taller)
-        Constraint::Length(13), // spectrum
-        Constraint::Min(8),     // bands + effects row
-        Constraint::Length(1),  // footer
+        Constraint::Length(1),          // status
+        Constraint::Fill(3),            // EQ curve — the hero
+        Constraint::Length(spectrum_h), // spectrum (0 = hidden)
+        Constraint::Fill(2),            // bands + effects row
+        Constraint::Length(1),          // footer
     ])
     .split(area);
 

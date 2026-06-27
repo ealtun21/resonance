@@ -24,11 +24,13 @@ use ratatui::{
 const DB_RANGE: f64 = 18.0;
 
 pub fn render(app: &App, frame: &mut Frame) {
-    let p = crate::layout::panes(frame.area());
+    let p = crate::layout::panes(frame.area(), app.prefs.show_spectrum);
 
     render_status(app, frame, p.status);
     render_eq_curve(app, frame, p.eq);
-    render_spectrum(app, frame, p.spectrum);
+    if app.prefs.show_spectrum {
+        render_spectrum(app, frame, p.spectrum);
+    }
     render_effects(app, frame, p.effects);
     render_bands(app, frame, p.bands);
     render_footer(app, frame, p.footer);
@@ -421,25 +423,33 @@ fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
         })
         .collect();
 
-    // Listener-preference tolerance band around the target (asymmetric): two
-    // faint lines at target ± preference_bounds, drawn under the overlay.
-    let bound_runs: Vec<Vec<(f64, f64)>> = if app.reference.show_bounds {
+    // Listener-preference tolerance band around the target (asymmetric): a
+    // *shaded* region (not just edge lines) — fill the band with dim half-block
+    // points, drawn through the chart so they map to the same plot area as the
+    // curve. Subsample columns to ~the inner width and step ~0.5 dB vertically
+    // to keep the point count bounded while still reading as a solid fill.
+    let shade_pts: Vec<(f64, f64)> = if app.reference.show_bounds {
         ref_series
             .iter()
             .find(|s| s.role == SeriesRole::Target)
             .map(|t| {
-                let edge = |sign: f64| {
-                    t.pts
-                        .iter()
-                        .map(|&(lf, ty)| {
-                            let (below, above) =
-                                resonance_reference::reference::preference_bounds(10f64.powf(lf));
-                            let d = if sign > 0.0 { above } else { -below };
-                            (lf, (ty + d).clamp(-DB_RANGE, DB_RANGE))
-                        })
-                        .collect::<Vec<_>>()
-                };
-                vec![edge(1.0), edge(-1.0)]
+                let mut pts = Vec::new();
+                let step = (t.pts.len() / (inner.width.max(1) as usize)).max(1);
+                for (i, &(lf, ty)) in t.pts.iter().enumerate() {
+                    if i % step != 0 {
+                        continue;
+                    }
+                    let (below, above) =
+                        resonance_reference::reference::preference_bounds(10f64.powf(lf));
+                    let lo = (ty - below).clamp(-DB_RANGE, DB_RANGE);
+                    let hi = (ty + above).clamp(-DB_RANGE, DB_RANGE);
+                    let mut y = lo;
+                    while y <= hi {
+                        pts.push((lf, y));
+                        y += 0.5;
+                    }
+                }
+                pts
             })
             .unwrap_or_default()
     } else {
@@ -447,33 +457,33 @@ fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
     };
 
     // Colour-code the response by gain sign: boost green, cut red, neutral cyan
-    // near 0 dB (matches the GUI's gain-signed curve tint). Build it from the
-    // zero reference, the coloured curve runs, the reference overlay, then the
-    // band markers (on top).
+    // near 0 dB (matches the GUI's gain-signed curve tint). Order: shaded band
+    // (backdrop), zero reference, coloured curve runs, reference overlay, then
+    // the band markers (on top).
     let runs = curve_runs(&curve_data);
-    let mut datasets = vec![
+    let mut datasets = Vec::new();
+    if !shade_pts.is_empty() {
+        datasets.push(
+            Dataset::default()
+                .marker(symbols::Marker::HalfBlock)
+                .graph_type(GraphType::Scatter)
+                .style(Style::default().fg(Color::Rgb(48, 48, 66)))
+                .data(&shade_pts),
+        );
+    }
+    datasets.push(
         Dataset::default()
             .marker(symbols::Marker::Braille)
             .graph_type(GraphType::Line)
             .style(Style::default().fg(Color::DarkGray))
             .data(&zero_pts),
-    ];
+    );
     for (color, pts) in &runs {
         datasets.push(
             Dataset::default()
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(Style::default().fg(*color))
-                .data(pts),
-        );
-    }
-    // Tolerance band first (faint), so the overlay lines sit on top of it.
-    for pts in &bound_runs {
-        datasets.push(
-            Dataset::default()
-                .marker(symbols::Marker::Braille)
-                .graph_type(GraphType::Line)
-                .style(Style::default().fg(Color::Rgb(70, 70, 95)))
                 .data(pts),
         );
     }
@@ -1823,7 +1833,7 @@ fn render_tab_devices(s: &SettingsState, app: &App, frame: &mut Frame, area: Rec
 
 fn render_tab_prefs(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect) {
     let prefs = &app.prefs;
-    let items: [(&str, String, &str); 5] = [
+    let items: [(&str, String, &str); 6] = [
         ("FPS", prefs.fps.to_string(), "(applied next launch)"),
         (
             "Refresh ms",
@@ -1844,6 +1854,11 @@ fn render_tab_prefs(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect)
             "Default band type",
             prefs.default_band_type.abbrev().to_string(),
             "(type for new EQ bands, Space/Enter cycles)",
+        ),
+        (
+            "Show spectrum",
+            prefs.show_spectrum.to_string(),
+            "(Space/Enter toggles; off = larger graph)",
         ),
     ];
 
@@ -2362,6 +2377,20 @@ mod tests {
     }
 
     #[test]
+    fn hiding_spectrum_enlarges_the_graph() {
+        let area = ratatui::layout::Rect::new(0, 0, 100, 44);
+        let on = crate::layout::panes(area, true);
+        let off = crate::layout::panes(area, false);
+        assert!(
+            off.eq.height > on.eq.height,
+            "graph should grow when the spectrum is hidden ({} → {})",
+            on.eq.height,
+            off.eq.height
+        );
+        assert_eq!(off.spectrum.height, 0, "hidden spectrum takes no rows");
+    }
+
+    #[test]
     fn reference_persists_as_json_round_trip() {
         use resonance_reference::reference::{PersistedReference, ReferenceState};
         let r = ReferenceState {
@@ -2401,9 +2430,13 @@ mod tests {
         app.reference.enabled = true;
         app.reference.show_bounds = true; // exercise the tolerance-band path too
         assert!(app.reference.active(), "measurement + enabled → active");
-        // The overlay + bounds path must render without panicking.
+        // The overlay + bounds (shaded band) path must render without panicking,
+        // both with the spectrum shown and hidden (different graph height).
         let text = render_to_text(&app, 120, 44);
         assert!(!text.trim().is_empty());
+        app.prefs.show_spectrum = false;
+        let text2 = render_to_text(&app, 120, 44);
+        assert!(!text2.trim().is_empty());
     }
 
     #[test]
