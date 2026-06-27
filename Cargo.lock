@@ -4196,6 +4196,7 @@ dependencies = [
  "resonance-dsp",
  "resonance-ipc",
  "resonance-preset",
+ "resonance-reference",
  "serde",
  "serde_json",
  "toml",
@@ -4220,6 +4221,16 @@ dependencies = [
  "resonance-dsp",
  "serde",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "resonance-reference"
+version = "0.6.0"
+dependencies = [
+ "resonance-ipc",
+ "serde",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]

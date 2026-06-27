@@ -11,10 +11,18 @@
 use resonance_ipc::curve::RefCurve;
 use serde::Deserialize;
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 
+/// UI-framework-agnostic "wake the event loop" callback. The downloader runs on
+/// a background thread and calls this whenever it emits a [`DlEvent`], so an
+/// event-driven client (the egui GUI) repaints promptly; a polling client (the
+/// TUI) passes a no-op. Replaces the former hard dependency on
+/// `egui::Context::request_repaint`.
+pub type Wake = Arc<dyn Fn() + Send + Sync>;
+
 const SITES_URL: &str = "https://squig.link/squigsites.json";
-const USER_AGENT: &str = concat!("resonance-gui/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("resonance/", env!("CARGO_PKG_VERSION"));
 
 /// Databases enabled out of the box (by squig username) so the browser has
 /// content on first open without fetching all ~118 sites' indexes.
@@ -83,7 +91,7 @@ impl StrOrVec {
 
 /// One selectable measurement in the flattened catalog.
 #[derive(Clone)]
-pub(crate) struct ModelEntry {
+pub struct ModelEntry {
     /// Owning database (for grouping/display).
     pub source: String,
     /// "Brand Model [variant]".
@@ -100,7 +108,7 @@ pub(crate) struct ModelEntry {
 /// `config.js` `targets` array — there's no JSON index for targets the way
 /// `phone_book.json` lists measurements).
 #[derive(Clone)]
-pub(crate) struct TargetEntry {
+pub struct TargetEntry {
     /// Owning database (for grouping/display).
     pub source: String,
     /// File basename, also the display name (e.g. "Harman 2019", "JM-1").
@@ -111,7 +119,7 @@ pub(crate) struct TargetEntry {
 
 /// Per-source toggle metadata for the browser's source list.
 #[derive(Clone)]
-pub(crate) struct SourceMeta {
+pub struct SourceMeta {
     pub id: String,
     pub name: String,
     pub enabled: bool,
@@ -120,14 +128,14 @@ pub(crate) struct SourceMeta {
 
 /// Snapshot the UI renders: source toggles + the flattened model + target lists.
 #[derive(Clone, Default)]
-pub(crate) struct Catalog {
+pub struct Catalog {
     pub sources: Vec<SourceMeta>,
     pub models: Vec<ModelEntry>,
     pub targets: Vec<TargetEntry>,
 }
 
 /// A fetched measurement, ready to install as the active reference measurement.
-pub(crate) struct Fetched {
+pub struct Fetched {
     pub name: String,
     /// In-ear rig (drives AutoEQ's smoothing profile).
     pub iem: bool,
@@ -135,7 +143,7 @@ pub(crate) struct Fetched {
     pub right: Option<RefCurve>,
 }
 
-pub(crate) enum DlCmd {
+pub enum DlCmd {
     /// Build the catalog from cache (or fetch if absent).
     Init,
     /// Force a fresh network fetch of everything enabled.
@@ -155,7 +163,7 @@ pub(crate) enum DlCmd {
     AddMeasurementTarget(ModelEntry),
 }
 
-pub(crate) enum DlEvent {
+pub enum DlEvent {
     Catalog(Catalog),
     Status(String),
     Busy(bool),
@@ -181,7 +189,7 @@ struct Source {
 }
 
 /// Spawn the download worker. Returns the command sender + event receiver.
-pub(crate) fn spawn(ctx: eframe::egui::Context) -> (Sender<DlCmd>, Receiver<DlEvent>) {
+pub fn spawn(ctx: Wake) -> (Sender<DlCmd>, Receiver<DlEvent>) {
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<DlCmd>();
     let (ev_tx, ev_rx) = std::sync::mpsc::channel::<DlEvent>();
     std::thread::Builder::new()
@@ -198,11 +206,11 @@ pub(crate) fn spawn(ctx: eframe::egui::Context) -> (Sender<DlCmd>, Receiver<DlEv
 /// every dialog-open. Manual "Refresh" ignores this and re-fetches everything.
 const CATALOG_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60 * 24 * 7);
 
-fn worker(rx: Receiver<DlCmd>, tx: Sender<DlEvent>, ctx: eframe::egui::Context) {
+fn worker(rx: Receiver<DlCmd>, tx: Sender<DlEvent>, ctx: Wake) {
     let mut sites: Vec<Source> = Vec::new();
     while let Ok(cmd) = rx.recv() {
         let _ = tx.send(DlEvent::Busy(true));
-        ctx.request_repaint();
+        ctx();
         match cmd {
             DlCmd::Init => {
                 // "Remember + keep updated": the first warm of the session loads
@@ -265,7 +273,7 @@ fn worker(rx: Receiver<DlCmd>, tx: Sender<DlEvent>, ctx: eframe::egui::Context) 
                 }
                 save_enabled(&sites);
                 let _ = tx.send(DlEvent::Catalog(snapshot(&sites)));
-                ctx.request_repaint();
+                ctx();
                 if on {
                     let idx: Vec<usize> = (0..sites.len()).filter(|&i| !sites[i].loaded).collect();
                     load_sources_parallel(&mut sites, &idx, Freshness::CacheFirst, &tx, &ctx);
@@ -277,7 +285,7 @@ fn worker(rx: Receiver<DlCmd>, tx: Sender<DlEvent>, ctx: eframe::egui::Context) 
                 }
                 save_enabled(&sites);
                 let _ = tx.send(DlEvent::Catalog(snapshot(&sites)));
-                ctx.request_repaint();
+                ctx();
                 let idx: Vec<usize> = (0..sites.len())
                     .filter(|&i| sites[i].enabled && !sites[i].loaded)
                     .collect();
@@ -312,7 +320,7 @@ fn worker(rx: Receiver<DlCmd>, tx: Sender<DlEvent>, ctx: eframe::egui::Context) 
             },
         }
         let _ = tx.send(DlEvent::Busy(false));
-        ctx.request_repaint();
+        ctx();
     }
 }
 
@@ -549,7 +557,7 @@ fn load_sources_parallel(
     indices: &[usize],
     fresh: Freshness,
     tx: &Sender<DlEvent>,
-    ctx: &eframe::egui::Context,
+    ctx: &Wake,
 ) {
     #[derive(Clone, Copy)]
     enum What {
@@ -633,7 +641,7 @@ fn load_sources_parallel(
         sites[si].loaded = true;
     }
     let _ = tx.send(DlEvent::Catalog(snapshot(sites)));
-    ctx.request_repaint();
+    ctx();
 }
 
 fn fetch_model(m: &ModelEntry) -> Result<Fetched, String> {

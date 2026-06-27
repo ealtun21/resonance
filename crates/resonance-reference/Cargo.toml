@@ -1,0 +1,15 @@
+[package]
+name = "resonance-reference"
+description = "Reference/measurement target curves + squig.link downloader (client-agnostic)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+resonance-ipc = { path = "../resonance-ipc" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# squig.link measurement downloader (background thread).
+ureq = { workspace = true }

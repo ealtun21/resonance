@@ -7,10 +7,8 @@
 mod app;
 mod browser;
 mod curve;
-mod download;
 mod icon;
 mod ipc;
-mod reference;
 mod state;
 mod theme;
 mod ui;

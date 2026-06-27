@@ -106,10 +106,11 @@ impl GuiApp {
         let peak = if self.reference.show_bounds {
             ref_series
                 .iter()
-                .find(|s| s.role == crate::reference::SeriesRole::Target)
+                .find(|s| s.role == resonance_reference::reference::SeriesRole::Target)
                 .map(|t| {
                     t.pts.iter().fold(peak, |acc, &(lf, y)| {
-                        let (below, above) = crate::reference::preference_bounds(10f64.powf(lf));
+                        let (below, above) =
+                            resonance_reference::reference::preference_bounds(10f64.powf(lf));
                         acc.max(y.abs() + below.max(above))
                     })
                 })
@@ -622,14 +623,14 @@ impl GuiApp {
 /// so it sits on top.
 fn draw_reference(
     painter: &egui::Painter,
-    series: &[crate::reference::RefSeries],
+    series: &[resonance_reference::reference::RefSeries],
     na: f32,
     show_bounds: bool,
     x_of: &dyn Fn(f64) -> f32,
     y_of: &dyn Fn(f64) -> f32,
     pal: &crate::theme::Palette,
 ) {
-    use crate::reference::SeriesRole;
+    use resonance_reference::reference::SeriesRole;
 
     // Preference tolerance band first, behind every line: a translucent ribbon at
     // target ± preference_halfwidth(f), so it follows the target (and flattens to
@@ -643,7 +644,8 @@ fn draw_reference(
             let mut up: Vec<egui::Pos2> = Vec::with_capacity(t.pts.len());
             let mut lo: Vec<egui::Pos2> = Vec::with_capacity(t.pts.len());
             for &(lf, y) in &t.pts {
-                let (below, above) = crate::reference::preference_bounds(10f64.powf(lf));
+                let (below, above) =
+                    resonance_reference::reference::preference_bounds(10f64.powf(lf));
                 up.push(egui::pos2(x_of(lf), y_of(y + above)));
                 lo.push(egui::pos2(x_of(lf), y_of(y - below)));
             }

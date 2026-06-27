@@ -5,6 +5,7 @@ members = [
     "crates/resonance-preset",
     "crates/resonance-autoeq",
     "crates/resonance-ipc",
+    "crates/resonance-reference",
     "crates/resonance-daemon",
     "crates/resonance-apo",
     "crates/resonance-cli",
