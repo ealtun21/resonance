@@ -35,6 +35,22 @@ const STATUS_TTL: Duration = Duration::from_secs(4);
 pub enum Panel {
     Effects,
     Bands,
+    /// The interactive FR graph — nodes editable by keyboard (arrows) and mouse
+    /// (click-select + drag).
+    Graph,
+}
+
+/// An in-progress mouse drag of a band node on the FR graph.
+#[derive(Debug, Clone, Copy)]
+struct Drag {
+    band: usize,
+    /// Right-button drag tunes Q (vs left = freq+gain).
+    q_mode: bool,
+    /// Last row seen (for relative Q drag).
+    last_row: u16,
+    /// Whether an undo snapshot has been pushed for this gesture yet (pushed on
+    /// the first move so a click-without-drag doesn't add an undo entry).
+    pushed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +143,8 @@ pub struct App {
     pub dl_status: String,
     /// Whether `DlCmd::Init` has been sent (catalog warmed lazily on first open).
     dl_inited: bool,
+    /// In-progress FR-graph node drag (None when not dragging).
+    graph_drag: Option<Drag>,
 }
 
 /// A restorable snapshot of the editable chain state (for undo/redo).
@@ -182,6 +200,7 @@ impl App {
             dl_busy: false,
             dl_status: String::new(),
             dl_inited: false,
+            graph_drag: None,
         }
     }
 
@@ -509,7 +528,7 @@ impl App {
     // ── Navigation ────────────────────────────────────────────────────────
 
     /// Tab cycles left-to-right across columns, then wraps:
-    /// Effects → Bands(Freq) → Bands(Gain) → Bands(Q) → Effects
+    /// Effects → Bands(Freq) → Bands(Gain) → Bands(Q) → Graph → Effects
     pub fn next_panel(&mut self) {
         match self.focus {
             Panel::Effects => {
@@ -519,8 +538,9 @@ impl App {
             Panel::Bands => match self.band_field {
                 BandField::Freq => self.band_field = BandField::Gain,
                 BandField::Gain => self.band_field = BandField::Q,
-                BandField::Q => self.focus = Panel::Effects,
+                BandField::Q => self.focus = Panel::Graph,
             },
+            Panel::Graph => self.focus = Panel::Effects,
         }
     }
 
@@ -536,6 +556,8 @@ impl App {
                     self.band_cursor -= 1;
                 }
             }
+            // Graph: ↑/↓ move the node's gain, handled in the key dispatcher.
+            Panel::Graph => {}
         }
     }
 
@@ -557,6 +579,7 @@ impl App {
                     self.band_cursor += 1;
                 }
             }
+            Panel::Graph => {}
         }
     }
 
@@ -611,6 +634,9 @@ impl App {
                 });
                 self.refresh_state();
             }
+            // Graph uses dedicated 2-axis nudges (gain/freq), not the single
+            // active-field `adjust`; handled in the key dispatcher.
+            Panel::Graph => {}
         }
     }
 
@@ -717,7 +743,7 @@ impl App {
 
     /// Cycle the filter type of the selected band (`t` key).
     pub fn cycle_band_type(&mut self) {
-        if self.focus != Panel::Bands {
+        if !matches!(self.focus, Panel::Bands | Panel::Graph) {
             return;
         }
         let Some(state) = &self.state else { return };
@@ -758,7 +784,8 @@ impl App {
                 self.send(Command::SetEffectEnabled { effect, enabled });
                 self.refresh_state();
             }
-            Panel::Bands => {
+            // Both Bands and Graph toggle the selected band's enable.
+            Panel::Bands | Panel::Graph => {
                 let Some(state) = &self.state else { return };
                 let idx = self.band_cursor;
                 let Some(band) = state.bands.get(idx) else {
@@ -775,6 +802,155 @@ impl App {
         }
     }
 
+    // ── FR-graph node editing (keyboard + mouse) ────────────────────────────
+
+    /// The interactive plot rectangle of the EQ curve (None if too small).
+    fn eq_plot(&self) -> Option<Rect> {
+        let p = crate::layout::panes(self.last_frame, self.prefs.show_spectrum);
+        let plot = crate::layout::eq_plot_area(p.eq);
+        (plot.width >= 2 && plot.height >= 2).then_some(plot)
+    }
+
+    /// True if (col,row) is inside the EQ-curve panel.
+    pub fn in_eq_panel(&self, col: u16, row: u16) -> bool {
+        let p = crate::layout::panes(self.last_frame, self.prefs.show_spectrum);
+        crate::layout::hit(p.eq, col, row)
+    }
+
+    /// The enabled band whose node is nearest (in cells) to (col,row).
+    fn nearest_band(&self, col: u16, row: u16, plot: Rect) -> Option<usize> {
+        let s = self.state.as_ref()?;
+        let mut best: Option<usize> = None;
+        let mut best_d = i64::MAX;
+        for (i, b) in s.bands.iter().enumerate() {
+            if !b.enabled {
+                continue;
+            }
+            let nc = crate::layout::graph_node_col(plot, b.freq) as i64;
+            let nr = crate::layout::graph_node_row(plot, b.gain_db) as i64;
+            let d = (nc - col as i64).pow(2) + (nr - row as i64).pow(2);
+            if d < best_d {
+                best_d = d;
+                best = Some(i);
+            }
+        }
+        best
+    }
+
+    pub fn is_graph_dragging(&self) -> bool {
+        self.graph_drag.is_some()
+    }
+
+    /// Select the previous/next band node (Graph-panel `[` / `]`).
+    pub fn graph_select(&mut self, delta: i32) {
+        let n = self.state.as_ref().map(|s| s.bands.len()).unwrap_or(0);
+        if n == 0 {
+            return;
+        }
+        let max = n as i32 - 1;
+        self.band_cursor = (self.band_cursor as i32 + delta).clamp(0, max) as usize;
+    }
+
+    /// Nudge the selected node by `d_gain` dB and/or `d_semitones` (keyboard
+    /// arrows on the Graph panel). One undo step per press.
+    pub fn graph_nudge(&mut self, d_gain: f64, d_semitones: f64) {
+        let Some((i, mut freq, mut gain, q)) = self.state.as_ref().and_then(|s| {
+            let i = self.band_cursor;
+            s.bands.get(i).map(|b| (i, b.freq, b.gain_db, b.q))
+        }) else {
+            return;
+        };
+        if d_semitones != 0.0 {
+            freq = (freq * 2f64.powf(d_semitones / 12.0)).clamp(20.0, 20000.0);
+            freq = (freq * 10.0).round() / 10.0;
+        }
+        if d_gain != 0.0 {
+            let lim = crate::layout::GRAPH_DB_RANGE;
+            gain = ((gain + d_gain).clamp(-lim, lim) * 10.0).round() / 10.0;
+        }
+        self.push_undo();
+        self.send(Command::SetBand {
+            index: i,
+            freq,
+            gain_db: gain,
+            q,
+        });
+        self.refresh_state();
+    }
+
+    /// Mouse press on the graph: grab the nearest node for dragging (left =
+    /// freq+gain, right = Q). The undo snapshot is deferred to the first move so
+    /// a click that only selects doesn't add an undo entry.
+    pub fn graph_press(&mut self, col: u16, row: u16, right: bool) {
+        let Some(plot) = self.eq_plot() else { return };
+        let Some(i) = self.nearest_band(col, row, plot) else {
+            return;
+        };
+        self.focus = Panel::Graph;
+        self.band_cursor = i;
+        self.graph_drag = Some(Drag {
+            band: i,
+            q_mode: right,
+            last_row: row,
+            pushed: false,
+        });
+    }
+
+    /// Mouse drag: move the grabbed node to the cursor (freq+gain), or tune its
+    /// Q relative to the last row (right-drag). No-op if not dragging.
+    pub fn graph_drag_to(&mut self, col: u16, row: u16) {
+        let Some(plot) = self.eq_plot() else { return };
+        let Some(drag) = self.graph_drag else { return };
+        let i = drag.band;
+        let Some((bf, bg, bq)) = self
+            .state
+            .as_ref()
+            .and_then(|s| s.bands.get(i))
+            .map(|b| (b.freq, b.gain_db, b.q))
+        else {
+            return;
+        };
+        if !drag.pushed {
+            self.push_undo();
+            if let Some(d) = &mut self.graph_drag {
+                d.pushed = true;
+            }
+        }
+        let (freq, gain, q) = if drag.q_mode {
+            // Relative drag: up = narrower (higher Q), exponential like the GUI.
+            let dy = drag.last_row as f64 - row as f64;
+            let q = (bq * (dy * 0.06).exp()).clamp(0.1, 20.0);
+            if let Some(d) = &mut self.graph_drag {
+                d.last_row = row;
+            }
+            (bf, bg, (q * 100.0).round() / 100.0)
+        } else {
+            let (f, g) = crate::layout::graph_pixel_to_data(plot, col, row);
+            ((f * 10.0).round() / 10.0, (g * 10.0).round() / 10.0, bq)
+        };
+        self.send(Command::SetBand {
+            index: i,
+            freq,
+            gain_db: gain,
+            q,
+        });
+        self.refresh_state();
+    }
+
+    pub fn graph_release(&mut self) {
+        self.graph_drag = None;
+    }
+
+    /// Mouse wheel on the graph: select the nearest node and nudge its gain.
+    pub fn graph_scroll(&mut self, col: u16, row: u16, delta: f64) {
+        let Some(plot) = self.eq_plot() else { return };
+        if let Some(i) = self.nearest_band(col, row, plot) {
+            self.focus = Panel::Graph;
+            self.band_cursor = i;
+            self.graph_nudge(delta, 0.0);
+        }
+    }
+
     // ── Channel targeting / routing (multichannel) ──────────────────────────
 
     /// Whether per-channel controls should surface. Progressive disclosure:
@@ -787,7 +963,7 @@ impl App {
     /// Open the per-band channel-target picker (`c`) for the selected band.
     /// No-op on ≤2-channel devices (feature hidden) or with no bands.
     pub fn begin_select_band_channels(&mut self) {
-        if self.focus != Panel::Bands || !self.show_ch() {
+        if !matches!(self.focus, Panel::Bands | Panel::Graph) || !self.show_ch() {
             return;
         }
         let idx = self.band_cursor;

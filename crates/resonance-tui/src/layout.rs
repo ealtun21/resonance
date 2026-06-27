@@ -110,3 +110,62 @@ pub fn band_scroll_offset(cursor: usize, n: usize, visible: usize) -> usize {
 pub fn hit(area: Rect, col: u16, row: u16) -> bool {
     col >= area.x && col < area.x + area.width && row >= area.y && row < area.y + area.height
 }
+
+// ── EQ-graph geometry (for keyboard/mouse node editing) ──────────────────────
+
+/// Half-range of the EQ-curve dB axis. Must match `ui::DB_RANGE` (the Chart's
+/// y bounds are ±this), so pixel↔gain mapping lines up with the rendered curve.
+pub const GRAPH_DB_RANGE: f64 = 18.0;
+
+/// Log10 frequency bounds of the EQ curve's x-axis (20 Hz – 20 kHz), matching
+/// `curve::x_axis_ticks()` so mapped positions line up with the rendered chart.
+pub fn graph_log_range() -> (f64, f64) {
+    (20f64.log10(), 20000f64.log10())
+}
+
+/// The interactive plotting rectangle inside the EQ-curve panel — the region a
+/// ratatui `Chart` draws data into, i.e. the bordered inner area minus the
+/// y-axis labels+line on the left and the x-axis line+labels at the bottom.
+/// Best-effort (our y labels are 3 chars wide, +1 axis column; 2 bottom rows);
+/// click/drag uses nearest-node selection, so a 1-cell offset stays usable.
+pub fn eq_plot_area(eq: Rect) -> Rect {
+    let inner = block_inner(eq);
+    const LEFT: u16 = 4; // 3-char y labels ("-18"/" 0"/"+18") + axis column
+    const BOTTOM: u16 = 2; // x-axis line row + label row
+    Rect::new(
+        inner.x.saturating_add(LEFT),
+        inner.y,
+        inner.width.saturating_sub(LEFT),
+        inner.height.saturating_sub(BOTTOM),
+    )
+}
+
+/// Map a cell (col,row) inside the plot to (freq Hz, gain dB), clamped to the
+/// visible ranges.
+pub fn graph_pixel_to_data(plot: Rect, col: u16, row: u16) -> (f64, f64) {
+    let (lmin, lmax) = graph_log_range();
+    let w = (plot.width.max(2) - 1) as f64;
+    let h = (plot.height.max(2) - 1) as f64;
+    let fx = ((col.saturating_sub(plot.x)) as f64 / w).clamp(0.0, 1.0);
+    let fy = ((row.saturating_sub(plot.y)) as f64 / h).clamp(0.0, 1.0);
+    let freq = 10f64.powf(lmin + fx * (lmax - lmin)).clamp(20.0, 20000.0);
+    let gain = (GRAPH_DB_RANGE - fy * 2.0 * GRAPH_DB_RANGE).clamp(-GRAPH_DB_RANGE, GRAPH_DB_RANGE);
+    (freq, gain)
+}
+
+/// Column where a band node at `freq` is drawn within the plot.
+pub fn graph_node_col(plot: Rect, freq: f64) -> u16 {
+    let (lmin, lmax) = graph_log_range();
+    let w = (plot.width.max(2) - 1) as f64;
+    let t = ((freq.clamp(20.0, 20000.0).log10() - lmin) / (lmax - lmin)).clamp(0.0, 1.0);
+    plot.x + (t * w).round() as u16
+}
+
+/// Row where a band node at `gain` is drawn within the plot.
+pub fn graph_node_row(plot: Rect, gain: f64) -> u16 {
+    let h = (plot.height.max(2) - 1) as f64;
+    let t = ((GRAPH_DB_RANGE - gain.clamp(-GRAPH_DB_RANGE, GRAPH_DB_RANGE))
+        / (2.0 * GRAPH_DB_RANGE))
+        .clamp(0.0, 1.0);
+    plot.y + (t * h).round() as u16
+}

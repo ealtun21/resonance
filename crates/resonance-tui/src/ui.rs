@@ -84,7 +84,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
 
     let lines = vec![
         head("Navigation"),
-        key("Tab", "switch panel (effects / bands)"),
+        key("Tab", "switch panel (effects / bands / graph)"),
         key("↑ ↓", "move selection"),
         key("Ctrl-z / Ctrl-y", "undo / redo"),
         key("? ", "toggle this help"),
@@ -101,6 +101,12 @@ fn render_help(frame: &mut Frame, area: Rect) {
         key("d / Del", "remove band"),
         key("t", "cycle band type"),
         key("c", "channel targeting (multichannel)"),
+        Line::raw(""),
+        head("FR graph (Tab to it, or use the mouse)"),
+        key("↑↓ / ←→", "drag node: gain / frequency"),
+        key("[ ]", "select prev / next node"),
+        key("mouse drag", "move node (left) · tune Q (right)"),
+        key("mouse wheel", "nudge node gain"),
         Line::raw(""),
         head("Global"),
         key("+ / -", "preamp ±0.5 dB"),
@@ -135,9 +141,12 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
     let mut ctx = match app.focus {
         Panel::Effects => "  •  [←→] intensity".to_string(),
         Panel::Bands => "  •  [a] add  [d] del  [t] type".to_string(),
+        Panel::Graph => {
+            "  •  drag node: [↑↓] gain  [←→] freq  [ ][ ] select  [a/d/t] band".to_string()
+        }
     };
     // Channel hints only when relevant (progressive disclosure).
-    if app.focus == Panel::Bands && app.show_ch() {
+    if matches!(app.focus, Panel::Bands | Panel::Graph) && app.show_ch() {
         ctx.push_str("  [c] chans");
     }
     if app.state.as_ref().map(|s| s.channels >= 2).unwrap_or(false) {
@@ -304,25 +313,38 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
 // ── EQ curve ──────────────────────────────────────────────────────────────
 
 fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
-    let focused = app.focus == Panel::Bands;
-    // Title carries a colour key for the reference overlay when it's active.
+    // The graph reads as "focused" (cyan border, highlighted node) for both the
+    // Bands table and the interactive Graph panel.
+    let graph_focus = app.focus == Panel::Graph;
+    let focused = app.focus == Panel::Bands || graph_focus;
+    // Title. The reference series get a real chart legend (below); the title
+    // just names the panel and, in reference mode, says so.
     let mut title = vec![Span::styled(
         " EQ Frequency Response ",
         Style::default().fg(Color::Magenta),
     )];
     if app.reference.active() {
         title.push(Span::styled(
-            "· target",
-            Style::default().fg(Color::Magenta),
+            "· reference ",
+            Style::default().fg(Color::DarkGray),
         ));
-        title.push(Span::styled("  result", Style::default().fg(Color::White)));
-        if app.reference.show_measurement {
+    }
+    // In Graph-edit mode, show what the selected node is (and how to move it).
+    if graph_focus {
+        if let Some(b) = app
+            .state
+            .as_ref()
+            .and_then(|s| s.bands.get(app.band_cursor))
+        {
             title.push(Span::styled(
-                "  meas ",
-                Style::default().fg(Color::DarkGray),
+                format!(
+                    "· edit {} {:+.1}dB Q{:.2} ",
+                    fmt_freq(b.freq),
+                    b.gain_db,
+                    b.q
+                ),
+                Style::default().fg(Color::Yellow).bold(),
             ));
-        } else {
-            title.push(Span::raw(" "));
         }
     }
     let block = Block::default()
@@ -375,6 +397,20 @@ fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
         .into_iter()
         .collect();
 
+    // Graph-edit mode: a faint vertical guide through the selected node's
+    // frequency, so the column you're dragging on is obvious.
+    let guide_pts: Vec<(f64, f64)> = if graph_focus {
+        bands
+            .get(app.band_cursor)
+            .map(|b| {
+                let x = curve::band_marker_x(b.freq);
+                vec![(x, -DB_RANGE), (x, DB_RANGE)]
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     let zero_pts: Vec<(f64, f64)> = vec![(log_min, 0.0), (log_max, 0.0)];
 
     let x_labels: Vec<Span> = curve::x_axis_ticks()
@@ -404,22 +440,24 @@ fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
         log_max,
         if app.reference.normalized { 1.0 } else { 0.0 },
     );
-    let ref_runs: Vec<(Color, Vec<(f64, f64)>)> = ref_series
+    // (colour, legend name, points) per reference series.
+    type RefRun = (Color, &'static str, Vec<(f64, f64)>);
+    let ref_runs: Vec<RefRun> = ref_series
         .iter()
         .map(|s| {
             // Result is white (the curve you shape onto the target); yellow is
             // reserved for the selected band marker, so avoid it here.
-            let color = match s.role {
-                SeriesRole::Target => Color::Magenta,
-                SeriesRole::Result => Color::White,
-                SeriesRole::Measurement => Color::DarkGray,
+            let (color, name) = match s.role {
+                SeriesRole::Target => (Color::Magenta, "Target"),
+                SeriesRole::Result => (Color::White, "Result"),
+                SeriesRole::Measurement => (Color::DarkGray, "Meas"),
             };
             let pts: Vec<(f64, f64)> = s
                 .pts
                 .iter()
                 .map(|&(x, y)| (x, y.clamp(-DB_RANGE, DB_RANGE)))
                 .collect();
-            (color, pts)
+            (color, name, pts)
         })
         .collect();
 
@@ -460,6 +498,12 @@ fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
     // near 0 dB (matches the GUI's gain-signed curve tint). Order: shaded band
     // (backdrop), zero reference, coloured curve runs, reference overlay, then
     // the band markers (on top).
+    //
+    // In reference mode the plain EQ-response runs are HIDDEN — the "Result"
+    // series (measurement shaped by the current EQ) carries the same
+    // information, and drawing both made the graph a tangle of lines (matches
+    // the GUI, which swaps the response for the result in reference mode).
+    let reference_active = app.reference.active();
     let runs = curve_runs(&curve_data);
     let mut datasets = Vec::new();
     if !shade_pts.is_empty() {
@@ -478,22 +522,35 @@ fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
             .style(Style::default().fg(Color::DarkGray))
             .data(&zero_pts),
     );
-    for (color, pts) in &runs {
+    if !reference_active {
+        for (color, pts) in &runs {
+            datasets.push(
+                Dataset::default()
+                    .marker(symbols::Marker::Braille)
+                    .graph_type(GraphType::Line)
+                    .style(Style::default().fg(*color))
+                    .data(pts),
+            );
+        }
+    }
+    for (color, name, pts) in &ref_runs {
         datasets.push(
             Dataset::default()
+                .name(*name)
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(Style::default().fg(*color))
                 .data(pts),
         );
     }
-    for (color, pts) in &ref_runs {
+    // Selected-node vertical guide (Graph-edit mode), under the markers.
+    if !guide_pts.is_empty() {
         datasets.push(
             Dataset::default()
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
-                .style(Style::default().fg(*color))
-                .data(pts),
+                .style(Style::default().fg(Color::Rgb(90, 80, 40)))
+                .data(&guide_pts),
         );
     }
     datasets.push(
@@ -523,7 +580,11 @@ fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
                 .bounds([-DB_RANGE, DB_RANGE])
                 .labels(y_labels)
                 .style(Style::default().fg(Color::DarkGray)),
-        );
+        )
+        // Legend (top-right) for the named reference series — only the named
+        // datasets appear, so it's empty (hidden) when reference mode is off.
+        .legend_position(Some(ratatui::widgets::LegendPosition::TopRight))
+        .hidden_legend_constraints((Constraint::Ratio(1, 3), Constraint::Ratio(1, 3)));
 
     frame.render_widget(chart, inner);
 }
@@ -2433,10 +2494,64 @@ mod tests {
         // The overlay + bounds (shaded band) path must render without panicking,
         // both with the spectrum shown and hidden (different graph height).
         let text = render_to_text(&app, 120, 44);
-        assert!(!text.trim().is_empty());
+        // Reference mode shows the named-series legend (Target/Result).
+        assert!(text.contains("Target"), "missing legend Target:\n{text}");
+        assert!(text.contains("Result"), "missing legend Result:\n{text}");
         app.prefs.show_spectrum = false;
         let text2 = render_to_text(&app, 120, 44);
         assert!(!text2.trim().is_empty());
+    }
+
+    #[test]
+    fn graph_focus_title_shows_node_readout() {
+        let mut app = App::new();
+        app.state = Some(fixture(2));
+        app.focus = Panel::Graph;
+        app.band_cursor = 0;
+        let text = render_to_text(&app, 120, 44);
+        // Title shows the selected node's freq/gain in edit mode.
+        assert!(text.contains("edit"), "no edit readout in title:\n{text}");
+    }
+
+    #[test]
+    fn graph_pixel_data_round_trips() {
+        use crate::layout::{eq_plot_area, graph_node_col, graph_node_row, graph_pixel_to_data};
+        let plot = eq_plot_area(ratatui::layout::Rect::new(0, 0, 110, 22));
+        // A node at 1 kHz / +6 dB maps to a cell and back to ~the same values
+        // (within cell quantisation).
+        let col = graph_node_col(plot, 1000.0);
+        let row = graph_node_row(plot, 6.0);
+        let (f, g) = graph_pixel_to_data(plot, col, row);
+        assert!(
+            (f.log10() - 1000f64.log10()).abs() < 0.05,
+            "freq ~1k, got {f}"
+        );
+        assert!((g - 6.0).abs() < 2.0, "gain ~6, got {g}");
+    }
+
+    #[test]
+    fn graph_press_selects_node_and_starts_drag() {
+        let mut app = App::new();
+        app.state = Some(fixture(2));
+        app.last_frame = ratatui::layout::Rect::new(0, 0, 120, 44);
+        app.graph_press(60, 20, false);
+        assert_eq!(app.focus, Panel::Graph, "press focuses the graph");
+        assert!(app.is_graph_dragging(), "press starts a drag");
+        app.graph_release();
+        assert!(!app.is_graph_dragging(), "release ends the drag");
+    }
+
+    #[test]
+    fn graph_select_moves_and_clamps_cursor() {
+        let mut app = App::new();
+        app.state = Some(fixture(2)); // 2 bands
+        app.band_cursor = 0;
+        app.graph_select(1);
+        assert_eq!(app.band_cursor, 1);
+        app.graph_select(1); // clamp at the last band
+        assert_eq!(app.band_cursor, 1);
+        app.graph_select(-5); // clamp at 0
+        assert_eq!(app.band_cursor, 0);
     }
 
     #[test]
