@@ -30,6 +30,8 @@ struct Locked {
     chain: ProcessorChain,
     /// Pre-allocated f64 work buffer so the RT path never allocates.
     scratch: Vec<f64>,
+    /// Second buffer for the routing matrix output (square remap); same size.
+    routed: Vec<f64>,
 }
 
 struct Shared {
@@ -322,8 +324,13 @@ pub extern "C" fn resonance_apo_lock(
         let mut chain = build_chain(snap.as_ref(), ch, sample_rate);
         chain.reset();
         let scratch = vec![0.0f64; (max_frames as usize).saturating_mul(ch)];
+        let routed = scratch.clone();
         if let Ok(mut g) = eng.shared.state.lock() {
-            *g = Some(Locked { chain, scratch });
+            *g = Some(Locked {
+                chain,
+                scratch,
+                routed,
+            });
         }
     }));
 }
@@ -398,7 +405,16 @@ pub extern "C" fn resonance_apo_process(
             *d = *s as f64;
         }
         l.chain.process(&mut l.scratch[..n]);
-        for (d, s) in samples.iter_mut().zip(l.scratch[..n].iter()) {
+        // Apply the output routing matrix (square remap) in place when present;
+        // `route` is a square N→N map here, so frame count and length are
+        // preserved. No routing → write the processed scratch straight back.
+        let out: &[f64] = if l.chain.routing.is_some() {
+            l.chain.route(&l.scratch[..n], &mut l.routed[..n]);
+            &l.routed[..n]
+        } else {
+            &l.scratch[..n]
+        };
+        for (d, s) in samples.iter_mut().zip(out.iter()) {
             *d = *s as f32;
         }
 
@@ -606,5 +622,120 @@ mod hires_harness {
                 "rate {r:.0}: output peak {peak_hz:.1} Hz (want {TONE}) — pitch shift?"
             );
         }
+    }
+
+    // These share `default_state_path()` and global engine state with the rate
+    // test, so run the APO tests serially: `cargo test -p resonance-apo --
+    // --test-threads=1`.
+
+    #[test]
+    fn apo_per_channel_eq_targets_only_masked_channel() {
+        use resonance_dsp::channel::ChannelMask;
+        let rate = 48_000.0;
+        // +12 dB @ 1 kHz, masked to channel 0 (L) only.
+        let band = ApoFilter::builder()
+            .filter_type(FilterType::Peaking)
+            .freq(1000.0)
+            .gain_db(12.0)
+            .q(4.0)
+            .enabled(true)
+            .channels(2)
+            .sample_rate(rate)
+            .channel_mask(ChannelMask::single(0))
+            .build()
+            .unwrap();
+        let chain = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(rate)
+            .add_filter(band)
+            .build();
+        {
+            let mut w = ApoStateWriter::create(&default_state_path()).expect("state writer");
+            w.publish(&chain);
+        }
+
+        let p = resonance_apo_create();
+        assert!(!p.is_null());
+        resonance_apo_lock(p, 2, rate, 1024); // lock reads the published state + builds with the mask
+
+        let frames = (rate * 0.5) as usize;
+        let amp = 0.2f64;
+        let w = 2.0 * PI * 1000.0 / rate;
+        let mut buf: Vec<f32> = Vec::with_capacity(frames * 2);
+        for i in 0..frames {
+            let s = (amp * (w * i as f64).sin()) as f32;
+            buf.push(s); // L
+            buf.push(s); // R (identical input)
+        }
+        let mut off = 0usize;
+        while off < frames {
+            let n = (frames - off).min(1024);
+            resonance_apo_process(p, buf[off * 2..].as_mut_ptr(), n as u32, 2);
+            off += n;
+        }
+        resonance_apo_unlock(p);
+        resonance_apo_destroy(p);
+
+        let skip = frames / 4;
+        let in_rms = amp / 2f64.sqrt();
+        let chan_gain = |ch: usize| {
+            let ms = (skip..frames)
+                .map(|i| {
+                    let x = buf[i * 2 + ch] as f64;
+                    x * x
+                })
+                .sum::<f64>()
+                / (frames - skip) as f64;
+            20.0 * (ms.sqrt() / in_rms).log10()
+        };
+        let l = chan_gain(0);
+        let r = chan_gain(1);
+        assert!(
+            (l - 12.0).abs() < 1.5,
+            "masked channel 0 (L) should boost +12 dB, got {l:.2}"
+        );
+        assert!(r.abs() < 1.0, "unmasked channel 1 (R) should be ~0 dB, got {r:.2}");
+    }
+
+    #[test]
+    fn apo_routing_swaps_channels() {
+        use resonance_dsp::channel::ChannelMatrix;
+        let rate = 48_000.0;
+        let mut chain = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(rate)
+            .build();
+        chain.routing = Some(ChannelMatrix::swap(2, 0, 1)); // L/R swap
+        {
+            let mut w = ApoStateWriter::create(&default_state_path()).expect("state writer");
+            w.publish(&chain);
+        }
+
+        let p = resonance_apo_create();
+        assert!(!p.is_null());
+        resonance_apo_lock(p, 2, rate, 1024);
+
+        // Constant, distinct L/R so the swap is unambiguous.
+        let frames = 256usize;
+        let mut buf = vec![0.0f32; frames * 2];
+        for i in 0..frames {
+            buf[i * 2] = 0.5; // L
+            buf[i * 2 + 1] = -0.5; // R
+        }
+        resonance_apo_process(p, buf.as_mut_ptr(), frames as u32, 2);
+        resonance_apo_unlock(p);
+        resonance_apo_destroy(p);
+
+        let mid = frames / 2;
+        assert!(
+            (buf[mid * 2] - (-0.5)).abs() < 1e-3,
+            "L should carry the swapped-in R (-0.5), got {}",
+            buf[mid * 2]
+        );
+        assert!(
+            (buf[mid * 2 + 1] - 0.5).abs() < 1e-3,
+            "R should carry the swapped-in L (0.5), got {}",
+            buf[mid * 2 + 1]
+        );
     }
 }
