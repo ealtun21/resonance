@@ -587,6 +587,32 @@ mod tests {
     }
 
     #[test]
+    fn write_apo_empty_mask_emits_no_directive() {
+        // A degenerate all-zero mask must NOT produce "Channel: " (which would
+        // re-parse as ALL); the band stays under the current scope instead.
+        let bands = vec![EqBand {
+            filter_type: ApoFilterType::Peaking,
+            freq: 1000.0,
+            gain_db: 1.0,
+            q: 1.0,
+            enabled: true,
+            channels: 0,
+        }];
+        let text = write_apo(0.0, &bands);
+        assert!(
+            !text.contains("Channel:"),
+            "empty mask must not emit a Channel directive:\n{text}"
+        );
+    }
+
+    #[test]
+    fn channel_directive_unknown_only_degrades_to_all() {
+        // A directive naming only channels we don't model → all (not muted).
+        let p = parse_apo("Channel: Zzz Qqq\nFilter 1: ON PK Fc 1000 Hz Gain 1 dB Q 1\n").unwrap();
+        assert_eq!(p.bands[0].channels, u64::MAX);
+    }
+
+    #[test]
     fn rejects_non_finite_values() {
         // Hostile presets must not feed NaN/Inf into the DSP chain (a NaN gain
         // in a GraphicEQ line used to panic the curve fitter).

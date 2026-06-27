@@ -772,4 +772,279 @@ mod tests {
             assert_eq!(filter_type_from_u32(filter_type_to_u32(t)), t);
         }
     }
+
+    // ── routing snapshot carry/gate (cross-platform; protects the Windows APO) ──
+
+    use resonance_dsp::channel::{ChannelMask, ChannelMatrix};
+
+    fn chain_with_routing(channels: usize, m: Option<ChannelMatrix>) -> ProcessorChain {
+        let mut c = ProcessorChain::builder()
+            .channels(channels)
+            .sample_rate(48000.0)
+            .build();
+        c.routing = m;
+        c
+    }
+
+    #[test]
+    fn route_snapshot_rejects_non_square() {
+        // 2→4 upmix is not square → not carried (the in-place APO can't change width).
+        let c = chain_with_routing(2, ChannelMatrix::new(2, 4, vec![0.0; 8]));
+        assert_eq!(route_snapshot(&c).0, 0);
+    }
+
+    #[test]
+    fn route_snapshot_skips_identity_and_none() {
+        assert_eq!(route_snapshot(&chain_with_routing(4, None)).0, 0);
+        assert_eq!(
+            route_snapshot(&chain_with_routing(4, Some(ChannelMatrix::identity(4)))).0,
+            0,
+            "identity is implicit passthrough — not carried"
+        );
+    }
+
+    #[test]
+    fn route_snapshot_caps_at_max_route() {
+        // 16×16 (boundary) carried; 17×17 dropped.
+        assert_eq!(
+            route_snapshot(&chain_with_routing(16, Some(ChannelMatrix::swap(16, 0, 1)))).0,
+            16
+        );
+        assert_eq!(
+            route_snapshot(&chain_with_routing(17, Some(ChannelMatrix::swap(17, 0, 1)))).0,
+            0,
+            "wider than MAX_ROUTE must not be carried"
+        );
+    }
+
+    #[test]
+    fn route_snapshot_carries_valid_square_dims_exactly() {
+        for d in [1usize, 3, 4, 8, 16] {
+            let m = ChannelMatrix::swap(d, 0, d.min(2) - 1);
+            let c = chain_with_routing(d, Some(m.clone()));
+            let (dim, gains) = route_snapshot(&c);
+            if m.is_identity() {
+                assert_eq!(dim, 0, "d={d}: identity skipped");
+            } else {
+                assert_eq!(dim as usize, d, "d={d}: dim carried");
+                assert_eq!(&gains[..d * d], m.gains(), "d={d}: gains exact");
+            }
+        }
+    }
+
+    #[test]
+    fn route_matrix_only_applies_square_at_live_width() {
+        let m = ChannelMatrix::swap(4, 0, 1);
+        let (_dim, gains) = route_snapshot(&chain_with_routing(4, Some(m)));
+        // Matching width → Some; mismatched width / zero / oversized → None.
+        assert!(route_matrix(4, &gains, 4).is_some());
+        assert!(route_matrix(4, &gains, 6).is_none(), "dim != live width");
+        assert!(route_matrix(0, &gains, 0).is_none());
+        assert!(route_matrix(17, &gains, 17).is_none(), "> MAX_ROUTE");
+    }
+
+    // ── ChainSnapshot: masks, truncation, effects, apply_to ────────────────────
+
+    fn peaking(freq: f64, gain: f64, channels: usize, mask: ChannelMask) -> ApoFilter {
+        ApoFilter::builder()
+            .filter_type(FilterType::Peaking)
+            .freq(freq)
+            .gain_db(gain)
+            .q(1.0)
+            .enabled(true)
+            .channels(channels)
+            .sample_rate(48000.0)
+            .channel_mask(mask)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn from_chain_captures_per_band_masks() {
+        let masks = [
+            ChannelMask::single(0),
+            ChannelMask::single(1),
+            ChannelMask::from_indices([0, 1]),
+            ChannelMask::ALL,
+        ];
+        let mut b = ProcessorChain::builder().channels(2).sample_rate(48000.0);
+        for (i, m) in masks.iter().enumerate() {
+            b = b.add_filter(peaking(500.0 * (i as f64 + 1.0), 3.0, 2, *m));
+        }
+        let snap = ChainSnapshot::from_chain(&b.build());
+        assert_eq!(snap.num_filters, 4);
+        for (i, m) in masks.iter().enumerate() {
+            assert_eq!(snap.filters[i].channels, m.bits(), "mask {i}");
+        }
+    }
+
+    #[test]
+    fn from_chain_truncates_at_max_filters() {
+        let mut b = ProcessorChain::builder().channels(2).sample_rate(48000.0);
+        for i in 0..(MAX_FILTERS + 8) {
+            b = b.add_filter(peaking(100.0 + i as f64, 1.0, 2, ChannelMask::ALL));
+        }
+        let snap = ChainSnapshot::from_chain(&b.build());
+        assert_eq!(snap.num_filters as usize, MAX_FILTERS);
+        assert_eq!(snap.build_chain(2, 48000.0).filters.len(), MAX_FILTERS);
+    }
+
+    #[test]
+    fn from_chain_captures_all_effects() {
+        let mut chain = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48000.0)
+            .build();
+        chain.set_effect_intensity(FxEffect::Fidelity, 0.3);
+        chain.set_effect_enabled(FxEffect::Fidelity, true);
+        chain.set_effect_intensity(FxEffect::Bass, -0.5);
+        chain.set_effect_enabled(FxEffect::Bass, true);
+        chain.set_effect_enabled(FxEffect::DynamicBoost, false);
+        let s = ChainSnapshot::from_chain(&chain);
+        assert!((s.fidelity.intensity - 0.3).abs() < 1e-9 && s.fidelity.enabled == 1);
+        assert!((s.bass.intensity + 0.5).abs() < 1e-9 && s.bass.enabled == 1);
+        assert_eq!(s.dynamic_boost.enabled, 0);
+    }
+
+    #[test]
+    fn apply_to_updates_masks_and_routing_in_place() {
+        // Live chain: 2 global bands, no routing.
+        let mut live = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48000.0)
+            .add_filter(peaking(1000.0, 3.0, 2, ChannelMask::ALL))
+            .add_filter(peaking(2000.0, 3.0, 2, ChannelMask::ALL))
+            .build();
+        // Snapshot from a chain with per-channel masks + a swap routing.
+        let mut src = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48000.0)
+            .add_filter(peaking(1000.0, 3.0, 2, ChannelMask::single(0)))
+            .add_filter(peaking(2000.0, 3.0, 2, ChannelMask::single(1)))
+            .build();
+        src.routing = Some(ChannelMatrix::swap(2, 0, 1));
+        let snap = ChainSnapshot::from_chain(&src);
+
+        assert!(
+            snap.apply_to(&mut live, 48000.0),
+            "same band count → in-place"
+        );
+        assert_eq!(live.filters[0].mask, ChannelMask::single(0));
+        assert_eq!(live.filters[1].mask, ChannelMask::single(1));
+        assert!(live.routing.is_some(), "routing applied in place");
+        assert!(!live.routing.unwrap().is_identity());
+    }
+
+    #[test]
+    fn apply_to_signals_rebuild_on_band_count_change() {
+        let mut live = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48000.0)
+            .add_filter(peaking(1000.0, 3.0, 2, ChannelMask::ALL))
+            .add_filter(peaking(2000.0, 3.0, 2, ChannelMask::ALL))
+            .build();
+        let snap = ChainSnapshot::from_chain(
+            &ProcessorChain::builder()
+                .channels(2)
+                .sample_rate(48000.0)
+                .add_filter(peaking(1000.0, 3.0, 2, ChannelMask::ALL))
+                .build(),
+        );
+        assert!(!snap.apply_to(&mut live, 48000.0), "1 vs 2 bands → rebuild");
+        assert_eq!(live.filters.len(), 2, "chain untouched on rebuild signal");
+    }
+
+    // ── SharedFile + fresh-read seqlock / version guard ────────────────────────
+
+    fn patch_u32(path: &std::path::Path, offset: usize, val: u32) {
+        let mut b = std::fs::read(path).unwrap();
+        b[offset..offset + 4].copy_from_slice(&val.to_ne_bytes());
+        std::fs::write(path, b).unwrap();
+    }
+
+    #[test]
+    fn read_chain_fresh_rejects_old_version_and_bad_magic() {
+        let path = temp_path("ver");
+        {
+            let mut w = ApoStateWriter::create(&path).unwrap();
+            w.publish(
+                &ProcessorChain::builder()
+                    .channels(2)
+                    .sample_rate(48000.0)
+                    .build(),
+            );
+        }
+        assert!(read_chain_fresh(&path).is_some(), "valid file reads");
+
+        // Stale layout: a v2 file must be refused (its ChainSnapshot is smaller).
+        patch_u32(&path, std::mem::offset_of!(SharedState, version), 2);
+        assert!(read_chain_fresh(&path).is_none(), "old version rejected");
+
+        // Bad magic refused too.
+        patch_u32(
+            &path,
+            std::mem::offset_of!(SharedState, version),
+            STATE_VERSION,
+        );
+        patch_u32(&path, 0, 0xDEAD_BEEF);
+        assert!(read_chain_fresh(&path).is_none(), "bad magic rejected");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn read_chain_fresh_returns_gate() {
+        let path = temp_path("gate");
+        let w = ApoStateWriter::create(&path).unwrap();
+        let mut w = w;
+        w.publish(
+            &ProcessorChain::builder()
+                .channels(2)
+                .sample_rate(48000.0)
+                .build(),
+        );
+        w.set_telemetry_enabled(true);
+        let (_g, _snap, gate) = read_chain_fresh(&path).expect("reads");
+        assert!(gate, "telemetry gate reflected in fresh read");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn telemetry_round_trips_via_file_and_fresh() {
+        let path = temp_path("tel");
+        let w = ApoStateWriter::create(&path).unwrap();
+        let mut spectrum = [0.0f32; TELEMETRY_BINS];
+        for (i, s) in spectrum.iter_mut().enumerate() {
+            *s = i as f32 / TELEMETRY_BINS as f32;
+        }
+        w.write_telemetry(0.8, 0.6, 0.3, 0.25, &spectrum);
+
+        let via_map = w.read_telemetry().expect("mapped read");
+        assert!((via_map.in_peak - 0.8).abs() < 1e-6 && (via_map.out_rms - 0.25).abs() < 1e-6);
+        assert_eq!(via_map.spectrum, spectrum);
+
+        let via_fresh = read_telemetry_fresh(&path).expect("fresh read");
+        assert!((via_fresh.out_peak - 0.6).abs() < 1e-6);
+        assert_eq!(via_fresh.spectrum, spectrum);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn sharedfile_open_creates_then_preserves_header() {
+        let path = temp_path("hdr");
+        {
+            let mut w = ApoStateWriter::create(&path).unwrap();
+            w.publish(
+                &ProcessorChain::builder()
+                    .channels(2)
+                    .sample_rate(48000.0)
+                    .build(),
+            );
+        }
+        assert_eq!(std::fs::metadata(&path).unwrap().len() as usize, STATE_SIZE);
+        // Re-open: header valid, generation NOT reset (preserved across opens).
+        let r = SharedFile::open(&path).unwrap();
+        assert!(r.generation() >= 2, "generation preserved on re-open");
+        assert!(r.read().is_some());
+        std::fs::remove_file(&path).ok();
+    }
 }

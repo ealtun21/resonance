@@ -449,29 +449,7 @@ fn build_output_stream(
         drop(s);
 
         // ── Render to output ──────────────────────────────────────────────
-        // Upmix / downmix stereo → output channel count.
-        match channels {
-            0 => {}
-            1 => {
-                for i in 0..frames {
-                    data[i] = 0.5 * (buf[i * 2] + buf[i * 2 + 1]);
-                }
-            }
-            2 => {
-                data[..needed_stereo].copy_from_slice(buf);
-            }
-            n => {
-                // Place stereo on channels 0 & 1; zero the rest.
-                for i in 0..frames {
-                    let base = i * n;
-                    data[base] = buf[i * 2];
-                    data[base + 1] = buf[i * 2 + 1];
-                    for ch in 2..n {
-                        data[base + ch] = 0.0;
-                    }
-                }
-            }
-        }
+        render_stereo_to_output(buf, data, channels);
 
         let _ = err_flag.load(Ordering::Relaxed);
     };
@@ -480,6 +458,39 @@ fn build_output_stream(
         .build_output_stream(cfg, data_cb, err_cb, None)
         .with_context(|| "build_output_stream")?;
     Ok(stream)
+}
+
+/// Map the processed interleaved-stereo buffer (`stereo`, `frames*2`) onto the
+/// output device's `channels` layout, writing exactly `data.len()` samples:
+///   - 1ch  → L/R average (mono downmix)
+///   - 2ch  → straight copy
+///   - N>2  → stereo on ch0/ch1, the rest silent (the upmix; true surround needs
+///            a real source, which the system tap doesn't provide).
+/// Pure (no device/RT state) so it's unit-testable without an audio device.
+fn render_stereo_to_output(stereo: &[f32], data: &mut [f32], channels: usize) {
+    match channels {
+        0 => {}
+        1 => {
+            for (i, d) in data.iter_mut().enumerate() {
+                *d = 0.5 * (stereo[i * 2] + stereo[i * 2 + 1]);
+            }
+        }
+        2 => {
+            let n = data.len().min(stereo.len());
+            data[..n].copy_from_slice(&stereo[..n]);
+        }
+        n => {
+            let frames = data.len() / n;
+            for f in 0..frames {
+                let base = f * n;
+                data[base] = stereo[f * 2];
+                data[base + 1] = stereo[f * 2 + 1];
+                for d in data[base + 2..base + n].iter_mut() {
+                    *d = 0.0;
+                }
+            }
+        }
+    }
 }
 
 /// Pick the output device the user prefers, falling back to the default.
@@ -566,5 +577,37 @@ mod tests {
         let dev = pick_output_device(&host, Some("definitely-not-a-real-device-1234"))
             .expect("default output should exist");
         assert!(!device_name(&dev).is_empty(), "device name should resolve");
+    }
+
+    #[test]
+    fn render_mono_downmix_averages_lr() {
+        let stereo = [0.4f32, 0.6, 0.2, 0.8]; // 2 frames
+        let mut data = [0.0f32; 2];
+        render_stereo_to_output(&stereo, &mut data, 1);
+        assert!((data[0] - 0.5).abs() < 1e-6 && (data[1] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn render_stereo_is_passthrough() {
+        let stereo = [1.0f32, 2.0, 3.0, 4.0];
+        let mut data = [0.0f32; 4];
+        render_stereo_to_output(&stereo, &mut data, 2);
+        assert_eq!(data, stereo);
+    }
+
+    #[test]
+    fn render_upmix_places_stereo_on_front_pair_rest_silent() {
+        let stereo = [1.0f32, 2.0, 3.0, 4.0]; // 2 frames
+        let mut data = [9.0f32; 12]; // 2 frames * 6ch, pre-filled to catch non-writes
+        render_stereo_to_output(&stereo, &mut data, 6);
+        assert_eq!(data[0..6], [1.0, 2.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(data[6..12], [3.0, 4.0, 0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn render_zero_channels_is_noop() {
+        let stereo = [1.0f32, 2.0];
+        let mut data: [f32; 0] = [];
+        render_stereo_to_output(&stereo, &mut data, 0); // must not panic
     }
 }

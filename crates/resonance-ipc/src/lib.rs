@@ -776,4 +776,97 @@ mod tests {
         let bytes = to_stdvec(&Response::State(st)).expect("encode");
         let _: Response = from_bytes(&bytes).expect("decode");
     }
+
+    #[test]
+    fn default_channel_layout_all_counts() {
+        let lbl = |n| -> Vec<String> { default_channel_layout(n) };
+        assert!(lbl(0).is_empty());
+        assert_eq!(lbl(1), vec!["MONO"]);
+        assert_eq!(lbl(2), vec!["FL", "FR"]);
+        assert_eq!(lbl(3), vec!["FL", "FR", "FC"]);
+        assert_eq!(lbl(4), vec!["FL", "FR", "RL", "RR"]);
+        assert_eq!(lbl(6), vec!["FL", "FR", "FC", "LFE", "RL", "RR"]);
+        assert_eq!(
+            lbl(8),
+            vec!["FL", "FR", "FC", "LFE", "RL", "RR", "SL", "SR"]
+        );
+        // Beyond standard layouts → CHn fallback.
+        let n9 = lbl(9);
+        assert_eq!(n9.len(), 9);
+        assert_eq!(n9[0], "CH0");
+        assert_eq!(n9[8], "CH8");
+    }
+
+    #[test]
+    fn channel_mask_high_bits_survive_postcard() {
+        // The i64 bit-cast must preserve the high bits (ALL, bit 63) losslessly.
+        for m in [
+            ChannelMask::ALL,
+            ChannelMask::NONE,
+            ChannelMask::single(0),
+            ChannelMask::single(63),
+            ChannelMask::from_indices([0, 7, 31, 62]),
+        ] {
+            let bytes = to_stdvec(&m).unwrap();
+            let back: ChannelMask = from_bytes(&bytes).unwrap();
+            assert_eq!(m, back, "mask {:#x} must round-trip", m.0);
+        }
+    }
+
+    #[test]
+    fn routing_matrix_rectangular_to_dsp() {
+        // Valid non-square (down/upmix) accepted; wrong gain count / zero dims rejected.
+        assert!(
+            RoutingMatrix {
+                in_ch: 4,
+                out_ch: 2,
+                gains: vec![0.0; 8]
+            }
+            .to_dsp()
+            .is_some()
+        );
+        assert!(
+            RoutingMatrix {
+                in_ch: 2,
+                out_ch: 4,
+                gains: vec![0.0; 8]
+            }
+            .to_dsp()
+            .is_some()
+        );
+        assert!(
+            RoutingMatrix {
+                in_ch: 3,
+                out_ch: 3,
+                gains: vec![0.0; 8]
+            }
+            .to_dsp()
+            .is_none(),
+            "wrong gain count rejected"
+        );
+        assert!(
+            RoutingMatrix {
+                in_ch: 0,
+                out_ch: 2,
+                gains: vec![]
+            }
+            .to_dsp()
+            .is_none(),
+            "zero dim rejected"
+        );
+    }
+
+    #[test]
+    fn response_variants_round_trip() {
+        for r in [
+            Response::Ok,
+            Response::PresetList(vec!["a".into(), "b".into()]),
+            Response::Imported("rock".into()),
+            Response::Mappings(vec![("dev".into(), "prof".into())]),
+            Response::Error("boom".into()),
+        ] {
+            let bytes = to_stdvec(&r).expect("encode");
+            let _: Response = from_bytes(&bytes).expect("decode");
+        }
+    }
 }

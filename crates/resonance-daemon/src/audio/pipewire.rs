@@ -623,16 +623,16 @@ fn parse_metadata_name(value: &str) -> Option<String> {
 /// source whose label has no match (or unlabeled ports) falls back to the next
 /// free destination by port-id order. Generalises the old hardcoded FL/FR pair
 /// to any channel layout, while still correctly pairing mismatched layouts.
-fn create_links(
-    core: &pw::core::Core,
-    srcs: &[PortMeta],
-    dsts: &[PortMeta],
-) -> Vec<pw::link::Link> {
+/// Pair source ports to destination ports as `(src_id, dst_id)`: each source
+/// (in port-id order) prefers a free destination carrying the same
+/// `audio.channel` label, else the next free destination by position. Stops when
+/// destinations run out. Pure (no PipeWire calls) so the pairing is unit-testable.
+fn pair_ports(srcs: &[PortMeta], dsts: &[PortMeta]) -> Vec<(u32, u32)> {
     let mut srcs_sorted = srcs.to_vec();
     srcs_sorted.sort_by_key(|p| p.id);
     let mut dst_used = vec![false; dsts.len()];
 
-    let mut out = Vec::new();
+    let mut pairs = Vec::new();
     for s in &srcs_sorted {
         // Prefer a free same-label destination; else the first free one (positional).
         let pick = dsts
@@ -643,9 +643,21 @@ fn create_links(
             .or_else(|| dst_used.iter().position(|&used| !used));
         let Some(di) = pick else { break };
         dst_used[di] = true;
+        pairs.push((s.id, dsts[di].id));
+    }
+    pairs
+}
+
+fn create_links(
+    core: &pw::core::Core,
+    srcs: &[PortMeta],
+    dsts: &[PortMeta],
+) -> Vec<pw::link::Link> {
+    let mut out = Vec::new();
+    for (src_id, dst_id) in pair_ports(srcs, dsts) {
         let props = properties! {
-            "link.output.port" => s.id.to_string(),
-            "link.input.port"  => dsts[di].id.to_string(),
+            "link.output.port" => src_id.to_string(),
+            "link.input.port"  => dst_id.to_string(),
             "object.linger"    => "false",
         };
         if let Ok(link) = core.create_object::<pw::link::Link>("link-factory", &props) {
@@ -906,5 +918,79 @@ mod tests {
         );
         assert_eq!(parse_metadata_name("null"), None);
         assert_eq!(parse_metadata_name("{}"), None);
+    }
+
+    fn port(id: u32, channel: &str) -> PortMeta {
+        PortMeta {
+            id,
+            node_id: 0,
+            is_output: false,
+            is_monitor: false,
+            channel: channel.to_string(),
+        }
+    }
+
+    #[test]
+    fn pair_ports_matches_by_channel_label() {
+        // Destinations deliberately out of label order; pairing is by label.
+        let srcs = [port(1, "FL"), port(2, "FR")];
+        let dsts = [port(20, "FR"), port(21, "FL")];
+        assert_eq!(pair_ports(&srcs, &dsts), vec![(1, 21), (2, 20)]);
+    }
+
+    #[test]
+    fn pair_ports_falls_back_positional_when_unlabeled() {
+        // Unlabeled destinations → positional (src id order ↔ dst index order).
+        let srcs = [port(2, "FR"), port(1, "FL")];
+        let dsts = [port(30, ""), port(31, "")];
+        // srcs sorted by id → [1, 2]; positional → 1→30, 2→31.
+        assert_eq!(pair_ports(&srcs, &dsts), vec![(1, 30), (2, 31)]);
+    }
+
+    #[test]
+    fn pair_ports_stops_when_destinations_exhausted() {
+        let srcs = [port(1, "FL"), port(2, "FR"), port(3, "FC")];
+        let dsts = [port(10, "FL"), port(11, "FR")];
+        assert_eq!(pair_ports(&srcs, &dsts), vec![(1, 10), (2, 11)]);
+    }
+
+    #[test]
+    fn pair_ports_surround_all_matched_by_label() {
+        let labels = ["FL", "FR", "FC", "LFE", "RL", "RR"];
+        let srcs: Vec<_> = labels
+            .iter()
+            .enumerate()
+            .map(|(i, c)| port(i as u32, c))
+            .collect();
+        // Destinations shuffled, ids offset.
+        let dsts: Vec<_> = labels
+            .iter()
+            .rev()
+            .enumerate()
+            .map(|(i, c)| port(100 + i as u32, c))
+            .collect();
+        let pairs = pair_ports(&srcs, &dsts);
+        assert_eq!(pairs.len(), 6);
+        // Every source linked to the dst with the same label.
+        for (sid, did) in pairs {
+            let s_label = &srcs[sid as usize].channel;
+            let d_label = &dsts.iter().find(|d| d.id == did).unwrap().channel;
+            assert_eq!(s_label, d_label, "src {sid} → dst {did} same label");
+        }
+    }
+
+    #[test]
+    fn pw_channel_names_standard_layouts() {
+        assert_eq!(pw_channel_names(1), vec!["MONO"]);
+        assert_eq!(pw_channel_names(2), vec!["FL", "FR"]);
+        assert_eq!(
+            pw_channel_names(6),
+            vec!["FL", "FR", "FC", "LFE", "RL", "RR"]
+        );
+        // Beyond 8 → AUX fallback (valid SPA names).
+        let n9 = pw_channel_names(9);
+        assert_eq!(n9.len(), 9);
+        assert_eq!(n9[0], "AUX0");
+        assert_eq!(n9[8], "AUX8");
     }
 }
