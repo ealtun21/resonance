@@ -51,6 +51,12 @@ impl GuiApp {
             }
         }
         let pts = curve::curve_points_range(&bands, state.sample_rate, 240, vlo, vhi);
+        // Per-channel view: when per-channel EQ is in play, each output channel
+        // sees only the bands that target it, so the channels can have different
+        // responses. Draw one curve per channel (coloured by channel) instead of
+        // the single gain-coloured response, so L/R divergence is visible.
+        let channels = state.channels;
+        let per_channel = channels > 2 || (self.per_channel_eq && channels >= 2);
         // Reference / measurement overlays (target, result, gap…). Empty when the
         // reference system is off or has nothing to show; when present they
         // replace the bare EQ curve (the EQ is folded into the "result" series).
@@ -299,6 +305,22 @@ impl GuiApp {
                 &y_of,
                 &pal,
             );
+        } else if per_channel {
+            // One response per channel, from only the bands targeting it.
+            for c in 0..channels {
+                let cbands: Vec<_> = bands
+                    .iter()
+                    .filter(|b| b.channels.contains(c))
+                    .cloned()
+                    .collect();
+                let cpts = curve::curve_points_range(&cbands, state.sample_rate, 240, vlo, vhi);
+                let col = channel_color(c);
+                for w in cpts.windows(2) {
+                    let a = egui::pos2(x_of(w[0].0), y_of(w[0].1));
+                    let b = egui::pos2(x_of(w[1].0), y_of(w[1].1));
+                    painter.line_segment([a, b], egui::Stroke::new(2.0, col));
+                }
+            }
         } else {
             for w in pts.windows(2) {
                 let (lf0, g0) = w[0];
@@ -611,11 +633,40 @@ impl GuiApp {
             );
         }
 
-        // Legend (top-right, on top of everything) naming the overlay lines.
+        // Legend (top-right, on top of everything). The reference overlay legend
+        // wins; otherwise, in the per-channel view, key the channel curves.
         if !legend.is_empty() {
             draw_legend(&painter, plot, &pal, &legend);
+        } else if per_channel {
+            let chan_legend: Vec<(&str, egui::Color32, bool)> = (0..channels)
+                .map(|c| {
+                    let name = state
+                        .channel_layout
+                        .get(c)
+                        .map(String::as_str)
+                        .unwrap_or("?");
+                    (name, channel_color(c), false)
+                })
+                .collect();
+            draw_legend(&painter, plot, &pal, &chan_legend);
         }
     }
+}
+
+/// Distinct per-channel curve colour (FL blue, FR orange, …) for the
+/// per-channel FR view, so left/right (and beyond) read apart at a glance.
+fn channel_color(c: usize) -> egui::Color32 {
+    const COLORS: [egui::Color32; 8] = [
+        egui::Color32::from_rgb(90, 175, 255),  // FL  blue
+        egui::Color32::from_rgb(255, 150, 90),  // FR  orange
+        egui::Color32::from_rgb(120, 220, 120), // FC  green
+        egui::Color32::from_rgb(200, 130, 255), // LFE purple
+        egui::Color32::from_rgb(255, 215, 90),  // RL  yellow
+        egui::Color32::from_rgb(120, 230, 230), // RR  teal
+        egui::Color32::from_rgb(255, 120, 170), // pink
+        egui::Color32::from_rgb(180, 180, 180), // grey
+    ];
+    COLORS[c % COLORS.len()]
 }
 
 /// Draw the reference/measurement overlay series. Faint context (raw
