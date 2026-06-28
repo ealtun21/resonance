@@ -7,54 +7,66 @@ use eframe::egui;
 use resonance_ipc::{Command, DaemonState, FxEffectId};
 
 impl GuiApp {
+    /// Demoted FxSound effects (mockup `.fx`): each effect is a two-line block —
+    /// `[toggle]  Name ………… +NN%` over a full-width thin slider — so the EQ stays
+    /// the visual lead and the effects read as a quiet secondary rack.
     pub(crate) fn effects_section(&mut self, ui: &mut egui::Ui, state: &DaemonState) {
-        const NAME_W: f32 = 100.0;
-        const VALUE_W: f32 = 52.0;
-        for id in FxEffectId::ALL {
+        const PCT_W: f32 = 42.0;
+        let n = FxEffectId::ALL.len();
+        for (idx, id) in FxEffectId::ALL.into_iter().enumerate() {
             let (mut intensity, mut on) = state.effects.get(id);
             let min = id.min();
-            ui.horizontal(|ui| {
-                ui.set_min_height(kit::ROW_H);
-                ui.spacing_mut().item_spacing.x = kit::SP_S;
-                ui.add_space(kit::SP_XS);
 
+            // Line 1: toggle · name (dim when off) · right-aligned percentage.
+            ui.horizontal(|ui| {
+                ui.set_min_height(22.0);
+                ui.spacing_mut().item_spacing.x = kit::SP_S;
                 if kit::toggle(ui, &mut on) {
                     self.queue_edit(Command::SetEffectEnabled {
                         effect: id,
                         enabled: on,
                     });
                 }
-
-                // Name (dimmed while the effect is off) in a fixed column so the
-                // sliders below it all start at the same x.
                 let t = kit::tokens(ui);
-                let (lr, _) =
-                    ui.allocate_exact_size(egui::vec2(NAME_W, kit::ROW_H), egui::Sense::hover());
+                let pct = format!("{:+.0}%", intensity * 100.0);
+                let name_w = (ui.available_width() - PCT_W - kit::SP_S).max(40.0);
+                let (nr, _) =
+                    ui.allocate_exact_size(egui::vec2(name_w, 22.0), egui::Sense::hover());
                 ui.painter().text(
-                    egui::pos2(lr.left(), lr.center().y),
+                    egui::pos2(nr.left(), nr.center().y),
                     egui::Align2::LEFT_CENTER,
                     id.label(),
                     egui::FontId::proportional(kit::T_BODY),
-                    if on { t.text } else { t.dim },
+                    if on { t.text } else { t.faint },
                 );
+                let (pr, _) = ui.allocate_exact_size(egui::vec2(PCT_W, 22.0), egui::Sense::hover());
+                ui.painter().text(
+                    egui::pos2(pr.right(), pr.center().y),
+                    egui::Align2::RIGHT_CENTER,
+                    &pct,
+                    egui::FontId::monospace(kit::T_CAPTION),
+                    if on { t.dim } else { t.faint },
+                );
+            });
 
-                // Slider fills the gap to the value chip. Dragging it also enables
-                // the effect, so you can set a value without ticking first.
-                let slider_w = (ui.available_width() - VALUE_W - kit::SP_S).max(60.0);
-                if kit::slider(ui, slider_w, &mut intensity, min..=1.0) {
-                    if !on {
-                        self.queue_edit(Command::SetEffectEnabled {
-                            effect: id,
-                            enabled: true,
-                        });
-                    }
-                    self.queue_edit(Command::SetEffectIntensity {
+            // Line 2: a thin full-width slider. Dragging also enables the effect,
+            // so a value can be dialled in without ticking the toggle first.
+            ui.add_space(2.0);
+            if kit::slider_h(ui, ui.available_width(), 12.0, &mut intensity, min..=1.0) {
+                if !on {
+                    self.queue_edit(Command::SetEffectEnabled {
                         effect: id,
-                        value: intensity,
+                        enabled: true,
                     });
                 }
-                kit::value_chip(ui, VALUE_W, &format!("{:+.0}%", intensity * 100.0));
-            });
+                self.queue_edit(Command::SetEffectIntensity {
+                    effect: id,
+                    value: intensity,
+                });
+            }
+            if idx + 1 < n {
+                ui.add_space(kit::SP_S);
+            }
         }
     }
 }

@@ -164,7 +164,7 @@ impl GuiApp {
                 // so the auto-sizing window can't oscillate). File list on top,
                 // parsed preview below — mirrors the Export dialog's layout.
                 let mut select: Option<usize> = None;
-                egui::Frame::group(ui.style()).show(ui, |ui| {
+                kit::well_frame(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .id_salt("files")
                         .auto_shrink([false, false])
@@ -173,8 +173,7 @@ impl GuiApp {
                         .show(ui, |ui| {
                             for (i, it) in browser.entries.iter().enumerate() {
                                 let label = format!("{}  {}", entry_icon(it), it.name);
-                                let resp = ui
-                                    .selectable_label(i == browser.cursor, label)
+                                let resp = kit::list_row(ui, i == browser.cursor, &label)
                                     .on_hover_text(it.path.display().to_string());
                                 if resp.clicked() {
                                     select = Some(i);
@@ -197,7 +196,7 @@ impl GuiApp {
                 // Parsed preview of the highlighted entry.
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new("Preview").color(pal.neutral));
-                egui::Frame::group(ui.style()).show(ui, |ui| {
+                kit::well_frame(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .id_salt("preview")
                         .auto_shrink([false, false])
@@ -220,13 +219,10 @@ impl GuiApp {
                     .map(|it| !it.is_dir && it.is_preset)
                     .unwrap_or(false);
                 ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(loadable, egui::Button::new("Load"))
-                        .clicked()
-                    {
+                    if kit::button(ui, "Load", true, loadable) {
                         to_load = browser.activate(browser.cursor);
                     }
-                    if ui.button("Cancel").clicked() {
+                    if kit::button(ui, "Cancel", false, true) {
                         close = true;
                     }
                 });
@@ -247,6 +243,7 @@ impl GuiApp {
         let Dialog::ExportProfile(save) = &mut self.dialog else {
             return;
         };
+        let source = save.source.clone();
         let pal = self.palette;
         let mut open = true;
         let mut close = false;
@@ -275,7 +272,7 @@ impl GuiApp {
                 let mut select: Option<usize> = None;
                 let mut activate: Option<usize> = None;
                 let mut pick_name: Option<String> = None;
-                egui::Frame::group(ui.style()).show(ui, |ui| {
+                kit::well_frame(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .id_salt("save_files")
                         .auto_shrink([false, false])
@@ -284,7 +281,7 @@ impl GuiApp {
                         .show(ui, |ui| {
                             for (i, it) in save.browser.entries.iter().enumerate() {
                                 let label = format!("{}  {}", entry_icon(it), it.name);
-                                let resp = ui.selectable_label(i == save.browser.cursor, label);
+                                let resp = kit::list_row(ui, i == save.browser.cursor, &label);
                                 if resp.clicked() {
                                     select = Some(i);
                                     if !it.is_dir {
@@ -313,10 +310,13 @@ impl GuiApp {
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("Name");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut save.filename)
-                            .desired_width(260.0)
-                            .hint_text("profile name"),
+                    kit::text_field(
+                        ui,
+                        260.0,
+                        egui::Id::new("export_name_field"),
+                        &mut save.filename,
+                        "profile name",
+                        false,
                     );
                     ui.label(egui::RichText::new(".toml").color(pal.neutral));
                 });
@@ -338,18 +338,24 @@ impl GuiApp {
                 ui.separator();
                 ui.horizontal(|ui| {
                     let ok = !save.filename.trim().is_empty();
-                    let label = if exists { "Overwrite" } else { "Save" };
-                    if ui.add_enabled(ok, egui::Button::new(label)).clicked() {
+                    if exists {
+                        if kit::button_filled(ui, "Overwrite", pal.cut, ok) {
+                            do_export = Some(target.to_string_lossy().into_owned());
+                        }
+                    } else if kit::button(ui, "Save", true, ok) {
                         do_export = Some(target.to_string_lossy().into_owned());
                     }
-                    if ui.button("Cancel").clicked() {
+                    if kit::button(ui, "Cancel", false, true) {
                         close = true;
                     }
                 });
             });
 
         if let Some(p) = do_export {
-            self.export_profile(p);
+            match source {
+                Some(name) => self.export_profile_named(name, p),
+                None => self.export_profile(p),
+            }
             close = true;
         }
         if !open || close {
@@ -397,14 +403,10 @@ impl GuiApp {
                 ui.label(body);
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    let ok = egui::Button::new(
-                        egui::RichText::new(ok_label).color(egui::Color32::WHITE),
-                    )
-                    .fill(self.palette.cut);
-                    if ui.add(ok).clicked() {
+                    if kit::button_filled(ui, ok_label, self.palette.cut, true) {
                         decision = Some(true);
                     }
-                    if ui.button("Cancel").clicked() {
+                    if kit::button(ui, "Cancel", false, true) {
                         decision = Some(false);
                     }
                 });
@@ -413,6 +415,8 @@ impl GuiApp {
             Some(true) => {
                 match action {
                     Confirm::SaveProfile(name) => {
+                        // Bundle the current measurement with the (overwritten) profile.
+                        self.reference.store_measurement_for(&name);
                         self.queue(Command::SaveProfile { name });
                         self.dirty = false;
                     }
@@ -424,6 +428,7 @@ impl GuiApp {
                                 self.queue(Command::UnmapOutputFor { node_name: node });
                             }
                         }
+                        self.reference.remove_profile_meas(&name);
                         self.queue(Command::DeleteProfile { name });
                     }
                 }

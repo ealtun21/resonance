@@ -29,6 +29,9 @@ pub struct Palette {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Theme {
+    /// The signature flat-teal Resonance look (the design-mock palette). Default
+    /// so the app reads the same on any desktop regardless of the OS accent.
+    Resonance,
     /// Native accent + the OS's current light/dark preference (auto-follows).
     System,
     /// Native accent forced dark, for users who want to pick it manually.
@@ -46,7 +49,8 @@ pub enum Theme {
 
 impl Theme {
     /// Every selectable theme, in menu order.
-    pub const ALL: [Theme; 9] = [
+    pub const ALL: [Theme; 10] = [
+        Theme::Resonance,
         Theme::System,
         Theme::NativeDark,
         Theme::NativeLight,
@@ -69,6 +73,7 @@ impl Theme {
 
     pub fn label(self) -> &'static str {
         match self {
+            Theme::Resonance => "Resonance",
             Theme::System => "Native (auto)",
             Theme::NativeDark => "Native Dark",
             Theme::NativeLight => "Native Light",
@@ -84,6 +89,17 @@ impl Theme {
     /// Hard-coded palette for this theme (Matugen falls back to dark if no file).
     pub fn palette(self) -> Palette {
         match self {
+            // Signature flat-teal palette (the design mock): one muted teal accent,
+            // soft boost/cut, deep near-black plot.
+            Theme::Resonance => Palette {
+                accent: rgb(70, 168, 156),
+                boost: rgb(91, 185, 138),
+                cut: rgb(212, 105, 110),
+                neutral: rgb(125, 133, 139),
+                graph_bg: rgb(11, 14, 16),
+                grid: rgb(48, 53, 58),
+                highlight: rgb(107, 202, 188),
+            },
             Theme::System => native_palette(),
             Theme::NativeDark => native_palette_for(true),
             Theme::NativeLight => native_palette_for(false),
@@ -168,7 +184,11 @@ impl Theme {
         // Surface tiers give the UI depth instead of one flat slab: the window
         // base sits darkest, panels a step up, and section cards (faint_bg) a
         // step above that. The plot keeps the deepest `graph_bg`.
-        let (base, panel, card) = if self.is_light() {
+        let (base, panel, card) = if matches!(self, Theme::Resonance) {
+            // Exact mock tiers: deep ground, ground-level panels so the control
+            // strip recedes, and a clearly-raised card surface for sections.
+            (rgb(13, 16, 18), rgb(13, 16, 18), rgb(23, 28, 32))
+        } else if self.is_light() {
             (
                 lighten(p.graph_bg, 1.0),
                 darken(p.graph_bg, 1.04),

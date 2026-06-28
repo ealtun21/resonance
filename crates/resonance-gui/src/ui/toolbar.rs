@@ -20,7 +20,7 @@ use crate::state::{Dialog, SaveDialog};
 use crate::theme::Theme;
 use crate::ui::icons::{self, Icon};
 use crate::ui::kit;
-use crate::ui::widgets::ellipsize;
+use crate::ui::widgets::{ellipsize, lerp_color};
 use eframe::egui;
 use resonance_ipc::{Command, DaemonState, service};
 use std::time::Instant;
@@ -59,7 +59,7 @@ impl GuiApp {
         } else {
             kit::SP_XS
         };
-        let w = ui.available_width() - lead;
+        let w = ui.available_width() - kit::SP_XS;
         let gap = kit::SP_S;
 
         // Collapse points are the *measured* widths of the actual controls, summed
@@ -74,7 +74,7 @@ impl GuiApp {
         let w_power = 66.0; // power button min width
         let w_pre_min = text_width(ui, body.clone(), "Pre") + gap + 58.0; // label + num field
         let w_pre_full = text_width(ui, body.clone(), "Preamp") + gap + 150.0 + gap + 72.0;
-        let w_output = 18.0 + gap + 190.0; // speaker icon + dropdown
+        let w_output = 18.0 + gap + 200.0; // speaker icon + 2-line dropdown
         let w_daemon = text_width(ui, kf.clone(), "● Daemon") + 22.0; // menu button
         let w_history = kit::CTRL_H + gap + kit::CTRL_H; // two icon buttons
         let w_help = 28.0; // ? help icon button
@@ -93,12 +93,17 @@ impl GuiApp {
         let daemon_inline = w >= req_daemon && service::manager_available();
         let history_inline = w >= req_history;
 
+        // ── Single controls row ────────────────────────────────────────────
+        // The brand/meters row was removed: the native OS title bar already names
+        // the window (no CSD), so a second app-drawn "title bar" was redundant —
+        // it read as two stacked title bars. Identity lives in the OS chrome;
+        // live meters moved to the bottom status strip (see `status_bar`). The
+        // macOS traffic-light inset (`lead`) now sits on this row so the controls
+        // clear the floating window buttons of the unified title bar.
+        ui.add_space(kit::SP_XS);
         ui.horizontal(|ui| {
             ui.set_min_height(36.0);
             ui.spacing_mut().item_spacing.x = kit::SP_S;
-            // Leading inset (macOS: clears the traffic-light buttons under the
-            // transparent titlebar; elsewhere a small inset). Matches the `lead`
-            // discounted from the collapse-threshold width above.
             ui.add_space(lead);
 
             // Build the list of present groups, then draw them joined by exactly
@@ -115,8 +120,15 @@ impl GuiApp {
                 Help,
                 Overflow,
             }
-            let mut groups = vec![Grp::Power, Grp::Preamp];
-            if out_inline {
+            // Preamp + Output draw nothing without a connected daemon — omit them
+            // (not just their content) so no stranded separators are left behind
+            // on the disconnected toolbar.
+            let connected = state.is_some();
+            let mut groups = vec![Grp::Power];
+            if connected {
+                groups.push(Grp::Preamp);
+            }
+            if connected && out_inline {
                 groups.push(Grp::Output);
             }
             if history_inline {
@@ -151,21 +163,16 @@ impl GuiApp {
                     ),
                 }
             }
-
-            // Meters pinned to the far right (informational; first to drop). Shown
-            // only when the space the left controls actually left over fits them —
-            // measured per-frame — so the right-aligned block never draws on top of
-            // those controls (the fixed-breakpoint bug). `available_width()` here is
-            // exactly the gap between the last left control and the right edge.
-            if let Some(s) = &state {
-                if ui.available_width() >= self.meters_min_width(ui, s) {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(kit::SP_S);
-                        ui.horizontal(|ui| self.meters_widget(ui, s));
-                    });
-                }
-            }
         });
+        // Bottom hairline so the toolbar reads as a distinct header band over the
+        // body (mockup `.toolbar` border-bottom), instead of bleeding into the
+        // graph card below it.
+        ui.add_space(kit::SP_XS);
+        let line = kit::tokens(ui).line;
+        let (r, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+        ui.painter()
+            .hline(r.x_range(), r.center().y, egui::Stroke::new(1.0, line));
     }
 
     /// A thin vertical hairline between toolbar groups, matching the kit's rule
@@ -177,55 +184,72 @@ impl GuiApp {
         ui.painter().rect_filled(rect, 0.0, line);
     }
 
-    /// Prominent power toggle: a large filled green/red button with a status dot,
-    /// not a tiny checkbox.
+    /// Prominent power toggle (mockup `.power`): a translucent, accent-bordered
+    /// pill with a status dot, a coloured ON/OFF, and a dim "POWER" sub-label —
+    /// fully painter-drawn, not an `egui::Button`. Green when on, red when off.
     fn tb_power(&mut self, ui: &mut egui::Ui, state: &Option<DaemonState>) {
-        let enabled = state.as_ref().map(|s| s.enabled).unwrap_or(false);
-        let (txt, fill) = if enabled {
-            ("ON", self.palette.boost)
+        let connected = state.is_some();
+        let on = state.as_ref().map(|s| s.enabled).unwrap_or(false);
+        let t = kit::tokens(ui);
+        let color = if !connected {
+            t.dim
+        } else if on {
+            self.palette.boost
         } else {
-            ("OFF", self.palette.cut)
+            self.palette.cut
         };
-        // A transparent default-font label sizes the button like the other
-        // toolbar buttons; the visible status dot + label are painted as one
-        // centred group on top (the font's ● glyph sits off-centre, so we draw
-        // our own dot).
-        let font = egui::TextStyle::Button.resolve(ui.style());
-        let power_btn = egui::Button::new(
-            egui::RichText::new(format!("   {txt}"))
-                .font(font.clone())
-                .color(egui::Color32::TRANSPARENT),
-        )
-        .fill(fill)
-        .min_size(egui::vec2(66.0, 0.0));
-        let resp = ui
-            .add_enabled(state.is_some(), power_btn)
-            .on_hover_text("toggle DSP power");
-        let r = resp.rect;
-        let galley =
-            ui.painter()
-                .layout_no_wrap(txt.to_string(), font.clone(), egui::Color32::WHITE);
-        const DOT_D: f32 = 10.0;
-        const GAP: f32 = 6.0;
-        let block_w = DOT_D + GAP + galley.size().x;
-        let start_x = r.center().x - block_w * 0.5;
-        let cy = r.center().y;
-        let dot_c = egui::pos2(start_x + DOT_D * 0.5, cy);
-        if enabled {
-            ui.painter().circle_filled(dot_c, 5.0, egui::Color32::WHITE);
-        } else {
-            ui.painter()
-                .circle_stroke(dot_c, 4.5, egui::Stroke::new(1.6, egui::Color32::WHITE));
-        }
-        ui.painter().text(
-            egui::pos2(start_x + DOT_D + GAP, cy),
-            egui::Align2::LEFT_CENTER,
-            txt,
-            font,
-            egui::Color32::WHITE,
+        let label = if on { "ON" } else { "OFF" };
+
+        const PAD_L: f32 = 12.0;
+        const PAD_R: f32 = 14.0;
+        const DOT_D: f32 = 9.0;
+        const GAP: f32 = 8.0;
+        const SUB_GAP: f32 = 7.0;
+        let lab_font = egui::FontId::proportional(13.5);
+        let sub_font = egui::FontId::proportional(kit::T_CAPTION);
+        let lab_w = text_width(ui, lab_font.clone(), label);
+        let sub_w = text_width(ui, sub_font.clone(), "POWER");
+        let w = PAD_L + DOT_D + GAP + lab_w + SUB_GAP + sub_w + PAD_R;
+        let h = 30.0;
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
+
+        let hover = resp.hovered() && connected;
+        let bg = lerp_color(t.well, color, if hover { 0.24 } else { 0.13 });
+        let border = lerp_color(t.well, color, 0.45);
+        let p = ui.painter();
+        let radius = kit::R_CTRL + 2.0;
+        p.rect_filled(rect, radius, bg);
+        p.rect_stroke(
+            rect,
+            radius,
+            egui::Stroke::new(1.0, border),
+            egui::StrokeKind::Inside,
         );
-        if resp.clicked() {
-            self.queue_edit(Command::SetPower { enabled: !enabled });
+        let cy = rect.center().y;
+        let dot_c = egui::pos2(rect.left() + PAD_L + DOT_D * 0.5, cy);
+        if on {
+            p.circle_filled(dot_c, DOT_D * 0.5, color);
+        } else {
+            p.circle_stroke(dot_c, DOT_D * 0.5 - 0.5, egui::Stroke::new(1.5, color));
+        }
+        let lx = rect.left() + PAD_L + DOT_D + GAP;
+        p.text(
+            egui::pos2(lx, cy),
+            egui::Align2::LEFT_CENTER,
+            label,
+            lab_font,
+            color,
+        );
+        p.text(
+            egui::pos2(lx + lab_w + SUB_GAP, cy),
+            egui::Align2::LEFT_CENTER,
+            "POWER",
+            sub_font,
+            t.dim,
+        );
+        let resp = resp.on_hover_text("toggle DSP power");
+        if resp.clicked() && connected {
+            self.queue_edit(Command::SetPower { enabled: !on });
         }
     }
 
@@ -258,11 +282,12 @@ impl GuiApp {
         }
     }
 
-    /// Output device picker (left-to-right: speaker icon then the combo).
+    /// Output device picker (left-to-right: speaker icon then a 2-line combo
+    /// showing the friendly device name over its node id, like the mockup
+    /// `.device` chip).
     fn tb_output(&mut self, ui: &mut egui::Ui, state: &Option<DaemonState>) {
         if let Some(s) = state {
-            let (r, resp) =
-                ui.allocate_exact_size(egui::vec2(18.0, kit::CTRL_H), egui::Sense::hover());
+            let (r, resp) = ui.allocate_exact_size(egui::vec2(18.0, 32.0), egui::Sense::hover());
             let g = egui::Rect::from_center_size(r.center(), egui::Vec2::splat(16.0));
             icons::draw(ui.painter(), Icon::Speaker, g, kit::tokens(ui).dim);
             resp.on_hover_text("Output device");
@@ -271,27 +296,37 @@ impl GuiApp {
     }
 
     fn output_combo(&mut self, ui: &mut egui::Ui, s: &DaemonState) {
-        // When following the system, show the device it's currently on.
-        // Full labels — the combo's value box soft-fades + hover-scrolls long
-        // device names itself (see `kit::dropdown`), so no pre-truncation here.
-        let current_label = if s.preferred_output.is_none() {
-            match &s.active_output {
-                Some(d) => format!("Auto · {}", s.sink_label(d)),
-                None => "Automatic".to_string(),
-            }
+        // Following the system shows the device it's currently on (with an "auto"
+        // tag on the node line); a pinned device shows itself. The chip soft-fades
+        // + hover-scrolls long names itself, so no pre-truncation here.
+        let following = s.preferred_output.is_none();
+        let node = if following {
+            s.active_output.clone()
         } else {
-            s.sink_label(s.preferred_output.as_deref().unwrap_or(""))
+            s.preferred_output.clone()
+        };
+        let (line1, line2) = match &node {
+            Some(n) => {
+                let id = if following {
+                    format!("auto · {n}")
+                } else {
+                    n.clone()
+                };
+                (s.sink_label(n), id)
+            }
+            None => ("Automatic".to_string(), "follow system".to_string()),
         };
         // Index 0 = follow the OS default; the rest map 1:1 to available_sinks.
         let mut opts = vec!["Automatic (follow system)".to_string()];
         opts.extend(s.available_sinks.iter().map(|sink| s.sink_label(sink)));
         let opt_refs: Vec<&str> = opts.iter().map(String::as_str).collect();
-        if let Some(sel) = kit::dropdown(
+        if let Some(sel) = kit::dropdown_2line(
             ui,
-            190.0,
-            kit::CTRL_H,
+            200.0,
+            32.0,
             egui::Id::new("toolbar_sink"),
-            &current_label,
+            &line1,
+            &line2,
             &opt_refs,
         ) {
             if sel == 0 {
@@ -434,6 +469,19 @@ impl GuiApp {
         self.dialog = Dialog::ExportProfile(SaveDialog {
             browser: Browser::new(lib, true),
             filename: stem,
+            source: None,
+        });
+    }
+
+    /// Export a *specific* stored profile (the per-row Export action), rather than
+    /// the current chain. Seeds the filename + source with the profile name.
+    pub(crate) fn open_export_dialog_for(&mut self, name: String) {
+        let lib = resonance_ipc::paths::user_preset_dir();
+        let _ = std::fs::create_dir_all(&lib);
+        self.dialog = Dialog::ExportProfile(SaveDialog {
+            browser: Browser::new(lib, true),
+            filename: name.clone(),
+            source: Some(name),
         });
     }
 
@@ -517,105 +565,148 @@ impl GuiApp {
         });
     }
 
-    /// In/out levels, DSP load, and a clip flash. Drawn inside the toolbar's
-    /// right-to-left (right-pinned) sub-layout, so the readouts are added in
-    /// REVERSE and the separators trail each — giving a left-to-right reading
-    /// order of I │ O │ DSP │ CLIP against the right edge.
-    /// The four meter segments `(colour, text)`. Each text is fixed-width
-    /// (monospace, padded) so values change in place without nudging the layout —
-    /// and so [`meters_min_width`](Self::meters_min_width) can measure the block
-    /// regardless of the current levels. Shared by the renderer and the fit check.
-    fn meters_items(&self, s: &DaemonState) -> Vec<(egui::Color32, String)> {
-        let m = &s.meters;
-        let db = |lin: f32| {
-            let s = if lin <= 1e-6 {
-                "-inf".to_string()
-            } else {
-                format!("{:+.0}", 20.0 * lin.log10())
-            };
-            format!("{s:>4}")
+    /// Bottom status strip: backend/format on the left, live level + DSP meters,
+    /// and an OK/CLIP lamp pinned to the right. Replaces the old brand-row meters
+    /// — a status strip reads as chrome, not a second title bar. Painter-drawn so
+    /// the segment separators match the toolbar's hairline rule.
+    pub(crate) fn status_bar(&mut self, ui: &mut egui::Ui) {
+        let Some(s) = self.state.clone() else {
+            return;
         };
-        let clip_active = self.clip_until.map(|t| Instant::now() < t).unwrap_or(false);
-        let lvl_color = if clip_active {
-            egui::Color32::from_rgb(230, 60, 60)
-        } else {
-            egui::Color32::from_rgb(90, 200, 120)
-        };
-        let dsp_color = if m.dsp_load > 0.8 {
-            egui::Color32::from_rgb(230, 60, 60)
-        } else if m.dsp_load > 0.5 {
-            egui::Color32::from_rgb(220, 200, 80)
-        } else {
-            egui::Color32::GRAY
-        };
-        // Clip slot is always drawn so it flips OK→CLIP in place without shifting.
-        let (clip_col, clip_txt) = if clip_active {
-            (egui::Color32::from_rgb(230, 60, 60), "CLIP")
-        } else {
-            (egui::Color32::GRAY, " OK ")
-        };
-        // Sample-rate segment (leftmost). Shows the live DSP/playback rate; when a
-        // backend is resampling (capture rate ≠ DSP rate) it reads "in→out" in
-        // amber so the conversion is visible at a glance.
-        let khz = |hz: f64| {
-            if ((hz / 1000.0).fract()).abs() < 0.05 {
-                format!("{:.0}k", hz / 1000.0)
-            } else {
-                format!("{:.1}k", hz / 1000.0)
-            }
-        };
-        let resampling = (s.capture_rate - s.sample_rate).abs() > 1.0;
-        let (rate_col, rate_txt) = if resampling {
-            (
-                egui::Color32::from_rgb(220, 200, 80),
-                format!("{}→{}", khz(s.capture_rate), khz(s.sample_rate)),
-            )
-        } else {
-            (egui::Color32::GRAY, khz(s.sample_rate))
-        };
-        vec![
-            (rate_col, rate_txt),
-            (lvl_color, format!("I {} dB", db(m.in_peak))),
-            (lvl_color, format!("O {} dB", db(m.out_peak))),
-            (dsp_color, format!("DSP {:>3.0}%", m.dsp_load * 100.0)),
-            (clip_col, clip_txt.to_string()),
-        ]
-    }
+        let t = kit::tokens(ui);
+        // Top hairline so the strip reads as a distinct footer surface.
+        let (line_r, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+        ui.painter().hline(
+            line_r.x_range(),
+            line_r.top(),
+            egui::Stroke::new(1.0, t.line),
+        );
 
-    /// Width the inline meters need. We only draw them when the left controls
-    /// leave at least this much room (see `toolbar`), so the right-aligned block
-    /// can never overlap them — fixing the old fixed-breakpoint collision. The
-    /// galley widths are exact; the separator/spacing terms over-estimate so the
-    /// meters collapse a hair *before* they'd touch, never after.
-    fn meters_min_width(&self, ui: &egui::Ui, s: &DaemonState) -> f32 {
-        let font = egui::TextStyle::Monospace.resolve(ui.style());
-        let text: f32 = self
-            .meters_items(s)
-            .iter()
-            .map(|(_, t)| {
-                ui.painter()
-                    .layout_no_wrap(t.clone(), font.clone(), egui::Color32::WHITE)
+        let mono = egui::FontId::monospace(kit::T_CAPTION);
+        let prop = egui::FontId::proportional(kit::T_CAPTION);
+        ui.horizontal(|ui| {
+            ui.set_min_height(22.0);
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_space(kit::CARD_PAD_X);
+
+            // One left-anchored segment: a dim label then a bright value, with a
+            // hairline divider trailing it (skipped on the last).
+            let seg = |ui: &mut egui::Ui, label: &str, value: &str, vcol: egui::Color32| {
+                let lab_w = if label.is_empty() {
+                    0.0
+                } else {
+                    kit::text_width(ui, kit::T_CAPTION, label) + 5.0
+                };
+                // Measure the value in the SAME monospace font it's drawn in, so a
+                // fixed-width (padded) value yields a constant segment width — the
+                // meters then update in place instead of nudging the segments after
+                // them as the digits change.
+                let val_w = ui
+                    .painter()
+                    .layout_no_wrap(value.to_owned(), mono.clone(), egui::Color32::WHITE)
                     .rect
-                    .width()
-            })
-            .sum();
-        let gap = ui.spacing().item_spacing.x;
-        // N labels + (N−1) separators ⇒ (2N−1) widgets / (2N−2) gaps, plus the
-        // leading RTL pad. Derived from the item count so adding a segment (e.g.
-        // the sample-rate readout) keeps the fit check correct.
-        let n = self.meters_items(s).len() as f32;
-        text + (n - 1.0) * 8.0 + (2.0 * n - 1.0) * gap + kit::SP_M
-    }
+                    .width();
+                let w = lab_w + val_w;
+                let (r, _) = ui.allocate_exact_size(egui::vec2(w, 22.0), egui::Sense::hover());
+                let p = ui.painter();
+                let dim = kit::tokens(ui).dim;
+                if !label.is_empty() {
+                    p.text(
+                        egui::pos2(r.left(), r.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        label,
+                        prop.clone(),
+                        dim,
+                    );
+                }
+                p.text(
+                    egui::pos2(r.left() + lab_w, r.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    value,
+                    mono.clone(),
+                    vcol,
+                );
+            };
 
-    fn meters_widget(&self, ui: &mut egui::Ui, s: &DaemonState) {
-        let items = self.meters_items(s);
-        // RTL: add reversed (CLIP first → rightmost), a hairline between each —
-        // the same rule the toolbar groups use, so the bar has one separator style.
-        for (i, (col, txt)) in items.iter().enumerate().rev() {
-            ui.colored_label(*col, egui::RichText::new(txt).monospace());
-            if i != 0 {
-                self.tb_sep(ui);
+            let m = &s.meters;
+            let db = |lin: f32| {
+                if lin <= 1e-6 {
+                    "-inf".to_string()
+                } else {
+                    format!("{:+.0}", 20.0 * lin.log10())
+                }
+            };
+            let khz = |hz: f64| format!("{:.1}k", hz / 1000.0);
+            let clip_active = self.clip_until.map(|t| Instant::now() < t).unwrap_or(false);
+            let lvl_col = if clip_active {
+                self.palette.cut
+            } else {
+                t.text
+            };
+            let resampling = (s.capture_rate - s.sample_rate).abs() > 1.0;
+            let rate = if resampling {
+                format!("{}→{}", khz(s.capture_rate), khz(s.sample_rate))
+            } else {
+                khz(s.sample_rate)
+            };
+
+            let segs: Vec<(String, String, egui::Color32)> = vec![
+                (format!("{} · ", backend_label()), rate, t.text),
+                ("".into(), format!("{} ch", s.channels.max(1)), t.dim),
+                ("in ".into(), format!("{:>4} dB", db(m.in_peak)), lvl_col),
+                ("out ".into(), format!("{:>4} dB", db(m.out_peak)), lvl_col),
+                (
+                    "dsp ".into(),
+                    format!("{:>3.0}%", m.dsp_load * 100.0),
+                    if m.dsp_load > 0.8 {
+                        self.palette.cut
+                    } else if m.dsp_load > 0.5 {
+                        self.palette.boost
+                    } else {
+                        t.dim
+                    },
+                ),
+            ];
+            let n = segs.len();
+            for (i, (label, value, vcol)) in segs.iter().enumerate() {
+                seg(ui, label, value, *vcol);
+                if i + 1 < n {
+                    ui.add_space(kit::SP_M);
+                    self.tb_sep(ui);
+                    ui.add_space(kit::SP_M);
+                }
             }
-        }
+
+            // Right-pinned OK/CLIP lamp.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(kit::CARD_PAD_X);
+                let (txt, col) = if clip_active {
+                    ("CLIP", self.palette.cut)
+                } else {
+                    ("OK", self.palette.boost)
+                };
+                let w = kit::text_width(ui, kit::T_CAPTION, txt);
+                let (r, _) = ui.allocate_exact_size(egui::vec2(w, 22.0), egui::Sense::hover());
+                ui.painter().text(
+                    egui::pos2(r.right(), r.center().y),
+                    egui::Align2::RIGHT_CENTER,
+                    txt,
+                    mono.clone(),
+                    col,
+                );
+            });
+        });
+    }
+}
+
+/// Audio backend name for the status strip (compile-time per platform).
+fn backend_label() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "WASAPI"
+    } else if cfg!(target_os = "macos") {
+        "CoreAudio"
+    } else {
+        "PipeWire"
     }
 }

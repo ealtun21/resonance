@@ -4,6 +4,7 @@
 use crate::app::GuiApp;
 use crate::curve;
 use crate::state::{GAIN_LIMIT, Q_LIMIT};
+use crate::ui::kit;
 use crate::ui::widgets::{contrast_color, gain_color, lerp_color};
 use eframe::egui;
 use resonance_ipc::{BandType, Command, DaemonState};
@@ -19,6 +20,165 @@ type ChCurve = (String, egui::Color32, Vec<(f64, f64)>);
 
 impl GuiApp {
     // ── EQ response curve (draggable nodes) ─────────────────────────────────
+
+    /// The FR "hero": one card holding the head bar, the plot, the selected-band
+    /// readout, and the reference bar — all stacked with hairline dividers, like
+    /// the mockup (the reference bar is part of the graph card, not a separate
+    /// strip below it). The caller frames it as a card; this lays out the nested
+    /// panels so the plot fills and the readout + reference bar pin to the bottom.
+    pub(crate) fn hero(&mut self, ui: &mut egui::Ui, state: &DaemonState) {
+        // No head bar — the plot runs to the card top (FabFilter-style). The
+        // gesture legend lives in the readout line below (right-aligned).
+        // Reference bar pinned to the very bottom (its own top rule).
+        egui::Panel::bottom("hero_refbar")
+            .frame(egui::Frame::NONE)
+            .show_separator_line(false)
+            .show_inside(ui, |ui| {
+                let line = kit::tokens(ui).line;
+                let (lr, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 1.0),
+                    egui::Sense::hover(),
+                );
+                ui.painter()
+                    .hline(lr.x_range(), lr.top(), egui::Stroke::new(1.0, line));
+                // Inset the pills from the card edges (the rule stays full-bleed).
+                egui::Frame::default()
+                    .inner_margin(egui::Margin {
+                        left: kit::CARD_PAD_X as i8,
+                        right: kit::CARD_PAD_X as i8,
+                        top: 0,
+                        bottom: kit::SP_XS as i8,
+                    })
+                    .show(ui, |ui| self.reference_bar(ui));
+            });
+        // Readout line above the reference bar (draws its own top rule).
+        egui::Panel::bottom("hero_readout")
+            .frame(egui::Frame::NONE)
+            .show_separator_line(false)
+            .show_inside(ui, |ui| self.graph_readout(ui, state));
+        // Plot fills the remaining centre.
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE)
+            .show_inside(ui, |ui| self.eq_curve(ui, state));
+    }
+
+    /// The hero's bottom readout line (mockup `.readout`): the selected band's
+    /// parameters in one mono row, with a right-aligned drag/lock hint — so the
+    /// node under edit always names itself without opening the bands table.
+    pub(crate) fn graph_readout(&self, ui: &mut egui::Ui, state: &DaemonState) {
+        let t = kit::tokens(ui);
+        let (line_r, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+        ui.painter().hline(
+            line_r.x_range(),
+            line_r.top(),
+            egui::Stroke::new(1.0, t.line),
+        );
+        ui.horizontal(|ui| {
+            ui.set_min_height(25.0);
+            ui.add_space(kit::CARD_PAD_X);
+            let font = egui::FontId::monospace(kit::T_VALUE);
+            let sep = "  ·  ";
+            match state.bands.get(self.selected_band) {
+                Some(b) => {
+                    let freq = if b.freq >= 1000.0 {
+                        format!("{:.2}k Hz", b.freq / 1000.0)
+                    } else {
+                        format!("{:.0} Hz", b.freq)
+                    };
+                    let ch = crate::ui::bands::channel_tag(
+                        b.channels,
+                        &state.channel_layout,
+                        state.channels,
+                    );
+                    let mut job = egui::text::LayoutJob::default();
+                    let mut push = |s: &str, col: egui::Color32| {
+                        job.append(
+                            s,
+                            0.0,
+                            egui::TextFormat {
+                                font_id: font.clone(),
+                                color: col,
+                                ..Default::default()
+                            },
+                        );
+                    };
+                    push(
+                        &format!("Band {}", self.selected_band + 1),
+                        self.palette.highlight,
+                    );
+                    push(sep, t.faint);
+                    push(b.band_type.abbrev(), t.text);
+                    push(sep, t.faint);
+                    push(&freq, t.text);
+                    push(sep, t.faint);
+                    push(
+                        &format!("{:+.1} dB", b.gain_db),
+                        gain_color(b.gain_db, &self.palette),
+                    );
+                    push(sep, t.faint);
+                    push(&format!("Q {:.2}", b.q), t.text);
+                    if state.channels >= 2 {
+                        push(sep, t.faint);
+                        push(&ch, t.dim);
+                    }
+                    if !b.enabled {
+                        push(sep, t.faint);
+                        push("bypassed", t.faint);
+                    }
+                    let galley = ui.painter().layout_job(job);
+                    let (r, _) = ui.allocate_exact_size(
+                        egui::vec2(galley.size().x, 22.0),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().galley(
+                        egui::pos2(r.left(), r.center().y - galley.size().y / 2.0),
+                        galley,
+                        t.text,
+                    );
+                    // Right-aligned: the active lock state when a node is locked,
+                    // otherwise the gesture legend (the card has no head bar now,
+                    // so this is the one place the gestures are spelled out).
+                    let (hint, col) = if self.vlock == Some(self.selected_band) {
+                        ("vertical-locked · gain only", self.palette.highlight)
+                    } else if self.hlock == Some(self.selected_band) {
+                        ("gain-locked · freq only", self.palette.highlight)
+                    } else {
+                        (
+                            "drag = move · right-drag = Q · scroll = zoom · double-right-click = lock axis",
+                            t.faint,
+                        )
+                    };
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(kit::CARD_PAD_X);
+                        let w = kit::text_width(ui, kit::T_CAPTION, hint);
+                        let (hr, _) =
+                            ui.allocate_exact_size(egui::vec2(w, 22.0), egui::Sense::hover());
+                        ui.painter().text(
+                            egui::pos2(hr.right(), hr.center().y),
+                            egui::Align2::RIGHT_CENTER,
+                            hint,
+                            egui::FontId::proportional(kit::T_CAPTION),
+                            col,
+                        );
+                    });
+                }
+                None => {
+                    let (r, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 22.0),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().text(
+                        egui::pos2(r.left(), r.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        "double-click the graph to add a band",
+                        egui::FontId::proportional(kit::T_CAPTION),
+                        t.faint,
+                    );
+                }
+            }
+        });
+    }
 
     pub(crate) fn eq_curve(&mut self, ui: &mut egui::Ui, state: &DaemonState) {
         // Fill the FR panel so dragging its bottom edge resizes the graph.
@@ -320,24 +480,29 @@ impl GuiApp {
                 // analyzer. A small minimum body + floor alpha keep a faint
                 // analyzer band visible even in silence, so the spectrum never
                 // looks "gone" — it just lights up with audio.
-                const MIN_BODY: f32 = 0.018;
+                const MIN_BODY: f32 = 0.016;
+                // Small inter-bar gap so the analyzer reads as discrete columns
+                // rather than one opaque slab — keeps the response curve the focus.
+                const GAP: f32 = 1.0;
                 for (i, &v) in self.spectrum_display.iter().enumerate() {
                     let v = v.clamp(0.0, 1.0);
                     let lo = curve::LOG_MIN + i as f64 / n as f64 * range;
                     let hi = curve::LOG_MIN + (i + 1) as f64 / n as f64 * range;
-                    let x0 = x_of(lo).max(plot.left());
-                    let x1 = x_of(hi).min(plot.right());
+                    let x0 = x_of(lo).max(plot.left()) + GAP;
+                    let x1 = x_of(hi).min(plot.right()) - GAP;
                     if x1 <= x0 {
                         continue;
                     }
-                    let body = (v * 0.92 + MIN_BODY).min(1.0);
+                    let body = (v * 0.90 + MIN_BODY).min(1.0);
                     let top_y = base - body * plot.height();
-                    let col = lerp_color(pal.accent, pal.highlight, v);
+                    // Gentle hue shift toward the highlight + low alpha ceiling so
+                    // the fill stays ambient context behind the curve.
+                    let col = lerp_color(pal.accent, pal.highlight, v * 0.5);
                     let [r, g, b, _] = col.to_array();
-                    let a = (45.0 + 175.0 * v).min(225.0) as u8;
+                    let a = (16.0 + 66.0 * v).min(96.0) as u8;
                     painter.rect_filled(
                         egui::Rect::from_min_max(egui::pos2(x0, top_y), egui::pos2(x1, base)),
-                        0.0,
+                        1.0,
                         egui::Color32::from_rgba_unmultiplied(r, g, b, a),
                     );
                 }
@@ -754,7 +919,8 @@ impl GuiApp {
 
 /// Distinct per-channel curve colour (FL blue, FR orange, …) for the
 /// per-channel FR view, so left/right (and beyond) read apart at a glance.
-fn channel_color(c: usize) -> egui::Color32 {
+/// Shared with the bands table's per-band channel chip so the colours agree.
+pub(crate) fn channel_color(c: usize) -> egui::Color32 {
     const COLORS: [egui::Color32; 8] = [
         egui::Color32::from_rgb(90, 175, 255),  // FL  blue
         egui::Color32::from_rgb(255, 150, 90),  // FR  orange

@@ -47,6 +47,9 @@ pub(crate) struct SaveDialog {
     pub(crate) browser: Browser,
     /// Filename stem the user is typing (the `.toml` suffix is implicit).
     pub(crate) filename: String,
+    /// Source profile to export. `None` exports the current live chain;
+    /// `Some(name)` exports that stored profile (per-row export).
+    pub(crate) source: Option<String>,
 }
 
 impl SaveDialog {

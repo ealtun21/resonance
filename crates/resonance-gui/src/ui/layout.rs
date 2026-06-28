@@ -3,15 +3,16 @@
 //! lower area).
 
 use crate::app::{GuiApp, ServiceAction, ServiceFn};
-use crate::ui::widgets::{accordion, padded_scroll, section};
+use crate::ui::kit;
+use crate::ui::widgets::{accordion, padded_scroll, section, section_hint};
 use eframe::egui;
 use resonance_ipc::{DaemonState, service};
 
 /// Default / fallback widths of the Effects & Devices side panels in the wide
 /// 3-column layout; EQ bands (central) takes whatever's left so its table is
 /// never the one that squishes.
-pub(crate) const EFFECTS_W: f32 = 300.0;
-pub(crate) const DEVICES_W: f32 = 380.0;
+pub(crate) const EFFECTS_W: f32 = 320.0;
+pub(crate) const DEVICES_W: f32 = 384.0;
 /// Minimum comfortable width for the central EQ-bands column in the 3-column
 /// layout — enough for the bands table's core columns plus a usable gain graph.
 pub(crate) const BANDS_MIN: f32 = 440.0;
@@ -65,31 +66,21 @@ impl GuiApp {
                 ui.add_space(16.0);
                 if service::manager_available() {
                     let busy = self.service_busy;
-                    let btn = egui::Button::new(
-                        egui::RichText::new(if busy {
-                            "starting…"
-                        } else {
-                            "▶  Start daemon"
-                        })
-                        .size(18.0)
-                        .color(egui::Color32::WHITE),
-                    )
-                    .fill(self.palette.boost)
-                    .min_size(egui::vec2(180.0, 40.0));
-                    if ui.add_enabled(!busy, btn).clicked() {
+                    let label = if busy {
+                        "starting…"
+                    } else {
+                        "▶  Start daemon"
+                    };
+                    if kit::button_sized(ui, label, true, !busy, egui::vec2(180.0, 40.0), 18.0) {
                         self.service_busy = true;
                         let _ = self.service_tx.send(ServiceAction::Run {
                             label: "Start",
                             f: service::start,
                         });
                     }
-                    ui.add_space(6.0);
+                    ui.add_space(8.0);
                     let mut autostart = self.daemon_status.enabled;
-                    let auto = ui.add_enabled(
-                        !busy,
-                        egui::Checkbox::new(&mut autostart, "Start automatically at login"),
-                    );
-                    if auto.changed() {
+                    if kit::checkbox(ui, &mut autostart, "Start automatically at login") && !busy {
                         self.service_busy = true;
                         let f: ServiceFn = if autostart {
                             service::enable
@@ -135,17 +126,30 @@ impl GuiApp {
                     .resizable(true)
                     .default_size(controls_h)
                     .min_size(80.0)
+                    .show_separator_line(false)
                     .show_inside(ui, |ui| self.lower_columns(ui, &state));
-                // Compact reference bar hugs its content just under the graph,
-                // above the controls cluster.
-                egui::Panel::bottom("reference_bar")
-                    .resizable(false)
-                    .show_inside(ui, |ui| self.reference_bar(ui));
-                egui::CentralPanel::default().show_inside(ui, |ui| {
-                    if let Some(s) = &state {
-                        self.eq_curve(ui, s);
-                    }
-                });
+                // The hero card is the CentralPanel itself (so it fills): a card
+                // frame holds the head, plot, readout AND the reference bar as
+                // nested panels (mockup — the reference bar lives inside the graph
+                // card, not as a separate strip below it).
+                let t = kit::tokens(ui);
+                let hero_frame = egui::Frame::default()
+                    .fill(ui.visuals().extreme_bg_color)
+                    .stroke(egui::Stroke::new(1.0, t.line))
+                    .corner_radius(egui::CornerRadius::same(kit::R_CARD as u8))
+                    .outer_margin(egui::Margin {
+                        left: 8,
+                        right: 8,
+                        top: 8,
+                        bottom: 4,
+                    });
+                egui::CentralPanel::default()
+                    .frame(hero_frame)
+                    .show_inside(ui, |ui| {
+                        if let Some(s) = &state {
+                            self.hero(ui, s);
+                        }
+                    });
             }
             // Narrow: graph on top (resizable, with a floor so it stays usable),
             // the accordion of sections scrolls in the central area below — open
@@ -156,6 +160,7 @@ impl GuiApp {
                     .resizable(true)
                     .default_size(gh)
                     .min_size(150.0)
+                    .show_separator_line(false)
                     .show_inside(ui, |ui| {
                         if let Some(s) = &state {
                             self.eq_curve(ui, s);
@@ -163,6 +168,7 @@ impl GuiApp {
                     });
                 egui::Panel::top("reference_bar_narrow")
                     .resizable(false)
+                    .show_separator_line(false)
                     .show_inside(ui, |ui| self.reference_bar(ui));
                 egui::CentralPanel::default().show_inside(ui, |ui| {
                     egui::ScrollArea::vertical()
@@ -179,29 +185,55 @@ impl GuiApp {
     /// (thin splitter rules between them). EQ bands takes all the slack so its
     /// table grows into the space rather than leaving a centred island.
     fn lower_columns(&mut self, ui: &mut egui::Ui, state: &Option<DaemonState>) {
+        // Frame::NONE on every column so they share one top inset (the panels'
+        // default frames differ — that's why EQ bands sat lower than its
+        // neighbours) and no separator lines, so the three cards float on the body
+        // background with plain gaps between them (mockup `.controls`), instead of
+        // egui's panel-boundary grid lines.
         egui::Panel::left("effects_col")
             .resizable(false)
             .exact_size(EFFECTS_W)
+            .frame(egui::Frame::NONE)
+            .show_separator_line(false)
             .show_inside(ui, |ui| {
                 if let Some(s) = state {
                     padded_scroll(ui, "effects_scroll", |ui| {
-                        section(ui, "Effects", |ui| self.effects_section(ui, s))
+                        section_hint(ui, "Effects", "DSP sound effects", |ui| {
+                            self.effects_section(ui, s)
+                        });
+                        // Channels sits under Effects (matches the design mock).
+                        // Multi-channel-only — stereo users still get the L/R swap.
+                        if s.channels >= 2 {
+                            ui.add_space(12.0);
+                            section(ui, "Channels", |ui| self.channels_section(ui, s));
+                        }
                     });
                 }
             });
         egui::Panel::right("devices_col")
             .resizable(false)
             .exact_size(DEVICES_W)
+            .frame(egui::Frame::NONE)
+            .show_separator_line(false)
             .show_inside(ui, |ui| {
                 padded_scroll(ui, "side", |ui| self.devices_profiles(ui));
             });
-        egui::CentralPanel::default().show_inside(ui, |ui| {
-            if let Some(s) = state {
-                padded_scroll(ui, "bands_scroll", |ui| {
-                    section(ui, "EQ bands", |ui| self.bands_section(ui, s))
-                });
-            }
-        });
+        // The centre column IS the bands card: a card-styled CentralPanel (so it
+        // fills the column height), with the gutter as its outer margin. Its body
+        // (head/table/footer nested panels) lives in `bands_card`.
+        let t = kit::tokens(ui);
+        let card_frame = egui::Frame::default()
+            .fill(ui.visuals().faint_bg_color)
+            .stroke(egui::Stroke::new(1.0, t.line))
+            .corner_radius(egui::CornerRadius::same(kit::R_CARD as u8))
+            .outer_margin(egui::Margin::symmetric(8, 10));
+        egui::CentralPanel::default()
+            .frame(card_frame)
+            .show_inside(ui, |ui| {
+                if let Some(s) = state {
+                    self.bands_card(ui, s);
+                }
+            });
     }
 
     /// Narrow layout: the lower sections stacked as collapsible cards. No scroll

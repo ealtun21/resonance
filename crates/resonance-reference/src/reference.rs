@@ -16,7 +16,20 @@ use resonance_ipc::BandState;
 use resonance_ipc::curve::{self, RefCurve};
 use resonance_ipc::fr::{LOG_MAX, LOG_MIN, response_db};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+/// A measurement saved alongside a profile (per-profile, client-side). Loading
+/// the profile restores it so profiles can be A/B-compared visually. The *target*
+/// is deliberately NOT bundled — only the measurement travels with a profile.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct MeasurementBundle {
+    pub name: String,
+    pub iem: bool,
+    /// Left / mono channel.
+    pub left: RefCurve,
+    /// Right channel, when the measurement is stereo.
+    pub right: Option<RefCurve>,
+}
 
 /// A serialisable snapshot of the reference overlay — the active measurement,
 /// target selection and customizer — persisted by the client across sessions so
@@ -41,6 +54,9 @@ pub struct PersistedReference {
     target_kind: u8,
     target_name: String,
     adj: [f64; 4],
+    /// Measurements saved per profile name (restored when the profile loads).
+    #[serde(default)]
+    profile_meas: HashMap<String, MeasurementBundle>,
 }
 
 /// Built-in target curves embedded at build time (from AutoEq, MIT-licensed).
@@ -218,6 +234,13 @@ pub struct ReferenceState {
     pub adj_bass: f64,
     pub adj_ear: f64,
     pub adj_treble: f64,
+
+    /// Measurement saved per profile name. Populated on profile save, applied on
+    /// profile load (so loading a profile restores the measurement it was saved
+    /// with — for visual A/B comparison). The target is not stored here. Prefer
+    /// the `*_profile_meas` / `store`/`restore_measurement_for` methods over
+    /// touching this directly.
+    pub profile_meas: HashMap<String, MeasurementBundle>,
 }
 
 impl Default for ReferenceState {
@@ -248,6 +271,7 @@ impl Default for ReferenceState {
             adj_bass: 0.0,
             adj_ear: 0.0,
             adj_treble: 0.0,
+            profile_meas: HashMap::new(),
         }
     }
 }
@@ -349,6 +373,12 @@ impl ReferenceState {
 
     pub fn target_label(&self) -> String {
         Self::label_for(&self.target_sel)
+    }
+
+    /// The selected target *before* customizer adjustments — for drawing the
+    /// base curve behind the adjusted one in the customizer thumbnail.
+    pub fn base_curve(&self) -> Option<RefCurve> {
+        self.resolve(&self.target_sel.clone())
     }
 
     /// Resolve a selection into a base curve (no customizer adjustments).
@@ -512,6 +542,7 @@ impl ReferenceState {
             target_kind,
             target_name,
             adj: [self.adj_tilt, self.adj_bass, self.adj_ear, self.adj_treble],
+            profile_meas: self.profile_meas.clone(),
         }
     }
 
@@ -544,6 +575,7 @@ impl ReferenceState {
             3 => TargetSel::Ultra,
             _ => TargetSel::None,
         };
+        self.profile_meas = p.profile_meas;
         self.rebuild_target();
         self.rebuild_measurement();
     }
@@ -596,6 +628,81 @@ impl ReferenceState {
         self.measurement = None;
         self.measurement_name.clear();
         self.normalized = false; // deviation view needs a measurement
+    }
+
+    // ── Per-profile measurements ────────────────────────────────────────────
+    // A profile can carry the measurement it was saved with, so loading the
+    // profile restores that measurement for visual A/B comparison. Only the
+    // measurement is bundled — the target is never stored per profile.
+
+    /// The current measurement as a portable bundle (`None` if none is loaded).
+    pub fn measurement_bundle(&self) -> Option<MeasurementBundle> {
+        let (left, right) = self.measurement_lr.clone()?;
+        Some(MeasurementBundle {
+            name: self.measurement_name.clone(),
+            iem: self.measurement_iem,
+            left,
+            right,
+        })
+    }
+
+    /// Apply a measurement bundle, or clear the measurement when `None`. Enables
+    /// the overlay so a restored measurement is actually visible.
+    pub fn apply_measurement_bundle(&mut self, bundle: Option<MeasurementBundle>) {
+        match bundle {
+            Some(b) => {
+                self.enabled = true;
+                self.set_measurement(b.name, b.iem, b.left, b.right);
+            }
+            None => self.clear_measurement(),
+        }
+    }
+
+    /// Capture the current measurement under `profile` (or drop any stored entry
+    /// when no measurement is loaded — re-saving a profile after clearing the
+    /// measurement removes it).
+    pub fn store_measurement_for(&mut self, profile: &str) {
+        match self.measurement_bundle() {
+            Some(b) => {
+                self.profile_meas.insert(profile.to_string(), b);
+            }
+            None => {
+                self.profile_meas.remove(profile);
+            }
+        }
+    }
+
+    /// Apply `profile`'s saved measurement, clearing the live one if the profile
+    /// has none. Returns `true` if a measurement was applied (vs. cleared).
+    pub fn restore_measurement_for(&mut self, profile: &str) -> bool {
+        let bundle = self.profile_meas.get(profile).cloned();
+        let applied = bundle.is_some();
+        self.apply_measurement_bundle(bundle);
+        applied
+    }
+
+    /// Whether `profile` has a stored measurement.
+    pub fn has_profile_measurement(&self, profile: &str) -> bool {
+        self.profile_meas.contains_key(profile)
+    }
+
+    /// Move a stored measurement when a profile is renamed.
+    pub fn rename_profile_meas(&mut self, from: &str, to: &str) {
+        if let Some(b) = self.profile_meas.remove(from) {
+            self.profile_meas.insert(to.to_string(), b);
+        }
+    }
+
+    /// Drop a stored measurement when a profile is deleted.
+    pub fn remove_profile_meas(&mut self, profile: &str) {
+        self.profile_meas.remove(profile);
+    }
+
+    /// Copy a stored measurement when a profile is duplicated.
+    pub fn duplicate_profile_meas(&mut self, from: &str, to: &str) {
+        if let Some(b) = self.profile_meas.get(from).cloned() {
+            self.profile_meas.insert(to.to_string(), b);
+        }
     }
 
     /// Re-resolve `self.measurement` from channel choice + smoothing.
@@ -835,5 +942,110 @@ mod tests {
         assert_eq!(s2.show_bounds, s.show_bounds);
         assert_eq!(s2.adj_tilt, s.adj_tilt);
         assert_eq!(s2.adj_bass, s.adj_bass);
+    }
+
+    fn curve(offset: f64) -> RefCurve {
+        RefCurve {
+            points: vec![
+                (20.0, offset),
+                (1000.0, offset + 1.0),
+                (20000.0, offset - 1.0),
+            ],
+        }
+    }
+
+    #[test]
+    fn profile_measurement_round_trip() {
+        let mut s = ReferenceState::default();
+        s.set_measurement("HD650".into(), false, curve(3.0), Some(curve(2.0)));
+        s.store_measurement_for("Profile A");
+        // Switch to a different measurement, as if another profile got loaded.
+        s.set_measurement("Other".into(), true, curve(9.0), None);
+        // Restoring Profile A brings its exact measurement back …
+        assert!(s.restore_measurement_for("Profile A"));
+        let b = s.measurement_bundle().unwrap();
+        assert_eq!(b.name, "HD650");
+        assert!(!b.iem);
+        assert_eq!(b.left, curve(3.0));
+        assert_eq!(b.right, Some(curve(2.0)));
+        // … and re-enables the overlay so it's visible.
+        assert!(s.enabled);
+    }
+
+    #[test]
+    fn profile_measurement_does_not_bundle_target() {
+        let mut s = ReferenceState::default();
+        s.set_measurement("M".into(), false, curve(1.0), None);
+        s.set_target(TargetSel::DiamondBeta);
+        s.store_measurement_for("P");
+        // A later profile uses a different target; restoring P's measurement must
+        // NOT change the active target — only the measurement travels.
+        s.set_target(TargetSel::Ultra);
+        s.restore_measurement_for("P");
+        assert!(
+            matches!(s.target_sel, TargetSel::Ultra),
+            "target is not part of the per-profile bundle"
+        );
+    }
+
+    #[test]
+    fn re_saving_profile_updates_its_measurement() {
+        let mut s = ReferenceState::default();
+        s.set_measurement("v1".into(), false, curve(1.0), None);
+        s.store_measurement_for("P");
+        // Edit the measurement while the profile is loaded, then re-save (overwrite).
+        s.set_measurement("v2".into(), false, curve(5.0), None);
+        s.store_measurement_for("P");
+        s.clear_measurement();
+        assert!(s.restore_measurement_for("P"));
+        assert_eq!(s.measurement_bundle().unwrap().name, "v2");
+    }
+
+    #[test]
+    fn restoring_profile_without_measurement_clears_overlay() {
+        let mut s = ReferenceState::default();
+        s.set_measurement("M".into(), false, curve(1.0), None);
+        // "Bare" has no stored measurement → loading it clears the live one.
+        assert!(!s.restore_measurement_for("Bare"));
+        assert!(s.measurement_bundle().is_none());
+    }
+
+    #[test]
+    fn re_saving_after_clearing_drops_the_stored_measurement() {
+        let mut s = ReferenceState::default();
+        s.set_measurement("M".into(), false, curve(1.0), None);
+        s.store_measurement_for("P");
+        assert!(s.has_profile_measurement("P"));
+        s.clear_measurement();
+        s.store_measurement_for("P"); // re-save with no measurement
+        assert!(!s.has_profile_measurement("P"));
+    }
+
+    #[test]
+    fn profile_measurement_lifecycle_rename_delete_duplicate() {
+        let mut s = ReferenceState::default();
+        s.set_measurement("M".into(), false, curve(2.0), None);
+        s.store_measurement_for("A");
+        s.duplicate_profile_meas("A", "A copy");
+        assert!(s.has_profile_measurement("A copy"));
+        s.rename_profile_meas("A", "B");
+        assert!(!s.has_profile_measurement("A") && s.has_profile_measurement("B"));
+        s.remove_profile_meas("B");
+        assert!(!s.has_profile_measurement("B"));
+    }
+
+    #[test]
+    fn persist_round_trip_preserves_profile_measurements() {
+        let mut s = ReferenceState::default();
+        s.set_measurement("HD800".into(), true, curve(4.0), Some(curve(3.0)));
+        s.store_measurement_for("Studio");
+        let p = s.to_persisted();
+        let mut s2 = ReferenceState::default();
+        s2.restore(p);
+        assert!(s2.restore_measurement_for("Studio"));
+        let b = s2.measurement_bundle().unwrap();
+        assert_eq!(b.name, "HD800");
+        assert!(b.iem);
+        assert_eq!(b.right, Some(curve(3.0)));
     }
 }

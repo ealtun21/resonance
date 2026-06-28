@@ -200,6 +200,10 @@ pub enum Command {
     LoadProfile { name: String },
     /// Delete a named profile from the config dir
     DeleteProfile { name: String },
+    /// Copy a saved profile to a new name (does NOT apply it)
+    DuplicateProfile { from: String, to: String },
+    /// Export a *named* saved profile (not the current chain) to a `.toml` file
+    ExportProfileNamed { name: String, path: String },
     /// List saved profile names
     ListProfiles,
     /// Map the current active output device to the given profile

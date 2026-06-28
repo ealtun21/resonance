@@ -206,6 +206,24 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
             Err(e) => Response::Error(e),
         },
 
+        // Copy the stored profile under a new name without touching the live chain.
+        Command::DuplicateProfile { from, to } => match config::load_profile(&from) {
+            Ok(profile) => match config::save_profile(&to, &profile) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error(e),
+            },
+            Err(e) => Response::Error(e),
+        },
+
+        // Export a *named* stored profile (not the current chain state).
+        Command::ExportProfileNamed { name, path } => match config::load_profile(&name) {
+            Ok(profile) => match config::export_profile_file(&path, &profile) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error(e),
+            },
+            Err(e) => Response::Error(e),
+        },
+
         Command::ListProfiles => Response::PresetList(config::list_profiles()),
 
         Command::MapOutput { profile } => {
