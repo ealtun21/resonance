@@ -39,8 +39,13 @@ impl GuiApp {
                     egui::vec2(ui.available_width(), 1.0),
                     egui::Sense::hover(),
                 );
+                // Draw the rule at the allocated rect's *centre*, not its top edge:
+                // a 1px stroke centred on the panel's top clip boundary loses its
+                // upper half to the clip, and the surviving ~0.5px rounds to
+                // visible-or-not as the layout resizes (the flicker). Centring keeps
+                // the full stroke inside the clip rect so it's always drawn.
                 ui.painter()
-                    .hline(lr.x_range(), lr.top(), egui::Stroke::new(1.0, line));
+                    .hline(lr.x_range(), lr.center().y, egui::Stroke::new(1.0, line));
                 // Inset the pills from the card edges (the rule stays full-bleed).
                 egui::Frame::default()
                     .inner_margin(egui::Margin {
@@ -69,9 +74,12 @@ impl GuiApp {
         let t = kit::tokens(ui);
         let (line_r, _) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+        // Centre of the 1px rect, not its top edge — see `hero`: a rule on the
+        // panel's top clip boundary half-clips and flickers visible/invisible on
+        // resize; centring keeps the whole stroke inside the clip rect.
         ui.painter().hline(
             line_r.x_range(),
-            line_r.top(),
+            line_r.center().y,
             egui::Stroke::new(1.0, t.line),
         );
         ui.horizontal(|ui| {
