@@ -230,6 +230,12 @@ impl SharedState {
         }
 
         let dsp_rate = inner.meters.sample_rate().unwrap_or(chain.sample_rate);
+        // Prefer the live channel width the RT thread reports — the mirror chain
+        // stays frozen at its construction width while the backend follows the
+        // output device's channel count, so reading `chain.channels` would report
+        // a stale width after a device-channel hot-swap. Same workaround as the
+        // sample rate above. Falls back to the mirror before audio starts.
+        let live_channels = inner.meters.channels().unwrap_or(chain.channels);
 
         DaemonState {
             enabled: chain.enabled,
@@ -243,9 +249,15 @@ impl SharedState {
             sample_rate: dsp_rate,
             // Capture rate; equals the DSP rate unless a backend is resampling.
             capture_rate: inner.meters.capture_rate().unwrap_or(dsp_rate),
-            channels: chain.channels,
-            out_channels: chain.out_channels(),
-            channel_layout: default_channel_layout(chain.channels),
+            channels: live_channels,
+            // No routing ⇒ out == live width; with a (square) remap the count is
+            // the matrix's, which travels with the mirror chain's routing field.
+            out_channels: if chain.routing.is_some() {
+                chain.out_channels()
+            } else {
+                live_channels
+            },
+            channel_layout: default_channel_layout(live_channels),
             routing: chain.routing.as_ref().map(RoutingMatrix::from_dsp),
             spectrum: inner.spectrum.to_vec(),
             active_output: inner.active_output.clone(),
@@ -288,7 +300,14 @@ impl SharedState {
                 .meters
                 .sample_rate()
                 .unwrap_or(inner.chain.sample_rate);
-            (inner.chain.channels, sr)
+            // Same reason channels is read from the meters, not the mirror: the RT
+            // path follows the output device's channel count, but the mirror chain
+            // stays frozen at its construction width. Building from the stale mirror
+            // would hand the RT thread a chain whose width disagrees with the live
+            // ports — the DSP then runs on a misframed buffer (wrong per-channel EQ,
+            // channel cross-talk) until the next device-follow rebuild.
+            let channels = inner.meters.channels().unwrap_or(inner.chain.channels);
+            (channels, sr)
         };
         self.replace_chain(build(channels, sample_rate), build(channels, sample_rate));
     }
@@ -345,5 +364,78 @@ mod tests {
         let snap = state.snapshot();
         assert!((snap.preamp_db + 4.0).abs() < 1e-9);
         assert!((snap.effects.bass_intensity + 0.5).abs() < 1e-9);
+    }
+
+    // Regression: after the PipeWire backend follows the output device's channel
+    // count, the mirror chain stays frozen at its startup width. Both `snapshot`
+    // and `rebuild_chain` must read the live width from the meters, or `status`
+    // misreports the channel count and a preset load rebuilds at the wrong width
+    // (handing the RT thread a chain that misframes the live buffer).
+    #[test]
+    fn snapshot_reports_live_channel_count_after_device_follow() {
+        let state = shared();
+        {
+            let mut inner = state.0.lock().unwrap();
+            inner.chain = ProcessorChain::builder()
+                .channels(2)
+                .sample_rate(48000.0)
+                .build();
+            // RT thread followed the output device up to 5.1 (6 ch); the mirror
+            // chain above is left frozen at the stereo startup width.
+            inner.meters.set_channels(6);
+        }
+        let snap = state.snapshot();
+        assert_eq!(
+            snap.channels, 6,
+            "status must report the live width, not the frozen mirror"
+        );
+        assert_eq!(snap.out_channels, 6);
+        assert_eq!(snap.channel_layout.len(), 6);
+    }
+
+    #[test]
+    fn rebuild_chain_builds_at_live_width_not_stale_mirror() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let state = shared();
+        {
+            let mut inner = state.0.lock().unwrap();
+            inner.chain = ProcessorChain::builder()
+                .channels(2)
+                .sample_rate(48000.0)
+                .build();
+            inner.meters.set_channels(6); // device-follow to 5.1
+            inner.meters.set_sample_rate(48000.0);
+        }
+        let seen = Arc::new(AtomicUsize::new(0));
+        let seen_w = Arc::clone(&seen);
+        state.rebuild_chain(move |channels, sr| {
+            seen_w.store(channels, Ordering::Relaxed);
+            ProcessorChain::builder()
+                .channels(channels)
+                .sample_rate(sr)
+                .build()
+        });
+        assert_eq!(
+            seen.load(Ordering::Relaxed),
+            6,
+            "rebuild_chain must build at the live device width, not the stale mirror"
+        );
+        // The mirror chain is now the rebuilt one, so it matches the live width.
+        assert_eq!(state.0.lock().unwrap().chain.channels, 6);
+    }
+
+    #[test]
+    fn snapshot_falls_back_to_mirror_width_before_audio_starts() {
+        // No backend has reported a live width yet (meters channels == 0): both
+        // snapshot and rebuild must fall back to the mirror chain's width.
+        let state = shared();
+        {
+            let mut inner = state.0.lock().unwrap();
+            inner.chain = ProcessorChain::builder()
+                .channels(4)
+                .sample_rate(48000.0)
+                .build();
+        }
+        assert_eq!(state.snapshot().channels, 4);
     }
 }

@@ -824,6 +824,11 @@ unsafe extern "C" fn filter_process_cb(data: *mut c_void, position: *mut spa_io_
         // resampling happens here — capture == DSP.
         fd.meters.set_sample_rate(fd.chain.sample_rate);
         fd.meters.set_capture_rate(fd.chain.sample_rate);
+        // Publish the live channel width too: the backend follows the output
+        // device's channel count (see the reconnect-loop rebuild), but the
+        // daemon's mirror chain stays frozen at its startup width, so `status`
+        // and `rebuild_chain` must read this rather than the stale mirror.
+        fd.meters.set_channels(fd.in_ports.len());
         // Log the ACTUAL negotiated graph rate once it settles/changes (the
         // "ready" line above only knew the requested rate). Guarded so it fires
         // on startup + rare renegotiations, never per block.
