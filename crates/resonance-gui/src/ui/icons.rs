@@ -25,6 +25,7 @@ pub(crate) enum Icon {
     Plus,
     Close,
     Trash,
+    Copy,
     Refresh,
     Sliders,
     Target,
@@ -52,6 +53,7 @@ pub(crate) const ALL: &[(Icon, &str)] = &[
     (Icon::Plus, "Plus"),
     (Icon::Close, "Close"),
     (Icon::Trash, "Trash"),
+    (Icon::Copy, "Copy"),
     (Icon::Refresh, "Refresh"),
     (Icon::Sliders, "Sliders"),
     (Icon::Target, "Target"),
@@ -256,6 +258,11 @@ fn paths(p: &Pen, icon: Icon) {
             p.line(&[(0.28, 0.30), (0.32, 0.80), (0.68, 0.80), (0.72, 0.30)]);
             p.seg((0.43, 0.40), (0.44, 0.71));
             p.seg((0.57, 0.40), (0.56, 0.71));
+        }
+        Icon::Copy => {
+            // Two overlapping squares — front (lower-right) over back (upper-left).
+            p.poly(&[(0.34, 0.34), (0.88, 0.34), (0.88, 0.88), (0.34, 0.88)]);
+            p.line(&[(0.34, 0.20), (0.12, 0.20), (0.12, 0.66), (0.26, 0.66)]);
         }
         Icon::Refresh => {
             // A near-full circular arrow (small gap top-right) with one filled

@@ -234,6 +234,15 @@ pub struct GuiApp {
     /// True while the active curve drag edits Q (right button) vs freq+gain.
     pub(crate) drag_q: bool,
     pub(crate) profile_name: String,
+    /// Live filter text for the profiles list (shown only past a few profiles).
+    pub(crate) profile_filter: String,
+    /// Set when the dirty banner is clicked: focus the save-name field next frame.
+    pub(crate) focus_profile_name: bool,
+    /// Last observed loaded-profile name, for detecting profile-load transitions
+    /// (to restore a profile's bundled measurement). `preset_seen` gates the very
+    /// first observation so startup doesn't clobber the persisted live measurement.
+    pub(crate) last_preset: Option<String>,
+    pub(crate) preset_seen: bool,
     /// Inline profile rename in progress: (original name, edit buffer).
     pub(crate) rename: Option<(String, String)>,
     /// Smoothed spectrum bar heights + last animation tick.
@@ -327,6 +336,12 @@ pub struct GuiApp {
     /// Graph series the user has hidden via the legend's eye toggles (keyed by
     /// the legend label, e.g. "FL"/"Result FR"/"Target"). Session-only.
     pub(crate) hidden_curves: std::collections::HashSet<String>,
+    /// Dev/screenshot hook (`RESONANCE_DEMO=1`): hold an injected demo state and
+    /// skip all IPC state updates so the full UI renders without a daemon.
+    pub(crate) demo: bool,
+    /// Dev/screenshot hook: hold the reference Customize popup open
+    /// (`RESONANCE_OPEN=customize`). No effect in normal use.
+    pub(crate) open_customizer: bool,
 }
 
 /// Messages from the UI thread to the IPC worker.
@@ -335,6 +350,8 @@ pub(crate) enum WorkerCmd {
     RefreshMeta,
     Import(String),
     Export(String),
+    /// Export a *named* stored profile (per-row export): (profile, path).
+    ExportNamed(String, String),
 }
 
 /// Snapshot the IPC worker publishes for the UI thread to read each frame.
@@ -441,6 +458,24 @@ fn spawn_ipc_worker(
                                 }
                             }
                         }
+                        WorkerCmd::ExportNamed(name, path) => {
+                            match c.send_recv(Command::ExportProfileNamed {
+                                name: name.clone(),
+                                path: path.clone(),
+                            }) {
+                                Ok(Response::Ok) => {
+                                    worker_status(&shared, format!("exported '{name}' → {path}"))
+                                }
+                                Ok(Response::Error(e)) => {
+                                    worker_status(&shared, format!("export failed: {e}"))
+                                }
+                                Ok(_) => worker_status(&shared, "export failed".into()),
+                                Err(_) => {
+                                    ipc = None;
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -519,7 +554,7 @@ impl GuiApp {
             .storage
             .and_then(|s| s.get_string("theme"))
             .map(|s| Theme::from_label(&s))
-            .unwrap_or(Theme::System);
+            .unwrap_or(Theme::Resonance);
         cc.egui_ctx.set_visuals(theme.visuals());
         // Restore the reference overlay (measurement + target) from a previous
         // session so a loaded measurement persists across restarts.
@@ -565,6 +600,10 @@ impl GuiApp {
             drag_value: None,
             drag_q: false,
             profile_name: String::new(),
+            profile_filter: String::new(),
+            focus_profile_name: false,
+            last_preset: None,
+            preset_seen: false,
             rename: None,
             spectrum_display: Vec::new(),
             last_anim: Instant::now(),
@@ -613,9 +652,59 @@ impl GuiApp {
                 .map(|v| v == "true")
                 .unwrap_or(false),
             hidden_curves: std::collections::HashSet::new(),
+            demo: std::env::var("RESONANCE_DEMO").is_ok(),
+            open_customizer: std::env::var("RESONANCE_OPEN").as_deref() == Ok("customize"),
         };
         if let Some(p) = persisted_ref.and_then(|j| serde_json::from_str(&j).ok()) {
             app.reference.restore(p);
+        }
+        // Dev/test hook: `RESONANCE_DEMO=1` injects a representative populated
+        // state so the full UI renders without a daemon — for the screenshot
+        // harness / design work. `pull_shared` early-returns in demo mode.
+        if app.demo {
+            app.state = Some(demo_state());
+            app.profiles = vec![
+                "Reference".into(),
+                "Harman 660S".into(),
+                "Late Night".into(),
+                "Vocal Forward".into(),
+                "Bass Heavy".into(),
+            ];
+            app.mappings = vec![
+                ("alsa_output.usb-D1".into(), "Reference".into()),
+                ("bluez.hd660s".into(), "Harman 660S".into()),
+                ("bluez.wh1000xm5".into(), "Commute".into()),
+            ];
+            app.per_channel_eq = true;
+            // Reference overlay on (target + synthetic measurement + bounds) so
+            // the demo shows the full reference workflow like the design mock.
+            let meas: Vec<(f64, f64)> = (0..96)
+                .map(|i| {
+                    let f = 20.0 * 1000f64.powf(i as f64 / 95.0); // 20 Hz → 20 kHz
+                    let l = f.log10();
+                    let db = 84.0
+                        + 4.0 / (1.0 + (f / 110.0).powi(2))
+                        + 3.0 * (-((l - 2700f64.log10()) / 0.22).powi(2)).exp()
+                        - 4.0 / (1.0 + (1500.0 / f).powi(3));
+                    (f, db)
+                })
+                .collect();
+            app.reference.set_measurement(
+                "Sennheiser HD 660S".into(),
+                false,
+                resonance_ipc::curve::RefCurve { points: meas },
+                None,
+            );
+            app.reference.enabled = true;
+            app.reference.show_bounds = true;
+            if let Some((_, sel)) = app
+                .reference
+                .target_options()
+                .into_iter()
+                .find(|(n, _)| n != "None")
+            {
+                app.reference.set_target(sel);
+            }
         }
         // Dev/test hook: `RESONANCE_OPEN=manage|browse` opens that dialog at
         // startup so the screenshot harness can capture it. No effect otherwise.
@@ -666,6 +755,7 @@ impl GuiApp {
                     self.reference
                         .set_measurement(f.name, f.iem, f.left, f.right);
                     self.reference.show_browser = false;
+                    self.touch_measurement();
                 }
                 resonance_reference::download::DlEvent::FetchedTarget { name, curve } => {
                     // Added from the Manage-targets dialog; keep the dialog open
@@ -781,6 +871,10 @@ impl GuiApp {
     /// Copy the IPC worker's latest snapshot into our fields (called once per
     /// frame). The UI thread never does IPC, so this never blocks.
     fn pull_shared(&mut self) {
+        // Demo/screenshot mode: keep the injected state; never let IPC clobber it.
+        if self.demo {
+            return;
+        }
         let (state, profiles, mappings, status) = {
             let mut s = self.shared.lock().unwrap();
             (
@@ -803,8 +897,10 @@ impl GuiApp {
         // after sustained loss do we drop to the start screen.
         match state {
             Some(st) => {
+                let preset = st.current_preset.clone();
                 self.state = Some(st);
                 self.conn_lost_since = None;
+                self.sync_profile_measurement(preset);
             }
             None => {
                 // Hold the last snapshot for the grace window; only drop to the
@@ -838,6 +934,39 @@ impl GuiApp {
         let _ = self.cmd_tx.send(WorkerCmd::Cmd(cmd));
     }
 
+    /// React to a change in the loaded profile (manual load or device auto-load):
+    /// restore the measurement that profile was saved with, so profiles can be
+    /// A/B-compared visually. The first observation after startup is a silent
+    /// baseline — it must not clobber the persisted live measurement.
+    fn sync_profile_measurement(&mut self, preset: Option<String>) {
+        if !self.preset_seen {
+            self.preset_seen = true;
+            self.last_preset = preset;
+            return;
+        }
+        if preset == self.last_preset {
+            return;
+        }
+        self.last_preset = preset.clone();
+        if let Some(name) = preset {
+            self.reference.restore_measurement_for(&name);
+        }
+    }
+
+    /// Mark the chain dirty when the user changes the measurement while a profile
+    /// is loaded, so the unsaved banner prompts a re-save (which re-bundles the
+    /// new measurement with the profile).
+    pub(crate) fn touch_measurement(&mut self) {
+        if self
+            .state
+            .as_ref()
+            .and_then(|s| s.current_preset.as_ref())
+            .is_some()
+        {
+            self.dirty = true;
+        }
+    }
+
     /// Set the toolbar status text with an auto-clear timer so transient action
     /// feedback doesn't linger like a permanent label.
     pub(crate) fn set_status(&mut self, msg: impl Into<String>) {
@@ -854,7 +983,112 @@ impl GuiApp {
     }
 }
 
+/// A representative populated `DaemonState` for `RESONANCE_DEMO=1` — lets the full
+/// UI render (graph, bands, effects, devices, per-channel curves) with no daemon,
+/// for the screenshot harness and design iteration. Values mirror the design mock.
+fn demo_state() -> DaemonState {
+    use resonance_ipc::{BandState, BandType, ChannelMask, EffectsState, Meters};
+    let band = |band_type, freq, gain_db, q, enabled, channels| BandState {
+        band_type,
+        freq,
+        gain_db,
+        q,
+        enabled,
+        channels,
+    };
+    DaemonState {
+        enabled: true,
+        preamp_db: -10.2,
+        eq_enabled: true,
+        bands: vec![
+            band(BandType::LowShelf, 60.0, 4.5, 0.71, true, ChannelMask::ALL),
+            band(BandType::Peaking, 120.0, -2.1, 1.20, true, ChannelMask::ALL),
+            band(BandType::Peaking, 280.0, -7.4, 1.40, true, ChannelMask::ALL),
+            band(
+                BandType::Peaking,
+                1000.0,
+                3.2,
+                1.41,
+                true,
+                ChannelMask::single(0),
+            ),
+            band(
+                BandType::Peaking,
+                3500.0,
+                -1.8,
+                2.00,
+                false,
+                ChannelMask::single(1),
+            ),
+            band(
+                BandType::HighShelf,
+                9000.0,
+                5.8,
+                0.71,
+                true,
+                ChannelMask::ALL,
+            ),
+        ],
+        effects: EffectsState {
+            fidelity_intensity: 0.62,
+            fidelity_enabled: true,
+            ambience_intensity: 0.34,
+            ambience_enabled: true,
+            surround_intensity: 0.18,
+            surround_enabled: false,
+            dynamic_boost_intensity: 0.48,
+            dynamic_boost_enabled: true,
+            bass_intensity: 0.71,
+            bass_enabled: true,
+        },
+        current_preset: Some("Reference".into()),
+        sample_rate: 48000.0,
+        capture_rate: 48000.0,
+        channels: 2,
+        out_channels: 2,
+        channel_layout: resonance_ipc::default_channel_layout(2),
+        routing: None,
+        spectrum: (0..16)
+            .map(|i| {
+                let t = i as f32 / 15.0;
+                (0.82 * (1.0 - t).powf(1.25)).max(0.05)
+            })
+            .collect(),
+        active_output: Some("alsa_output.usb-D1".into()),
+        mapped_profile: Some("Reference".into()),
+        available_sinks: vec![
+            "alsa_output.usb-D1".into(),
+            "bluez.hd660s".into(),
+            "bluez.wh1000xm5".into(),
+        ],
+        sink_descriptions: vec![
+            ("alsa_output.usb-D1".into(), "D1 24-bit DAC".into()),
+            ("bluez.hd660s".into(), "Sennheiser HD 660S".into()),
+            ("bluez.wh1000xm5".into(), "WH-1000XM5".into()),
+        ],
+        preferred_output: None,
+        meters: Meters {
+            in_peak: 0.25,
+            out_peak: 0.36,
+            in_rms: 0.12,
+            out_rms: 0.18,
+            clip: false,
+            dsp_load: 0.14,
+            dsp_frame_us: 140,
+        },
+    }
+}
+
 impl eframe::App for GuiApp {
+    /// The GL clear colour shows through any gap the panels don't fill — notably
+    /// the hero card's outer margin. eframe's default is near-black, which framed
+    /// the deep FR graph in an odd black band; use the theme's window/ground tier
+    /// so that gap matches the body background (as the control-card gaps already
+    /// do) instead of reading as a black border around the graph.
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        visuals.window_fill.to_normalized_gamma_f32()
+    }
+
     /// Persist the chosen theme. Panel sizes are saved by eframe's egui-memory
     /// persistence (enabled by the `persistence` feature + default
     /// `persist_egui_memory`).
@@ -1018,6 +1252,15 @@ impl eframe::App for GuiApp {
         #[cfg(not(target_os = "macos"))]
         let _ = toolbar;
 
+        // Live meters now live in a bottom status strip (the brand/meters title-bar
+        // row was removed). Added before `shell` so it claims the window's bottom
+        // edge; the controls cluster then stacks above it. Only when connected.
+        if self.state.is_some() {
+            egui::Panel::bottom("statusbar")
+                .resizable(false)
+                .show_inside(ui, |ui| self.status_bar(ui));
+        }
+
         self.shell(ui);
 
         let ctx = ui.ctx().clone();
@@ -1143,5 +1386,10 @@ impl GuiApp {
     /// the daemon so it captures the authoritative state).
     pub(crate) fn export_profile(&mut self, path: String) {
         let _ = self.cmd_tx.send(WorkerCmd::Export(path));
+    }
+
+    /// Export a *named* stored profile (per-row export) rather than the live chain.
+    pub(crate) fn export_profile_named(&mut self, name: String, path: String) {
+        let _ = self.cmd_tx.send(WorkerCmd::ExportNamed(name, path));
     }
 }

@@ -32,17 +32,23 @@ pub(crate) fn install_symbol_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// A flat native section: a bold title with a hairline rule beneath it, then the
-/// body — no card/box. KDE, Windows and macOS group controls with a header +
-/// spacing (and the panel splitters), not filled rounded cards. Fills the column
-/// width so the rule spans it and the bands table gets room.
+/// A section drawn as a rounded card: a faint raised surface with a hairline
+/// border, a caps header over a thin rule, then the body. Each control group
+/// reads as its own container (the design-mock look) instead of bleeding into one
+/// flat panel. Fills the column width so cards span their pane.
 pub(crate) fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
-    ui.set_min_width(ui.available_width());
-    ui.add_space(2.0);
-    ui.label(egui::RichText::new(title).strong());
-    ui.separator();
-    ui.add_space(2.0);
-    add(ui);
+    crate::ui::kit::card(ui, title, "", None, add);
+}
+
+/// A section card with a right-aligned hint in its head bar (mockup `.card>.head`
+/// trailing text — e.g. "FxSound chain", "6 bands · 1 off").
+pub(crate) fn section_hint(
+    ui: &mut egui::Ui,
+    title: &str,
+    hint: &str,
+    add: impl FnOnce(&mut egui::Ui),
+) {
+    crate::ui::kit::card(ui, title, hint, None, add);
 }
 
 /// A flat collapsible section for the narrow accordion layout: a native
@@ -55,13 +61,7 @@ pub(crate) fn accordion(
     default_open: bool,
     body: impl FnOnce(&mut egui::Ui),
 ) {
-    egui::CollapsingHeader::new(egui::RichText::new(title).strong())
-        .id_salt(id)
-        .default_open(default_open)
-        .show(ui, |ui| {
-            ui.add_space(2.0);
-            body(ui);
-        });
+    crate::ui::kit::accordion(ui, id, title, default_open, body);
 }
 
 /// A modal dialog window sized to fit the current viewport: centred, resizable,
@@ -135,6 +135,38 @@ pub(crate) fn gain_color(db: f64, pal: &Palette) -> egui::Color32 {
     }
     let target = if db > 0.0 { pal.boost } else { pal.cut };
     lerp_color(pal.accent, target, t)
+}
+
+/// Colour for a frequency, mapped across the audible band like visible light —
+/// deep red in the sub-bass, through green in the mids, to blue/violet in the
+/// treble — so a band's frequency reads at a glance. Log-scaled 20 Hz → 20 kHz.
+pub(crate) fn freq_color(freq: f64) -> egui::Color32 {
+    // (position 0..1, r, g, b) low→high; kept legible on the dark `well`.
+    const STOPS: [(f32, u8, u8, u8); 7] = [
+        (0.00, 226, 108, 108), // 20 Hz   red
+        (0.17, 226, 150, 84),  // ~60 Hz  orange
+        (0.34, 220, 200, 100), // ~250 Hz yellow
+        (0.50, 124, 202, 134), // ~1 kHz  green
+        (0.66, 96, 202, 202),  // ~4 kHz  cyan
+        (0.83, 104, 162, 236), // ~10 kHz blue
+        (1.00, 172, 134, 236), // 20 kHz  violet
+    ];
+    let lmin = 20f64.log10();
+    let lmax = 20_000f64.log10();
+    let t = (((freq.max(1.0).log10() - lmin) / (lmax - lmin)) as f32).clamp(0.0, 1.0);
+    let mut i = 0;
+    while i + 1 < STOPS.len() - 1 && t > STOPS[i + 1].0 {
+        i += 1;
+    }
+    let (t0, r0, g0, b0) = STOPS[i];
+    let (t1, r1, g1, b1) = STOPS[i + 1];
+    let f = if (t1 - t0).abs() < 1e-6 {
+        0.0
+    } else {
+        ((t - t0) / (t1 - t0)).clamp(0.0, 1.0)
+    };
+    let l = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * f) as u8;
+    egui::Color32::from_rgb(l(r0, r1), l(g0, g1), l(b0, b1))
 }
 
 /// Paint a centre-out gain bar in a `width`×14 cell: a centre tick with the bar

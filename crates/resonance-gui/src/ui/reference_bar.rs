@@ -78,12 +78,18 @@ impl GuiApp {
     pub(crate) fn reference_bar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(kit::SP_XS);
 
-        // Disabled: just the master toggle + a one-line hint.
+        // Disabled: just the master toggle pill + a one-line hint.
         if !self.reference.enabled {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = kit::SP_S;
-                let _ = kit::toggle(ui, &mut self.reference.enabled);
-                ui.label(egui::RichText::new("Reference").size(kit::T_BODY).strong());
+                if kit::pill_check(
+                    ui,
+                    "Reference",
+                    false,
+                    "overlay a target + measurement to EQ by eye",
+                ) {
+                    self.reference.enabled = true;
+                }
                 ui.label(
                     egui::RichText::new("overlay a target + measurement to EQ by eye")
                         .size(kit::T_CAPTION)
@@ -98,7 +104,6 @@ impl GuiApp {
         let busy = self.autoeq_busy;
         let can_auto = has_meas && self.reference.target.is_some() && !busy;
         let gap = kit::SP_S;
-        let show_label = ui.available_width() > 600.0;
 
         // Controls present right now (some need a measurement), in display order.
         let present: Vec<(RefCtl, Section, bool, u8)> = REF_LAYOUT
@@ -109,13 +114,9 @@ impl GuiApp {
         // Width fit: start with everything inline, then drop the lowest-priority
         // non-core control until the row fits — accounting for the inter-section
         // hairlines and (only when something has collapsed) the ☰ button.
-        let leading = 36.0
-            + gap
-            + if show_label {
-                kit::text_width(ui, kit::T_BODY, "Reference") + gap
-            } else {
-                0.0
-            };
+        // The master Reference pill (check + label) is always present; its width
+        // is the leading inset the section fit reasons about.
+        let leading = 42.0 + kit::text_width(ui, kit::T_VALUE, "Reference") + gap;
         let sep_unit = 1.0 + 2.0 * gap;
         let overflow_w = 28.0 + gap;
         let avail = ui.available_width();
@@ -159,9 +160,8 @@ impl GuiApp {
 
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
-            let _ = kit::toggle(ui, &mut self.reference.enabled);
-            if show_label {
-                ui.label(egui::RichText::new("Reference").size(kit::T_BODY).strong());
+            if kit::pill_check(ui, "Reference", true, "turn off the reference overlay") {
+                self.reference.enabled = false;
             }
 
             // Sections, each preceded by a hairline once anything's been drawn.
@@ -194,24 +194,28 @@ impl GuiApp {
         });
     }
 
-    /// Inline width a control occupies (used by the collapse fit).
+    /// Inline width a control occupies (used by the collapse fit). Pills: ~22px
+    /// padding + 20px per leading check/icon + the label width.
     fn ref_ctl_width(&self, ui: &egui::Ui, c: RefCtl, busy: bool) -> f32 {
-        let tgl = |s: &str| 36.0 + kit::SP_XS + kit::text_width(ui, kit::T_CAPTION, s);
+        let check = |s: &str| 22.0 + 20.0 + kit::text_width(ui, kit::T_VALUE, s);
+        let icon_label = |s: &str| 22.0 + 20.0 + kit::text_width(ui, kit::T_VALUE, s);
+        let icon_only = 22.0 + 14.0;
+        let label_only = |s: &str| 22.0 + kit::text_width(ui, kit::T_VALUE, s);
         match c {
-            RefCtl::TargetDd => 150.0,
-            RefCtl::Customize => kit::icon_text_width(ui, "Customize target"),
-            RefCtl::Manage => kit::CTRL_H,
-            RefCtl::MeasChip => kit::text_width(ui, kit::T_BODY, &self.meas_label()) + 24.0,
-            RefCtl::Clear => kit::CTRL_H,
-            RefCtl::Channel => {
-                kit::text_width(ui, kit::T_BODY, self.reference.channel.label()) + 24.0
+            RefCtl::TargetDd => {
+                kit::text_width(ui, kit::T_VALUE, "Target") + 2.0 + kit::SP_S + 148.0
             }
-            RefCtl::MeasFile => kit::CTRL_H,
-            RefCtl::ToTarget => kit::CTRL_H,
-            RefCtl::Raw => tgl("Raw"),
-            RefCtl::Bounds => tgl("Bounds"),
-            RefCtl::Normalize => tgl("Normalize"),
-            RefCtl::AutoEq => kit::icon_text_width(ui, if busy { "Auto-EQ…" } else { "Auto-EQ" }),
+            RefCtl::Customize => icon_label("Customize"),
+            RefCtl::Manage => icon_only,
+            RefCtl::MeasChip => label_only(&self.meas_label()),
+            RefCtl::Clear => icon_only,
+            RefCtl::Channel => label_only(self.reference.channel.label()),
+            RefCtl::MeasFile => icon_only,
+            RefCtl::ToTarget => icon_only,
+            RefCtl::Raw => check("Raw"),
+            RefCtl::Bounds => check("Bounds"),
+            RefCtl::Normalize => check("Normalize"),
+            RefCtl::AutoEq => icon_label(if busy { "Auto-EQ…" } else { "Auto-EQ" }),
         }
     }
 
@@ -224,18 +228,36 @@ impl GuiApp {
         }
     }
 
-    /// Render one control inline. Secondary actions are icon-only with a hover
-    /// tooltip naming them; Auto-EQ/Customize keep their labels (primary).
+    /// Render one control inline as a pill (mockup `.refbar`). Secondary actions
+    /// are icon-only ghost pills with a hover tooltip; the view flags are
+    /// check-pills; Auto-EQ is an accent pill.
     fn ref_ctl_inline(&mut self, ui: &mut egui::Ui, c: RefCtl, can_auto: bool, busy: bool) {
         match c {
             RefCtl::TargetDd => {
+                // A rounded "Target" selector: an accent prefix label + the value
+                // dropdown, sized to the pill row height (mockup `.ddl`).
+                let accent = kit::tokens(ui).accent;
+                let (lr, _) = ui.allocate_exact_size(
+                    egui::vec2(
+                        kit::text_width(ui, kit::T_VALUE, "Target") + 2.0,
+                        kit::PILL_H,
+                    ),
+                    egui::Sense::hover(),
+                );
+                ui.painter().text(
+                    egui::pos2(lr.left(), lr.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    "Target",
+                    egui::FontId::proportional(kit::T_VALUE),
+                    accent,
+                );
                 let opts = self.reference.target_options();
                 let labels: Vec<&str> = opts.iter().map(|(n, _)| n.as_str()).collect();
                 let cur = self.reference.target_label();
                 if let Some(i) = kit::dropdown(
                     ui,
-                    150.0,
-                    kit::CTRL_H,
+                    148.0,
+                    kit::PILL_H,
                     ui.make_persistent_id("ref_target_dd"),
                     &cur,
                     &labels,
@@ -245,10 +267,13 @@ impl GuiApp {
             }
             RefCtl::Customize => self.ref_customize_button(ui),
             RefCtl::Manage => {
-                if kit::icon_btn(
+                if kit::pill_icon(
                     ui,
-                    Icon::Download,
-                    kit::CTRL_H,
+                    Some(Icon::Download),
+                    "",
+                    false,
+                    true,
+                    true,
                     "Manage targets — add curves or measurements from squig.link, or remove them",
                 ) {
                     self.open_manage();
@@ -262,24 +287,30 @@ impl GuiApp {
                     "Pick a headphone/IEM measurement from squig.link to overlay"
                 };
                 let label = self.meas_label();
-                if kit::button_tip(ui, &label, false, true, tip) {
+                if kit::pill_icon(ui, None, &label, false, false, true, tip) {
                     self.open_browser();
                 }
             }
             RefCtl::Clear => {
-                if kit::icon_btn(
+                if kit::pill_icon(
                     ui,
-                    Icon::Close,
-                    kit::CTRL_H,
+                    Some(Icon::Close),
+                    "",
+                    false,
+                    true,
+                    true,
                     "Remove the loaded measurement",
                 ) {
                     self.reference.clear_measurement();
+                    self.touch_measurement();
                 }
             }
             RefCtl::Channel => {
-                if kit::button_tip(
+                if kit::pill_icon(
                     ui,
+                    None,
                     self.reference.channel.label(),
+                    false,
                     false,
                     true,
                     "Measurement channel: cycle L+R average / Left / Right",
@@ -288,59 +319,70 @@ impl GuiApp {
                 }
             }
             RefCtl::ToTarget => {
-                if kit::icon_btn(
+                if kit::pill_icon(
                     ui,
-                    Icon::Save,
-                    kit::CTRL_H,
+                    Some(Icon::Save),
+                    "",
+                    false,
+                    true,
+                    true,
                     "Save this measurement as a target curve to EQ toward",
                 ) {
                     self.meas_to_target();
                 }
             }
             RefCtl::MeasFile => {
-                if kit::icon_btn(
+                if kit::pill_icon(
                     ui,
-                    Icon::Folder,
-                    kit::CTRL_H,
+                    Some(Icon::Folder),
+                    "",
+                    false,
+                    true,
+                    true,
                     "Load a measurement from a local .txt/.csv file",
                 ) {
                     self.open_curve_picker(false);
                 }
             }
             RefCtl::Raw => {
-                let mut v = self.reference.show_measurement;
-                if kit::toggle(ui, &mut v) {
-                    self.reference.show_measurement = v;
+                if kit::pill_check(
+                    ui,
+                    "Raw",
+                    self.reference.show_measurement,
+                    "Also draw the raw (un-EQ'd) measurement",
+                ) {
+                    self.reference.show_measurement = !self.reference.show_measurement;
                 }
-                ui.label(egui::RichText::new("Raw").size(kit::T_CAPTION).weak())
-                    .on_hover_text("Also draw the raw (un-EQ'd) measurement");
             }
             RefCtl::Bounds => {
-                let mut v = self.reference.show_bounds;
-                if kit::toggle(ui, &mut v) {
-                    self.reference.show_bounds = v;
+                if kit::pill_check(
+                    ui,
+                    "Bounds",
+                    self.reference.show_bounds,
+                    "Shade the listener-preference tolerance band around the target \
+                     (tight in the mids, wider in bass/treble) — keep the result inside it",
+                ) {
+                    self.reference.show_bounds = !self.reference.show_bounds;
                 }
-                ui.label(egui::RichText::new("Bounds").size(kit::T_CAPTION).weak())
-                    .on_hover_text(
-                        "Shade the listener-preference tolerance band around the target \
-                         (tight in the mids, wider in bass/treble) — keep the result inside it",
-                    );
             }
             RefCtl::Normalize => {
-                let mut v = self.reference.normalized;
-                if kit::toggle(ui, &mut v) {
-                    self.reference.normalized = v;
+                if kit::pill_check(
+                    ui,
+                    "Normalize",
+                    self.reference.normalized,
+                    "Flatten the target to 0 dB; show the EQ'd result as deviation",
+                ) {
+                    self.reference.normalized = !self.reference.normalized;
                 }
-                ui.label(egui::RichText::new("Normalize").size(kit::T_CAPTION).weak())
-                    .on_hover_text("Flatten the target to 0 dB; show the EQ'd result as deviation");
             }
             RefCtl::AutoEq => {
                 let label = if busy { "Auto-EQ…" } else { "Auto-EQ" };
-                if kit::icon_text_btn(
+                if kit::pill_icon(
                     ui,
-                    Icon::Wand,
+                    Some(Icon::Wand),
                     label,
                     true,
+                    false,
                     can_auto,
                     "Fit EQ bands so the EQ'd measurement matches the target (peqdb AutoEQ)",
                 ) {
@@ -403,6 +445,7 @@ impl GuiApp {
             RefCtl::Clear => {
                 if kit::menu_item(ui, "Clear measurement", false) {
                     self.reference.clear_measurement();
+                    self.touch_measurement();
                 }
             }
             RefCtl::Channel => {
@@ -480,14 +523,114 @@ impl GuiApp {
     /// stays open while you drag its sliders.
     fn ref_customize_button(&mut self, ui: &mut egui::Ui) {
         let id = ui.make_persistent_id("ref_customize_pop");
-        kit::icon_popup_button(
+        // Dev/screenshot hook (`RESONANCE_OPEN=customize`): hold the customizer
+        // popup open so the harness can capture it without a click.
+        if self.open_customizer {
+            egui::Popup::open_id(ui.ctx(), id);
+        }
+        kit::pill_popup(
             ui,
-            Icon::Sliders,
-            "Customize target",
+            Some(Icon::Sliders),
+            "Customize",
             "Shape the selected target: tilt + bass / ear-gain / treble shelves (stacks on any target)",
             id,
-            320.0,
+            340.0,
             |ui| self.reference_customizer_body(ui),
+        );
+    }
+
+    /// Paint the customizer's live FR thumbnail into a short deep well: a 0-dB
+    /// baseline, the base target dashed, the adjusted target solid accent, a
+    /// "Stacking on <target>" label, and 20 Hz / 20 k axis hints. Fixed ±15 dB so
+    /// dragging a slider bends the curve instead of rescaling the frame.
+    fn customizer_thumbnail(&self, ui: &mut egui::Ui) {
+        let pal = self.palette;
+        let t = kit::tokens(ui);
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 64.0), egui::Sense::hover());
+
+        let lmin = 20f64.log10();
+        let lmax = 20_000f64.log10();
+        let win = 15.0f64;
+        let x_of = |f: f64| {
+            let l = f.log10().clamp(lmin, lmax);
+            rect.left() + ((l - lmin) / (lmax - lmin)) as f32 * rect.width()
+        };
+        let half = rect.height() * 0.5 - 4.0;
+        let y_of = |db: f64| rect.center().y - (db.clamp(-win, win) / win) as f32 * half;
+
+        let p = ui.painter_at(rect);
+        p.rect_filled(rect, kit::R_CTRL, pal.graph_bg);
+        p.rect_stroke(
+            rect,
+            kit::R_CTRL,
+            egui::Stroke::new(1.0, t.line),
+            egui::StrokeKind::Inside,
+        );
+        p.hline(rect.x_range(), y_of(0.0), egui::Stroke::new(1.0, t.faint));
+
+        if self.reference.target.is_some() {
+            if let Some(b) = self.reference.base_curve() {
+                let path: Vec<egui::Pos2> = b
+                    .points
+                    .iter()
+                    .map(|&(f, db)| egui::pos2(x_of(f), y_of(db)))
+                    .collect();
+                p.add(egui::Shape::dashed_line(
+                    &path,
+                    egui::Stroke::new(1.0, t.faint),
+                    3.0,
+                    3.0,
+                ));
+            }
+            if let Some(adj) = &self.reference.target {
+                let path: Vec<egui::Pos2> = adj
+                    .points
+                    .iter()
+                    .map(|&(f, db)| egui::pos2(x_of(f), y_of(db)))
+                    .collect();
+                p.add(egui::Shape::line(path, egui::Stroke::new(1.5, pal.accent)));
+            }
+            // Context label on an opaque graph-bg scrim (covers the curve behind it).
+            let label = format!("Stacking on {}", self.reference.target_label());
+            let lab = elide(ui, &label, kit::T_CAPTION, rect.width() * 0.72);
+            let lw = kit::text_width(ui, kit::T_CAPTION, &lab);
+            let lr = egui::Rect::from_min_size(
+                egui::pos2(rect.left() + 6.0, rect.top() + 5.0),
+                egui::vec2(lw + 10.0, 14.0),
+            );
+            p.rect_filled(lr, 3.0, pal.graph_bg);
+            p.text(
+                egui::pos2(lr.left() + 5.0, lr.center().y),
+                egui::Align2::LEFT_CENTER,
+                &lab,
+                egui::FontId::proportional(kit::T_CAPTION),
+                t.text,
+            );
+        } else {
+            p.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Select a target to customize",
+                egui::FontId::proportional(kit::T_CAPTION),
+                t.faint,
+            );
+        }
+
+        let small = egui::FontId::proportional(9.0);
+        p.text(
+            egui::pos2(rect.left() + 5.0, rect.bottom() - 7.0),
+            egui::Align2::LEFT_CENTER,
+            "20 Hz",
+            small.clone(),
+            t.faint,
+        );
+        p.text(
+            egui::pos2(rect.right() - 5.0, rect.bottom() - 7.0),
+            egui::Align2::RIGHT_CENTER,
+            "20 k",
+            small,
+            t.faint,
         );
     }
 
@@ -495,19 +638,25 @@ impl GuiApp {
     /// bass / ear-gain / treble shelves stacked on whichever target is selected.
     /// Reset zeroes the adjustments; Save bakes the result into the library.
     fn reference_customizer_body(&mut self, ui: &mut egui::Ui) {
+        kit::menu_caption(ui, "Customize target");
         ui.label(
-            egui::RichText::new(
-                "Shapes the selected target: tilt the overall balance, and lift/cut bass, \
-                 ear-gain (~3 kHz) and treble. Stacks on any target — Save stores the result.",
-            )
-            .size(kit::T_CAPTION)
-            .weak(),
+            egui::RichText::new("Stacks on the selected target. Save bakes it into the library.")
+                .size(kit::T_CAPTION)
+                .color(kit::tokens(ui).faint),
         );
-        ui.add_space(kit::SP_XS);
 
+        // Live FR thumbnail: the adjusted target (solid accent) over the base
+        // target (dashed) on a fixed ±15 dB window, so the abstract Tilt / Bass /
+        // Ear / Treble knobs become visible. Zero new DSP — it paints the curve
+        // points `rebuild_target()` already produced.
+        self.customizer_thumbnail(ui);
+        ui.add_space(kit::SP_S);
+
+        let pal = self.palette;
         let mut changed = false;
         changed |= cust_slider(
             ui,
+            &pal,
             "Tilt",
             &mut self.reference.adj_tilt,
             -2.0..=1.0,
@@ -516,6 +665,7 @@ impl GuiApp {
         );
         changed |= cust_slider(
             ui,
+            &pal,
             "Bass",
             &mut self.reference.adj_bass,
             -12.0..=18.0,
@@ -524,6 +674,7 @@ impl GuiApp {
         );
         changed |= cust_slider(
             ui,
+            &pal,
             "Ear",
             &mut self.reference.adj_ear,
             -12.0..=12.0,
@@ -532,6 +683,7 @@ impl GuiApp {
         );
         changed |= cust_slider(
             ui,
+            &pal,
             "Treble",
             &mut self.reference.adj_treble,
             -12.0..=12.0,
@@ -539,7 +691,15 @@ impl GuiApp {
             1,
         );
 
-        ui.add_space(kit::SP_XS);
+        ui.add_space(kit::SP_S);
+        {
+            let line = kit::tokens(ui).line;
+            let (r, _) =
+                ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+            ui.painter()
+                .hline(r.x_range(), r.center().y, egui::Stroke::new(1.0, line));
+        }
+        ui.add_space(kit::SP_S);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = kit::SP_S;
             if kit::button_tip(ui, "Reset", false, true, "Zero all four adjustments") {
@@ -1126,7 +1286,7 @@ impl GuiApp {
                                     continue;
                                 }
                                 let label = format!("{}   ·  {} · {}", m.display, m.source, m.kind);
-                                if ui.selectable_label(false, label).clicked() {
+                                if kit::list_row(ui, false, &label).clicked() {
                                     to_fetch = Some(m.clone());
                                 }
                             }
@@ -1221,7 +1381,7 @@ impl GuiApp {
                         .weak(),
                 );
                 ui.separator();
-                egui::Frame::group(ui.style()).show(ui, |ui| {
+                kit::well_frame(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .id_salt("curve_picker_list")
                         .auto_shrink([false, false])
@@ -1232,9 +1392,10 @@ impl GuiApp {
                             let mut do_activate = None;
                             for (i, it) in browser.entries.iter().enumerate() {
                                 let glyph = if it.is_dir { "▸" } else { "·" };
-                                let resp = ui.selectable_label(
+                                let resp = kit::list_row(
+                                    ui,
                                     i == browser.cursor,
-                                    format!("{glyph}  {}", it.name),
+                                    &format!("{glyph}  {}", it.name),
                                 );
                                 if resp.clicked() {
                                     do_select = Some(i);
@@ -1276,6 +1437,10 @@ impl GuiApp {
             };
             if ok {
                 self.reference.enabled = true;
+                if !as_target {
+                    // A new measurement while a profile is loaded → prompt re-save.
+                    self.touch_measurement();
+                }
             } else {
                 self.set_status("couldn't parse that curve file");
             }
@@ -1305,18 +1470,158 @@ fn ctl_present(c: RefCtl, has_meas: bool, has_stereo: bool) -> bool {
 }
 
 /// A labelled customizer slider with a value chip. Returns true on change.
+/// A center-zero customizer slider: label · divergence track (the fill grows out
+/// of the param's *true* 0 mark — green above 0, red below) · colour-signed value
+/// chip, with a min / 0 / max scale strip aligned beneath the track. Double-click
+/// the track to zero it. Returns true while the value changes.
 fn cust_slider(
     ui: &mut egui::Ui,
+    pal: &crate::theme::Palette,
     label: &str,
     value: &mut f64,
     range: std::ops::RangeInclusive<f64>,
     unit: &str,
     decimals: usize,
 ) -> bool {
+    let (lo, hi) = (*range.start(), *range.end());
+    let label_w = 46.0;
+    let chip_w = if unit.len() > 3 { 96.0 } else { 64.0 };
+    let gap = kit::SP_S;
+    let pad = 7.0;
+    let row_h = 20.0;
+    let sw = (ui.available_width() - label_w - chip_w - gap * 2.0).max(60.0);
+    // The 0 mark sits at the value's true fraction — NOT the geometric centre, so
+    // the asymmetric ranges (Tilt −2..+1, Bass −12..+18) read honestly.
+    let zero_frac = ((0.0 - lo) / (hi - lo)).clamp(0.0, 1.0) as f32;
+    let t = kit::tokens(ui);
     let mut changed = false;
-    kit::control_row(ui, 54.0, label, |ui| {
-        changed = kit::slider(ui, 200.0, value, range);
-        kit::value_chip(ui, 70.0, &format!("{:+.*} {}", decimals, *value, unit));
+
+    ui.horizontal(|ui| {
+        ui.set_min_height(row_h);
+        ui.spacing_mut().item_spacing.x = gap;
+        let (lr, _) = ui.allocate_exact_size(egui::vec2(label_w, row_h), egui::Sense::hover());
+        let (track, resp) =
+            ui.allocate_exact_size(egui::vec2(sw, row_h), egui::Sense::click_and_drag());
+        let (cr, _) = ui.allocate_exact_size(egui::vec2(chip_w, row_h), egui::Sense::hover());
+
+        let x0 = track.left() + pad;
+        let x1 = track.right() - pad;
+        let tw = (x1 - x0).max(1.0);
+        let cy = track.center().y;
+
+        if resp.double_clicked() {
+            if (*value).abs() > f64::EPSILON {
+                *value = 0.0;
+                changed = true;
+            }
+        } else if resp.dragged() || resp.clicked() {
+            if let Some(pp) = resp.interact_pointer_pos() {
+                let f = ((pp.x - x0) / tw).clamp(0.0, 1.0) as f64;
+                let nv = lo + f * (hi - lo);
+                if (nv - *value).abs() > f64::EPSILON {
+                    *value = nv;
+                    changed = true;
+                }
+            }
+        }
+
+        let frac = ((*value - lo) / (hi - lo)).clamp(0.0, 1.0) as f32;
+        let hx = x0 + frac * tw;
+        let zx = x0 + zero_frac * tw;
+        let signed = |up, dn, neu| {
+            if *value > 0.05 {
+                up
+            } else if *value < -0.05 {
+                dn
+            } else {
+                neu
+            }
+        };
+        let fill = signed(pal.boost, pal.cut, t.faint);
+
+        let p = ui.painter();
+        p.text(
+            egui::pos2(lr.left(), lr.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::FontId::proportional(kit::T_BODY),
+            t.text,
+        );
+        p.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(x0, cy - 2.0), egui::pos2(x1, cy + 2.0)),
+            2.0,
+            t.well,
+        );
+        let (fa, fb) = if hx >= zx { (zx, hx) } else { (hx, zx) };
+        p.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(fa, cy - 2.0), egui::pos2(fb, cy + 2.0)),
+            2.0,
+            fill,
+        );
+        p.line_segment(
+            [egui::pos2(zx, cy - 5.0), egui::pos2(zx, cy + 5.0)],
+            egui::Stroke::new(1.0, t.line),
+        );
+        let hr = if resp.hovered() || resp.dragged() {
+            7.0
+        } else {
+            6.0
+        };
+        p.circle_filled(egui::pos2(hx, cy), hr, t.text);
+        p.circle_stroke(egui::pos2(hx, cy), hr, egui::Stroke::new(1.5, t.well));
+        p.rect_filled(cr, kit::R_CTRL, t.well);
+        p.text(
+            cr.center(),
+            egui::Align2::CENTER_CENTER,
+            format!("{:+.*} {}", decimals, *value, unit),
+            egui::FontId::monospace(kit::T_CAPTION),
+            signed(pal.boost, pal.cut, t.dim),
+        );
     });
+
+    // Scale strip — min / 0 / max aligned under the track width.
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        let (_sp, _) = ui.allocate_exact_size(egui::vec2(label_w, 11.0), egui::Sense::hover());
+        let (sr, _) = ui.allocate_exact_size(egui::vec2(sw, 11.0), egui::Sense::hover());
+        let p = ui.painter();
+        let font = egui::FontId::proportional(9.0);
+        p.text(
+            egui::pos2(sr.left() + pad, sr.center().y),
+            egui::Align2::LEFT_CENTER,
+            format!("{lo:+.0}"),
+            font.clone(),
+            t.faint,
+        );
+        p.text(
+            egui::pos2(sr.right() - pad, sr.center().y),
+            egui::Align2::RIGHT_CENTER,
+            format!("{hi:+.0}"),
+            font.clone(),
+            t.faint,
+        );
+        let zx = sr.left() + pad + zero_frac * (sr.width() - 2.0 * pad);
+        p.text(
+            egui::pos2(zx, sr.center().y),
+            egui::Align2::CENTER_CENTER,
+            "0",
+            font,
+            t.faint,
+        );
+    });
+
     changed
+}
+
+/// Trim `text` with a trailing ellipsis so it fits `max_w` at `size`, measured
+/// against the live fonts (the thumbnail's "Stacking on …" label).
+fn elide(ui: &egui::Ui, text: &str, size: f32, max_w: f32) -> String {
+    if kit::text_width(ui, size, text) <= max_w {
+        return text.to_string();
+    }
+    let mut s = text.to_string();
+    while !s.is_empty() && kit::text_width(ui, size, &format!("{s}…")) > max_w {
+        s.pop();
+    }
+    format!("{}…", s.trim_end())
 }
