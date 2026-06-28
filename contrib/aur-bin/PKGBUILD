@@ -26,10 +26,10 @@ source=(
     "$_appid.metainfo.xml::$url/raw/v$pkgver/contrib/$_appid.metainfo.xml"
     "resonanced.service::$url/raw/v$pkgver/contrib/systemd/resonanced.service"
 )
-sha256sums=('9cbbfb663be1a0eba56a97870907f6c581f8f0fd50be4c053fc7af8733879074'
+sha256sums=('45c6a17c0b73859d97441000505dd53927997315854b208ca6ffd8736cd6b2e9'
             '539ea1381e509daa2098fde64d2aecda3de3a555855ea7a5a3cd90076f5e29c4'
             '429b3fe622774d0537269cef799fb94ed7bb4e752e1fce9f4f6f55bd8a88dd0d'
-            '9ebbd9d4c90a9f5ab50cea9af8a0feade1210304371c7a359a60f6f232e683b9'
+            '28c21006ec87bf8bc4b323be20c02148addc9852f3dc0f96638981057cba35b6'
             '0d2f8ca3ae4472556000845ae8acfcfbe4e69cea799739910a8b9a727f58d37a')
 
 package() {
