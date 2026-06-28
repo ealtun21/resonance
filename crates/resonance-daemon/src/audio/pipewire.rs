@@ -20,7 +20,10 @@ use spa_sys::{SPA_DIRECTION_INPUT, SPA_DIRECTION_OUTPUT, spa_hook, spa_io_positi
 use std::{
     collections::HashMap,
     os::raw::c_void,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -54,9 +57,18 @@ struct GraphState {
     metadata_obj: Option<pw::metadata::Metadata>,
     /// Listener that captures the pre-existing default sink from metadata.
     metadata_listener: Option<pw::metadata::MetadataListener>,
-    /// PipeWire's default sink name *before* Resonance took over — our first-choice
-    /// downstream target. Written by the metadata listener, read in `reroute`.
+    /// PipeWire's default sink name *before* Resonance took over — the fallback
+    /// downstream target. Written once by the metadata listener, read in `reroute`.
     original_default: Arc<Mutex<Option<String>>>,
+    /// The latest *real* default sink the user/WirePlumber selected (≠ our own
+    /// "resonance"). Updated live by the metadata listener; when not pinned, this
+    /// is the device Resonance follows, so picking an output in the system
+    /// switcher (or a BT/headset hot-plug) retargets us. See `find_target_sink`.
+    live_default: Arc<Mutex<Option<String>>>,
+    /// Set by the metadata listener when the real system default changed, so the
+    /// loop timer re-evaluates the target (reroute) and re-claims default for
+    /// "resonance" (keeping apps feeding the EQ). Self-claims are filtered out.
+    default_dirty: Arc<AtomicBool>,
     default_set: bool,
     /// Reports the node.name of the real sink Resonance currently feeds, on change.
     output_tx: tokio::sync::mpsc::UnboundedSender<String>,
@@ -158,6 +170,8 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
         metadata_obj: None,
         metadata_listener: None,
         original_default: Arc::new(Mutex::new(None)),
+        live_default: Arc::new(Mutex::new(None)),
+        default_dirty: Arc::new(AtomicBool::new(false)),
         default_set: false,
         output_tx,
         last_output: None,
@@ -404,8 +418,20 @@ fn build_and_run(fd_ptr: *mut FilterData, gs: &Arc<Mutex<GraphState>>) -> Result
             g.preferred_output = if name.is_empty() { None } else { Some(name) };
             reroute_needed = true;
         }
+        // The system default sink changed (user picked an output in the system
+        // switcher, or a device hot-plugged). When unpinned, `find_target_sink`
+        // now follows it; either way re-claim the default for "resonance" so apps
+        // keep playing into the EQ instead of moving to the device the user picked.
+        let default_changed = g.default_dirty.swap(false, Ordering::Relaxed);
+        if default_changed {
+            reroute_needed = true;
+        }
         if reroute_needed {
             reroute(&mut g);
+        }
+        if default_changed {
+            g.default_set = false;
+            try_set_default(&mut g);
         }
         // Live channel-count following: when the output device's channel count
         // differs from the filter's, record it and quit the loop so the reconnect
@@ -532,17 +558,26 @@ fn on_global(
             };
             if props.get("metadata.name") == Some("default") && g.metadata_obj.is_none() {
                 if let Ok(meta) = registry.bind::<pw::metadata::Metadata, _>(obj) {
-                    // Capture the existing default sink before we override it, so
-                    // our first downstream target is whatever PipeWire used before.
+                    // Track the system default sink. `original_default` latches the
+                    // first one (our fallback); `live_default` follows every change
+                    // to a real sink so the system output switcher (and BT/headset
+                    // hot-plugs) retarget Resonance. Our own re-claim of the default
+                    // (name == "resonance") is filtered so it can't feed back.
                     let orig = Arc::clone(&g.original_default);
+                    let live = Arc::clone(&g.live_default);
+                    let dirty = Arc::clone(&g.default_dirty);
                     let listener = meta
                         .add_listener_local()
                         .property(move |_subject, key, _type, value| {
                             if key == Some("default.audio.sink") {
                                 if let Some(name) = value.and_then(parse_metadata_name) {
-                                    let mut o = orig.lock().unwrap();
-                                    if o.is_none() {
-                                        *o = Some(name);
+                                    if name != "resonance" {
+                                        let mut o = orig.lock().unwrap();
+                                        if o.is_none() {
+                                            *o = Some(name.clone());
+                                        }
+                                        *live.lock().unwrap() = Some(name);
+                                        dirty.store(true, Ordering::Relaxed);
                                     }
                                 }
                             }
@@ -575,9 +610,11 @@ fn on_global_remove(g: &mut GraphState, id: u32) {
 // Link / routing helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The real output sink Resonance feeds, by priority: the user-selected sink
-/// (SetOutputTarget), else PipeWire's default from before Resonance took over,
-/// else the lowest-id real sink (deterministic). `None` if none is known yet.
+/// The real output sink Resonance feeds, by priority: the explicit pin
+/// (SetOutputTarget) — which always wins; else the live system default sink
+/// (so the system output switcher / BT hot-plug retargets us when unpinned);
+/// else PipeWire's default from before Resonance took over; else the lowest-id
+/// real sink (deterministic). `None` if none is known yet.
 fn find_target_sink(g: &GraphState) -> Option<u32> {
     let find_sink = |name: &str| -> Option<u32> {
         g.nodes
@@ -590,6 +627,13 @@ fn find_target_sink(g: &GraphState) -> Option<u32> {
     g.preferred_output
         .as_deref()
         .and_then(&find_sink)
+        .or_else(|| {
+            g.live_default
+                .lock()
+                .unwrap()
+                .as_deref()
+                .and_then(&find_sink)
+        })
         .or_else(|| {
             g.original_default
                 .lock()
