@@ -163,6 +163,14 @@ impl SharedState {
                     dsp_load: 0.0,
                     dsp_frame_us: 0,
                 });
+                // The Windows daemon has no audio backend, so the APO is the only
+                // source of the live endpoint rate; surface it so `status` shows
+                // the real rate (e.g. 96 kHz) instead of the mirror chain's
+                // construction default. 0 until the APO has locked a format.
+                if t.sample_rate > 0.0 {
+                    inner.meters.set_sample_rate(t.sample_rate as f64);
+                    inner.meters.set_capture_rate(t.sample_rate as f64);
+                }
             }
         } else {
             // Gate closed (no client watching): clear the cached spectrum so a

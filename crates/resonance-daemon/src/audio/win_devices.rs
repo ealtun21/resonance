@@ -206,6 +206,39 @@ pub fn set_default_render_endpoint(id: &str) -> bool {
     }
 }
 
+/// The per-endpoint APO attach script, compiled into the daemon so dynamic
+/// attach has no runtime file dependency (the installer ships it too).
+const ATTACH_ENDPOINT_PS: &str = include_str!("../../../../contrib/windows/attach-endpoint.ps1");
+
+/// The registry GUID for a render endpoint, parsed from its WASAPI id
+/// (`{0.0.0.00000000}.{<guid>}` → `{<guid>}`).
+pub fn endpoint_guid(wasapi_id: &str) -> Option<&str> {
+    wasapi_id.rsplit('.').next().filter(|s| s.starts_with('{'))
+}
+
+/// Dynamically attach the Resonance APO to one render endpoint (by registry
+/// GUID). Runs the bundled per-endpoint script via PowerShell — it reuses the
+/// installer's proven ownership/slot recipe, is idempotent (a "already attached"
+/// fast path), and never restarts audiosrv. Returns the script's status line.
+/// Lets a hot-plugged DAC / Bluetooth device get the EQ without re-running the
+/// installer (the daemon calls this for every newly-seen endpoint).
+pub fn attach_apo_endpoint(guid: &str) -> String {
+    use std::io::Write;
+    let script = std::env::temp_dir().join("resonance_attach_endpoint.ps1");
+    if let Ok(mut f) = std::fs::File::create(&script) {
+        let _ = f.write_all(ATTACH_ENDPOINT_PS.as_bytes());
+    }
+    match std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(&script)
+        .env("RESONANCE_ATTACH_GUID", guid)
+        .output()
+    {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        Err(e) => format!("attach spawn failed: {e}"),
+    }
+}
+
 /// Set every active virtual-cable endpoint (render + capture) to `target_rate`
 /// so the cable performs no internal sample-rate conversion. Best-effort: any
 /// failure (no cable, format locked while streaming) is ignored.

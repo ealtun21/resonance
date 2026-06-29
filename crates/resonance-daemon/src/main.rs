@@ -232,9 +232,24 @@ async fn main() -> Result<()> {
         // the COM calls block, and must never stall the async IPC runtime.
         let dev_state = shared.clone();
         std::thread::spawn(move || {
+            // Render endpoints we've already auto-attached the APO to this run.
+            // Poll-and-diff (not IMMNotificationClient OnDeviceAdded, which only
+            // fires for never-before-seen devices — re-connected DACs/BT slip
+            // through it) so EVERY newly-appearing endpoint gets the APO: a
+            // hot-plugged DAC or a Bluetooth headset is attached on the spot,
+            // without re-running the installer.
+            let mut attached: std::collections::HashSet<String> = std::collections::HashSet::new();
             loop {
                 let endpoints = audio::win_devices::enumerate_render_endpoints();
                 let default = audio::win_devices::default_render_id();
+                for (id, _name) in &endpoints {
+                    if let Some(guid) = audio::win_devices::endpoint_guid(id) {
+                        if attached.insert(guid.to_string()) {
+                            let r = audio::win_devices::attach_apo_endpoint(guid);
+                            info!("APO auto-attach {guid}: {r}");
+                        }
+                    }
+                }
                 {
                     let mut inner = dev_state.0.lock().unwrap();
                     inner.available_sinks = endpoints.iter().map(|(id, _)| id.clone()).collect();
