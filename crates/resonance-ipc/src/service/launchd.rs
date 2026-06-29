@@ -325,8 +325,7 @@ pub fn uninstall() -> io::Result<()> {
 /// our `is_enabled`, which reflects the persistent `RunAtLoad` autostart intent).
 /// `launchctl print` exits 0 iff the service exists in the domain.
 fn is_loaded() -> bool {
-    launchctl(&["print", &service_target()])
-        .is_ok_and(|o| o.status.success())
+    launchctl(&["print", &service_target()]).is_ok_and(|o| o.status.success())
 }
 
 pub fn start() -> io::Result<()> {
@@ -462,14 +461,12 @@ mod tests {
         let enabled = plist_text(true, exec);
         let disabled = plist_text(false, exec);
         let after = |s: &str| {
-            s.split("<key>RunAtLoad</key>")
-                .nth(1)
-                .is_some_and(|t| {
-                    let tr = t.find("<true/>");
-                    let fa = t.find("<false/>");
-                    matches!((tr, fa), (Some(a), Some(b)) if a < b)
-                        || matches!((tr, fa), (Some(_), None))
-                })
+            s.split("<key>RunAtLoad</key>").nth(1).is_some_and(|t| {
+                let tr = t.find("<true/>");
+                let fa = t.find("<false/>");
+                matches!((tr, fa), (Some(a), Some(b)) if a < b)
+                    || matches!((tr, fa), (Some(_), None))
+            })
         };
         assert!(after(&enabled), "enabled plist must have RunAtLoad <true/>");
         assert!(
