@@ -29,6 +29,7 @@ impl ChannelMask {
 
     /// Mask with a single channel index set. Indices ≥ [`MAX_CHANNELS`] yield an
     /// empty mask rather than wrapping the shift.
+    #[must_use]
     pub fn single(ch: usize) -> Self {
         if ch >= MAX_CHANNELS {
             ChannelMask(0)
@@ -50,38 +51,45 @@ impl ChannelMask {
     }
 
     /// Raw bitset — for serialization at the IPC boundary.
+    #[must_use]
     pub fn bits(self) -> u64 {
         self.0
     }
 
     /// Reconstruct from a raw bitset.
+    #[must_use]
     pub fn from_bits(bits: u64) -> Self {
         ChannelMask(bits)
     }
 
     /// Does this mask include channel `ch`?
     #[inline]
+    #[must_use]
     pub fn contains(self, ch: usize) -> bool {
         ch < MAX_CHANNELS && (self.0 & (1u64 << ch)) != 0
     }
 
     /// Copy with channel `ch` added.
+    #[must_use]
     pub fn with(self, ch: usize) -> Self {
         ChannelMask(self.0 | ChannelMask::single(ch).0)
     }
 
     /// Copy with channel `ch` removed.
+    #[must_use]
     pub fn without(self, ch: usize) -> Self {
         ChannelMask(self.0 & !ChannelMask::single(ch).0)
     }
 
     /// True when no channel is selected.
+    #[must_use]
     pub fn is_empty(self) -> bool {
         self.0 == 0
     }
 
     /// True when every channel in `0..channels` is selected (the band is global
     /// for the current layout). `ALL` is always global.
+    #[must_use]
     pub fn is_global(self, channels: usize) -> bool {
         if channels == 0 || channels > MAX_CHANNELS {
             return self.0 == u64::MAX;
@@ -117,6 +125,7 @@ pub struct ChannelMatrix {
 impl ChannelMatrix {
     /// Build from explicit row-major gains. Returns `None` unless
     /// `gains.len() == out_ch * in_ch` (and neither dimension is zero).
+    #[must_use]
     pub fn new(in_ch: usize, out_ch: usize, gains: Vec<f64>) -> Option<Self> {
         if in_ch == 0 || out_ch == 0 || gains.len() != in_ch.saturating_mul(out_ch) {
             return None;
@@ -129,6 +138,7 @@ impl ChannelMatrix {
     }
 
     /// Square identity (`out == in`, unity diagonal).
+    #[must_use]
     pub fn identity(channels: usize) -> Self {
         let mut gains = vec![0.0; channels * channels];
         for c in 0..channels {
@@ -143,6 +153,7 @@ impl ChannelMatrix {
 
     /// Identity with channels `a` and `b` swapped — e.g. L/R swap is
     /// `swap(2, 0, 1)`. Out-of-range or equal indices leave identity unchanged.
+    #[must_use]
     pub fn swap(channels: usize, a: usize, b: usize) -> Self {
         let mut m = Self::identity(channels);
         if a < channels && b < channels && a != b {
@@ -154,20 +165,26 @@ impl ChannelMatrix {
         m
     }
 
+    #[must_use]
     pub fn in_ch(&self) -> usize {
         self.in_ch
     }
 
+    #[must_use]
     pub fn out_ch(&self) -> usize {
         self.out_ch
     }
 
+    #[must_use]
     pub fn gains(&self) -> &[f64] {
         &self.gains
     }
 
     /// True when this is the square identity — the chain can then skip routing
     /// entirely and process in place (the zero-cost common path).
+    // float_cmp: identity test compares each gain against exact 1.0 / 0.0.
+    #[allow(clippy::float_cmp)]
+    #[must_use]
     pub fn is_identity(&self) -> bool {
         if self.in_ch != self.out_ch {
             return false;

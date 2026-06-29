@@ -11,7 +11,13 @@ pub enum FacError {
     ParseError { line: usize, msg: String },
 }
 
-/// Parse a FxSound .fac preset file from its text content.
+/// Parse a `FxSound` .fac preset file from its text content.
+///
+/// # Errors
+///
+/// Returns [`FacError::MissingMagic`] when the file lacks the expected header,
+/// [`FacError::UnexpectedEof`] when it ends before a required field, or
+/// [`FacError::ParseError`] when a field cannot be parsed.
 pub fn parse_fac(content: &str) -> Result<Preset, FacError> {
     let mut lines = content.lines().enumerate().peekable();
 
@@ -159,7 +165,7 @@ pub fn parse_fac(content: &str) -> Result<Preset, FacError> {
     }
 
     // MIDI 0–127 → 0.0–1.0
-    let midi_norm = |v: i32| v as f64 / 127.0;
+    let midi_norm = |v: i32| f64::from(v) / 127.0;
 
     let effects = FxEffects {
         fidelity: EffectState {

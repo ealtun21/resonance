@@ -42,6 +42,7 @@ impl ChannelMask {
     pub const ALL: ChannelMask = ChannelMask(u64::MAX);
     pub const NONE: ChannelMask = ChannelMask(0);
 
+    #[must_use]
     pub fn single(ch: usize) -> Self {
         Self::from_dsp(DspMask::single(ch))
     }
@@ -50,27 +51,33 @@ impl ChannelMask {
         Self::from_dsp(DspMask::from_indices(it))
     }
 
+    #[must_use]
     pub fn contains(self, ch: usize) -> bool {
         self.to_dsp().contains(ch)
     }
 
+    #[must_use]
     pub fn with(self, ch: usize) -> Self {
         Self::from_dsp(self.to_dsp().with(ch))
     }
 
+    #[must_use]
     pub fn without(self, ch: usize) -> Self {
         Self::from_dsp(self.to_dsp().without(ch))
     }
 
     /// True when every channel in `0..channels` is selected (a global band).
+    #[must_use]
     pub fn is_global(self, channels: usize) -> bool {
         self.to_dsp().is_global(channels)
     }
 
+    #[must_use]
     pub fn to_dsp(self) -> DspMask {
         DspMask::from_bits(self.0)
     }
 
+    #[must_use]
     pub fn from_dsp(m: DspMask) -> Self {
         ChannelMask(m.bits())
     }
@@ -94,10 +101,12 @@ pub struct RoutingMatrix {
 
 impl RoutingMatrix {
     /// Validate + convert to the DSP matrix. `None` if dimensions are bad.
+    #[must_use]
     pub fn to_dsp(&self) -> Option<DspMatrix> {
         DspMatrix::new(self.in_ch, self.out_ch, self.gains.clone())
     }
 
+    #[must_use]
     pub fn from_dsp(m: &DspMatrix) -> Self {
         Self {
             in_ch: m.in_ch(),
@@ -106,18 +115,21 @@ impl RoutingMatrix {
         }
     }
 
+    #[must_use]
     pub fn identity(channels: usize) -> Self {
         Self::from_dsp(&DspMatrix::identity(channels))
     }
 
+    #[must_use]
     pub fn swap(channels: usize, a: usize, b: usize) -> Self {
         Self::from_dsp(&DspMatrix::swap(channels, a, b))
     }
 }
 
-/// Standard channel position labels for a given count (WAVE / PipeWire order),
+/// Standard channel position labels for a given count (WAVE / `PipeWire` order),
 /// for UI display and APO `Channel:` mapping. Unknown counts fall back to
 /// `CH0..CHn`.
+#[must_use]
 pub fn default_channel_layout(channels: usize) -> Vec<String> {
     let labels: &[&str] = match channels {
         0 => &[],
@@ -131,7 +143,10 @@ pub fn default_channel_layout(channels: usize) -> Vec<String> {
         8 => &["FL", "FR", "FC", "LFE", "RL", "RR", "SL", "SR"],
         _ => return (0..channels).map(|i| format!("CH{i}")).collect(),
     };
-    labels.iter().map(|s| s.to_string()).collect()
+    labels
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,9 +158,9 @@ pub enum Command {
     ImportPreset { path: String, name: Option<String> },
     /// Rename a saved profile.
     RenameProfile { from: String, to: String },
-    /// Set an FxEffect intensity (0.0–1.0)
+    /// Set an `FxEffect` intensity (0.0–1.0)
     SetEffectIntensity { effect: FxEffectId, value: f64 },
-    /// Enable or disable a specific FxEffect
+    /// Enable or disable a specific `FxEffect`
     SetEffectEnabled { effect: FxEffectId, enabled: bool },
     /// Set EQ band parameters by band index
     SetBand {
@@ -176,7 +191,7 @@ pub enum Command {
     },
     /// Reset to defaults: flat EQ (no bands), all effects off, 0 dB preamp
     Reset,
-    /// Export the current EQ (preamp + bands) to an EqualizerAPO `.txt` file
+    /// Export the current EQ (preamp + bands) to an `EqualizerAPO` `.txt` file
     ExportApo { path: String },
     /// Export the full current chain state to our native `.toml` profile format
     /// at an arbitrary path (round-trips via `ImportPreset` on a `.toml` file)
@@ -234,7 +249,7 @@ pub enum Command {
     /// Restrict (or widen) which channels an existing band applies to.
     /// `ChannelMask::ALL` makes the band global again (the default).
     SetBandChannels { index: usize, channels: ChannelMask },
-    /// Set the output routing/remap matrix. In-graph (PipeWire) only a square
+    /// Set the output routing/remap matrix. In-graph (`PipeWire`) only a square
     /// remap at the current channel count is applied; up/downmix is daemon-path.
     SetChannelRouting { matrix: RoutingMatrix },
     /// Swap two output channels — convenience over a swap routing matrix, built
@@ -251,7 +266,7 @@ pub enum AbSlot {
     B,
 }
 
-/// Serializable mirror of FxEffect (avoids depending on resonance-dsp in serde derives)
+/// Serializable mirror of `FxEffect` (avoids depending on resonance-dsp in serde derives)
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum FxEffectId {
     Fidelity,
@@ -274,6 +289,7 @@ impl FxEffectId {
 
     /// Full display name. (The TUI keeps its own narrower labels for the effects
     /// column; everything else should use this.)
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             FxEffectId::Fidelity => "Fidelity",
@@ -287,11 +303,13 @@ impl FxEffectId {
     /// Bipolar effects (Surround, Bass) accept negative intensity (narrow / cut)
     /// down to −1; the rest are 0..1. This was duplicated — and had drifted —
     /// across the TUI (index `2|4`) and GUI (`matches!`) before.
+    #[must_use]
     pub fn is_bipolar(self) -> bool {
         matches!(self, FxEffectId::Surround | FxEffectId::Bass)
     }
 
     /// Minimum intensity: −1 for bipolar effects, 0 otherwise.
+    #[must_use]
     pub fn min(self) -> f64 {
         if self.is_bipolar() { -1.0 } else { 0.0 }
     }
@@ -325,6 +343,7 @@ pub enum BandType {
 
 impl BandType {
     /// Full human-readable name (used when the table is wide enough).
+    #[must_use]
     pub fn full(self) -> &'static str {
         match self {
             BandType::Peaking => "Peaking",
@@ -339,6 +358,7 @@ impl BandType {
     }
 
     /// Short label for table columns.
+    #[must_use]
     pub fn abbrev(self) -> &'static str {
         match self {
             BandType::Peaking => "PK",
@@ -353,6 +373,7 @@ impl BandType {
     }
 
     /// Cycle order used by the TUI `t` key.
+    #[must_use]
     pub fn next(self) -> Self {
         match self {
             BandType::Peaking => BandType::LowShelf,
@@ -451,12 +472,12 @@ pub struct DaemonState {
     pub active_output: Option<String>,
     /// Profile mapped to the active output (auto-loaded), if any
     pub mapped_profile: Option<String>,
-    /// All available PipeWire Audio/Sink node names (excluding Resonance itself)
+    /// All available `PipeWire` Audio/Sink node names (excluding Resonance itself)
     pub available_sinks: Vec<String>,
     /// Friendly `node.description` per sink, as `(node_name, description)` pairs.
     /// Commands still key by `node_name`; this is purely for user-facing display.
     pub sink_descriptions: Vec<(String, String)>,
-    /// The preferred output node name set by SetOutputTarget (if any)
+    /// The preferred output node name set by `SetOutputTarget` (if any)
     pub preferred_output: Option<String>,
     /// Live level + DSP-load meters.
     pub meters: Meters,
@@ -465,6 +486,7 @@ pub struct DaemonState {
 impl DaemonState {
     /// User-facing label for a sink `node.name`: its `node.description` if known,
     /// else the last dot-segment of the node name, else `(default)` when empty.
+    #[must_use]
     pub fn sink_label(&self, node: &str) -> String {
         if node.is_empty() {
             return "(default)".to_string();
@@ -531,6 +553,7 @@ pub struct EffectsState {
 impl EffectsState {
     /// `(intensity, enabled)` for one effect — the single place the flat fields
     /// map to the effect enum, so iterating `FxEffectId::ALL` needs no unroll.
+    #[must_use]
     pub fn get(&self, id: FxEffectId) -> (f64, bool) {
         match id {
             FxEffectId::Fidelity => (self.fidelity_intensity, self.fidelity_enabled),

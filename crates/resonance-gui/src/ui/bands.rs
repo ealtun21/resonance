@@ -28,7 +28,7 @@ pub(crate) fn channel_tag(mask: ChannelMask, layout: &[String], channels: usize)
     }
     let names: Vec<&str> = (0..channels)
         .filter(|&c| mask.contains(c))
-        .map(|c| layout.get(c).map(String::as_str).unwrap_or("?"))
+        .map(|c| layout.get(c).map_or("?", String::as_str))
         .collect();
     match names.len() {
         0 => "none".to_string(),
@@ -130,7 +130,7 @@ impl GuiApp {
         // the full name lives in its dropdown menu.
         let type_w = 50.0;
         let gap = kit::SP_S;
-        let n_cols = 6 + show_type as usize + show_graph as usize + show_ch as usize;
+        let n_cols = 6 + usize::from(show_type) + usize::from(show_graph) + usize::from(show_ch);
         let fixed = IDX_W
             + ON_W
             + if show_type { type_w } else { 0.0 }
@@ -320,8 +320,7 @@ impl GuiApp {
                                     } else {
                                         (0..state.channels)
                                             .find(|&c| b.channels.contains(c))
-                                            .map(channel_color)
-                                            .unwrap_or(t.dim)
+                                            .map_or(t.dim, channel_color)
                                     };
                                     let resp = kit::tag_chip(ui, CH_W, 22.0, &tag, col);
                                     egui::Popup::menu(&resp)

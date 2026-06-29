@@ -1,8 +1,12 @@
 //! Offline N-channel DSP harness. Deterministic, device-free, CI-friendly —
 //! proves per-channel EQ targeting, the routing matrix, dynamic channel-count
 //! changes, and that every effect survives non-stereo layouts. This is the
-//! correctness backbone for the cross-platform N-channel work (no PipeWire /
-//! CoreAudio / WASAPI needed to run it).
+//! correctness backbone for the cross-platform N-channel work (no `PipeWire` /
+//! `CoreAudio` / WASAPI needed to run it).
+
+// Test assertions compare exact expected values (routing copies samples
+// verbatim), so float equality is intended throughout this module.
+#![allow(clippy::float_cmp)]
 
 use crate::chain::{FxEffect, ProcessorChain};
 use crate::channel::{ChannelMask, ChannelMatrix};
@@ -63,7 +67,7 @@ fn channel_mask_semantics() {
 fn matrix_identity_is_passthrough() {
     let m = ChannelMatrix::identity(4);
     assert!(m.is_identity());
-    let src: Vec<f64> = (0..40).map(|i| i as f64 * 0.1).collect();
+    let src: Vec<f64> = (0..40).map(|i| f64::from(i) * 0.1).collect();
     let mut dst = vec![0.0; 40];
     m.apply(&src, &mut dst);
     assert_eq!(src, dst);
@@ -181,7 +185,9 @@ fn set_channels_resizes_and_passes_through() {
     assert_eq!(chain.channels, 6);
 
     // Default chain (no bands, all effects at 0) is a bit-exact passthrough at 6ch.
-    let input: Vec<f64> = (0..600).map(|i| ((i as f64) * 0.011).sin() * 0.7).collect();
+    let input: Vec<f64> = (0..600)
+        .map(|i| (f64::from(i) * 0.011).sin() * 0.7)
+        .collect();
     let mut buf = input.clone();
     chain.process(&mut buf);
     assert_eq!(buf, input);

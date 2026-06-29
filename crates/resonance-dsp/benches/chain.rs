@@ -1,7 +1,7 @@
 //! Throughput benchmark for the per-frame audio hot path.
 //!
 //! Run with `cargo bench -p resonance-dsp`. Catches DSP perf regressions before
-//! they ship — the chain runs on the PipeWire RT thread, so frame time matters.
+//! they ship — the chain runs on the `PipeWire` RT thread, so frame time matters.
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use resonance_dsp::chain::{FxEffect, ProcessorChain};
@@ -10,7 +10,7 @@ use std::hint::black_box;
 
 const SAMPLE_RATE: f64 = 48_000.0;
 const CHANNELS: usize = 2;
-/// One PipeWire quantum-ish block (256 frames × 2 ch).
+/// One `PipeWire` quantum-ish block (256 frames × 2 ch).
 const FRAMES: usize = 256;
 
 /// Stereo sine sweep test buffer, interleaved.

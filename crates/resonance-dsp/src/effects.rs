@@ -24,9 +24,9 @@ fn butterworth_hp(fc: f64, sr: f64) -> (f64, f64, f64, f64, f64) {
     let alpha = sin_w / (2.0_f64.sqrt()); // Q = 1/√2 (Butterworth)
     let a0 = 1.0 + alpha;
     (
-        ((1.0 + cos_w) / 2.0) / a0,
+        f64::midpoint(1.0, cos_w) / a0,
         (-(1.0 + cos_w)) / a0,
-        ((1.0 + cos_w) / 2.0) / a0,
+        f64::midpoint(1.0, cos_w) / a0,
         (-2.0 * cos_w) / a0,
         (1.0 - alpha) / a0,
     )
@@ -71,6 +71,7 @@ pub struct FidelityEffect {
 }
 
 impl FidelityEffect {
+    #[must_use]
     pub fn new(channels: usize, sample_rate: f64) -> Self {
         let (b0, b1, b2, a1, a2) = butterworth_hp(AURAL_HP_HZ, sample_rate);
         Self {
@@ -241,6 +242,7 @@ pub struct AmbienceEffect {
 }
 
 impl AmbienceEffect {
+    #[must_use]
     pub fn new(channels: usize, sample_rate: f64) -> Self {
         let scale = sample_rate / 44100.0;
         let combs = (0..channels)
@@ -364,6 +366,7 @@ pub struct SurroundEffect {
 }
 
 impl SurroundEffect {
+    #[must_use]
     pub fn new(_sample_rate: f64) -> Self {
         Self {
             intensity: 0.0,
@@ -442,6 +445,7 @@ pub struct DynamicBoostEffect {
 }
 
 impl DynamicBoostEffect {
+    #[must_use]
     pub fn new(sample_rate: f64) -> Self {
         let delay_samples = (MAXI_LOOKAHEAD_MS / 1000.0 * sample_rate).ceil() as usize;
         let attack_beta = (-2.2_f64 / (MAXI_ATTACK_MS / 1000.0 * sample_rate)).exp();
@@ -558,6 +562,7 @@ pub struct BassBoostEffect {
 }
 
 impl BassBoostEffect {
+    #[must_use]
     pub fn new(channels: usize, sample_rate: f64) -> Self {
         let coeffs = crate::filter::BiquadCoeffs::peaking(BASS_CENTER_HZ, 0.0, BASS_Q, sample_rate)
             .unwrap_or(crate::filter::BiquadCoeffs {
@@ -605,7 +610,9 @@ impl Effect for BassBoostEffect {
     }
 
     fn reset(&mut self) {
-        self.states.iter_mut().for_each(|s| s.reset());
+        self.states
+            .iter_mut()
+            .for_each(super::filter::BiquadState::reset);
     }
 
     fn set_intensity(&mut self, v: f64) {

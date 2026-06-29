@@ -1,10 +1,10 @@
-//! AutoEq integration: download a headphone correction from the community
+//! `AutoEq` integration: download a headphone correction from the community
 //! database and drop it into the XDG preset library.
 //!
-//! The AutoEq `results/INDEX.md` lists every measurement as
+//! The `AutoEq` `results/INDEX.md` lists every measurement as
 //! `- [Display Name](./source/form/Model) by Source`, where the link is the
 //! (URL-encoded) result directory. The parametric correction lives in that dir
-//! as `<Model> ParametricEQ.txt` — already in EqualizerAPO syntax, which our
+//! as `<Model> ParametricEQ.txt` — already in `EqualizerAPO` syntax, which our
 //! parser reads directly.
 
 use anyhow::{Result, bail};

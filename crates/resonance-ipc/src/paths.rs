@@ -62,6 +62,7 @@ fn data_home() -> PathBuf {
 }
 
 /// Writable user preset library.
+#[must_use]
 pub fn user_preset_dir() -> PathBuf {
     data_home().join("resonance").join("presets")
 }
@@ -103,6 +104,7 @@ fn system_preset_dirs() -> Vec<PathBuf> {
 }
 
 /// All preset search dirs, user library first (so it shadows system entries).
+#[must_use]
 pub fn preset_search_dirs() -> Vec<PathBuf> {
     let mut dirs = vec![user_preset_dir()];
     dirs.extend(system_preset_dirs());
@@ -112,6 +114,7 @@ pub fn preset_search_dirs() -> Vec<PathBuf> {
 /// Writable user curve library: reference *target* curves and saved/imported
 /// measurements the user drops in or exports from the target customizer. Sits
 /// beside the preset library so the existing file browser can reach it.
+#[must_use]
 pub fn user_curve_dir() -> PathBuf {
     data_home().join("resonance").join("curves")
 }
@@ -140,6 +143,7 @@ fn cache_home() -> PathBuf {
 }
 
 /// Cache dir for downloaded squig.link measurement curves and database indexes.
+#[must_use]
 pub fn curve_cache_dir() -> PathBuf {
     cache_home().join("resonance").join("curves")
 }
@@ -151,6 +155,7 @@ pub fn curve_cache_dir() -> PathBuf {
 /// macOS: `$XDG_CONFIG_HOME/resonance` if set, else
 ///        `~/Library/Application Support/resonance` (Apple's per-user config
 ///        location — macOS has no separate "config" vs "data" split).
+#[must_use]
 pub fn config_dir() -> PathBuf {
     if let Some(p) = env_dir("XDG_CONFIG_HOME") {
         return p.join("resonance");
@@ -177,6 +182,7 @@ pub fn config_dir() -> PathBuf {
 ///   macOS:   `~/Library/Logs/resonance/resonanced.log`
 ///   Windows: `<config_dir>/resonanced.log`
 ///   Linux:   `/tmp/resonanced.log`
+#[must_use]
 pub fn daemon_log_path() -> PathBuf {
     #[cfg(target_os = "macos")]
     let dir = home().join("Library").join("Logs").join("resonance");
@@ -193,6 +199,7 @@ pub fn daemon_log_path() -> PathBuf {
 /// Linux: `$XDG_RUNTIME_DIR` (per the XDG Base Dir spec).
 /// macOS: `$TMPDIR` (per-user temp dir, e.g. `/var/folders/.../T/`).
 /// Fallback: `/tmp` (shared, but it works).
+#[must_use]
 pub fn runtime_dir() -> PathBuf {
     if let Some(p) = env_dir("XDG_RUNTIME_DIR") {
         return p;
@@ -239,6 +246,7 @@ pub fn read_port_file() -> Option<u16> {
 /// Resolve the IPC Unix-socket path: respects `$RESONANCE_SOCKET` (any path),
 /// else falls back to `<runtime_dir()>/resonance.sock`. Shared by the daemon
 /// and every client so they stay in lock-step.
+#[must_use]
 pub fn default_socket_path() -> PathBuf {
     if let Ok(p) = std::env::var(crate::SOCKET_PATH_ENV) {
         if !p.is_empty() {

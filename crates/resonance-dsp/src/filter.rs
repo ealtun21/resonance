@@ -40,6 +40,10 @@ pub struct BiquadCoeffs {
 }
 
 impl BiquadCoeffs {
+    /// # Errors
+    /// Returns [`FilterError`] if `freq`, `q`, or `sample_rate` are non-finite or
+    /// out of range (`freq` must be in `(0, sample_rate/2)`, `q > 0`,
+    /// `sample_rate > 0`).
     pub fn peaking(freq: f64, gain_db: f64, q: f64, sample_rate: f64) -> Result<Self, FilterError> {
         validate(freq, q, sample_rate)?;
         let a = 10f64.powf(gain_db / 40.0);
@@ -58,6 +62,11 @@ impl BiquadCoeffs {
 
     /// Low shelf with a resonance/slope `q`. `q = 1/√2 ≈ 0.707` gives the
     /// classic maximally-flat (S=1) shelf; higher `q` adds a resonant bump.
+    ///
+    /// # Errors
+    /// Returns [`FilterError`] if `freq`, `q`, or `sample_rate` are non-finite or
+    /// out of range (`freq` must be in `(0, sample_rate/2)`, `q > 0`,
+    /// `sample_rate > 0`).
     pub fn low_shelf(
         freq: f64,
         gain_db: f64,
@@ -81,6 +90,11 @@ impl BiquadCoeffs {
     }
 
     /// High shelf with a resonance/slope `q` (see [`Self::low_shelf`]).
+    ///
+    /// # Errors
+    /// Returns [`FilterError`] if `freq`, `q`, or `sample_rate` are non-finite or
+    /// out of range (`freq` must be in `(0, sample_rate/2)`, `q > 0`,
+    /// `sample_rate > 0`).
     pub fn high_shelf(
         freq: f64,
         gain_db: f64,
@@ -103,6 +117,10 @@ impl BiquadCoeffs {
         .normalize((a + 1.0) - (a - 1.0) * cos_w0 + sq))
     }
 
+    /// # Errors
+    /// Returns [`FilterError`] if `freq`, `q`, or `sample_rate` are non-finite or
+    /// out of range (`freq` must be in `(0, sample_rate/2)`, `q > 0`,
+    /// `sample_rate > 0`).
     pub fn low_pass(freq: f64, q: f64, sample_rate: f64) -> Result<Self, FilterError> {
         validate(freq, q, sample_rate)?;
         let w0 = 2.0 * PI * freq / sample_rate;
@@ -118,21 +136,29 @@ impl BiquadCoeffs {
         .normalize(1.0 + alpha))
     }
 
+    /// # Errors
+    /// Returns [`FilterError`] if `freq`, `q`, or `sample_rate` are non-finite or
+    /// out of range (`freq` must be in `(0, sample_rate/2)`, `q > 0`,
+    /// `sample_rate > 0`).
     pub fn high_pass(freq: f64, q: f64, sample_rate: f64) -> Result<Self, FilterError> {
         validate(freq, q, sample_rate)?;
         let w0 = 2.0 * PI * freq / sample_rate;
         let (sin_w0, cos_w0) = (w0.sin(), w0.cos());
         let alpha = sin_w0 / (2.0 * q);
         Ok(Self {
-            b0: (1.0 + cos_w0) / 2.0,
+            b0: f64::midpoint(1.0, cos_w0),
             b1: -(1.0 + cos_w0),
-            b2: (1.0 + cos_w0) / 2.0,
+            b2: f64::midpoint(1.0, cos_w0),
             a1: -2.0 * cos_w0,
             a2: 1.0 - alpha,
         }
         .normalize(1.0 + alpha))
     }
 
+    /// # Errors
+    /// Returns [`FilterError`] if `freq`, `q`, or `sample_rate` are non-finite or
+    /// out of range (`freq` must be in `(0, sample_rate/2)`, `q > 0`,
+    /// `sample_rate > 0`).
     pub fn band_pass(freq: f64, q: f64, sample_rate: f64) -> Result<Self, FilterError> {
         validate(freq, q, sample_rate)?;
         let w0 = 2.0 * PI * freq / sample_rate;
@@ -148,6 +174,10 @@ impl BiquadCoeffs {
         .normalize(1.0 + alpha))
     }
 
+    /// # Errors
+    /// Returns [`FilterError`] if `freq`, `q`, or `sample_rate` are non-finite or
+    /// out of range (`freq` must be in `(0, sample_rate/2)`, `q > 0`,
+    /// `sample_rate > 0`).
     pub fn notch(freq: f64, q: f64, sample_rate: f64) -> Result<Self, FilterError> {
         validate(freq, q, sample_rate)?;
         let w0 = 2.0 * PI * freq / sample_rate;
@@ -163,6 +193,10 @@ impl BiquadCoeffs {
         .normalize(1.0 + alpha))
     }
 
+    /// # Errors
+    /// Returns [`FilterError`] if `freq`, `q`, or `sample_rate` are non-finite or
+    /// out of range (`freq` must be in `(0, sample_rate/2)`, `q > 0`,
+    /// `sample_rate > 0`).
     pub fn all_pass(freq: f64, q: f64, sample_rate: f64) -> Result<Self, FilterError> {
         validate(freq, q, sample_rate)?;
         let w0 = 2.0 * PI * freq / sample_rate;
@@ -236,6 +270,7 @@ pub struct BiquadFilter {
 }
 
 impl BiquadFilter {
+    #[must_use]
     pub fn new(coeffs: BiquadCoeffs, channels: usize) -> Self {
         Self {
             coeffs,
@@ -252,7 +287,7 @@ impl BiquadFilter {
     }
 
     pub fn reset(&mut self) {
-        self.states.iter_mut().for_each(|s| s.reset());
+        self.states.iter_mut().for_each(BiquadState::reset);
     }
 
     /// Resize the per-channel state to `channels`. Existing channels keep their
@@ -283,6 +318,7 @@ pub struct ApoFilter {
 }
 
 impl ApoFilter {
+    #[must_use]
     pub fn builder() -> ApoFilterBuilder {
         ApoFilterBuilder::default()
     }
@@ -302,36 +338,43 @@ pub struct ApoFilterBuilder {
 }
 
 impl ApoFilterBuilder {
+    #[must_use]
     pub fn filter_type(mut self, t: FilterType) -> Self {
         self.filter_type = Some(t);
         self
     }
 
+    #[must_use]
     pub fn freq(mut self, hz: f64) -> Self {
         self.freq = Some(hz);
         self
     }
 
+    #[must_use]
     pub fn gain_db(mut self, db: f64) -> Self {
         self.gain_db = db;
         self
     }
 
+    #[must_use]
     pub fn q(mut self, q: f64) -> Self {
         self.q = q;
         self
     }
 
+    #[must_use]
     pub fn enabled(mut self, on: bool) -> Self {
         self.enabled = on;
         self
     }
 
+    #[must_use]
     pub fn channels(mut self, n: usize) -> Self {
         self.channels = n;
         self
     }
 
+    #[must_use]
     pub fn sample_rate(mut self, sr: f64) -> Self {
         self.sample_rate = Some(sr);
         self
@@ -339,11 +382,16 @@ impl ApoFilterBuilder {
 
     /// Restrict this band to a subset of channels. Omit (or pass
     /// [`ChannelMask::ALL`]) for a global band.
+    #[must_use]
     pub fn channel_mask(mut self, mask: ChannelMask) -> Self {
         self.channel_mask = mask;
         self
     }
 
+    /// # Errors
+    /// Returns [`FilterError`] if the resolved `freq`/`sample_rate` are non-finite
+    /// or out of range (`freq` must be in `(0, sample_rate/2)`, `sample_rate > 0`).
+    /// Non-finite `q`/`gain_db` are coerced to flat defaults rather than rejected.
     pub fn build(self) -> Result<ApoFilter, FilterError> {
         let filter_type = self.filter_type.unwrap_or(FilterType::Peaking);
         let freq = self.freq.unwrap_or(1000.0);
@@ -422,6 +470,11 @@ impl ApoFilter {
     /// Recompute coefficients in place, **preserving** the running filter state.
     /// Used for live parameter changes so rapid edits don't reset history and
     /// produce clicks/crackle. Returns without changing anything on error.
+    ///
+    /// # Errors
+    /// Returns [`FilterError`] if `freq`, `q`, or `sr` are non-finite or out of
+    /// range (`freq` must be in `(0, sr/2)`, `q > 0`, `sr > 0`); the existing
+    /// coefficients and state are left untouched in that case.
     pub fn update(
         &mut self,
         filter_type: FilterType,
@@ -496,6 +549,8 @@ mod tests {
     }
 
     #[test]
+    // float_cmp: asserts the defaulted gain is exactly 0 dB (flat).
+    #[allow(clippy::float_cmp)]
     fn non_finite_gain_loads_flat() {
         // A non-finite gain defaults to 0 dB so the band loads (flat) instead of
         // producing NaN coefficients.

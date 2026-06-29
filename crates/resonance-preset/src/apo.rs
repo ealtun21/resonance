@@ -1,4 +1,5 @@
 use crate::model::{ApoFilterType, EqBand, Preset};
+use std::fmt::Write as _;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -7,9 +8,14 @@ pub enum ApoError {
     ParseError { line: usize, msg: String },
 }
 
-/// Parse an EqualizerAPO .txt config file.
+/// Parse an `EqualizerAPO` .txt config file.
 /// Supported directives: Preamp, Filter (ON/OFF PK/LS/HS/LP/HP/BP/NO/AP),
-/// GraphicEQ, Channel (per-channel targeting); Include is ignored.
+/// `GraphicEQ`, Channel (per-channel targeting); Include is ignored.
+///
+/// # Errors
+///
+/// Returns [`ApoError::ParseError`] when a numeric field is malformed or
+/// non-finite (NaN/Inf), naming the offending line.
 pub fn parse_apo(content: &str) -> Result<Preset, ApoError> {
     let mut bands = Vec::new();
     let mut preamp_db = 0.0f64;
@@ -53,7 +59,6 @@ pub fn parse_apo(content: &str) -> Result<Preset, ApoError> {
                 b.channels = current_channels;
                 b
             }));
-            continue;
         }
         // Include and unknown directives are silently skipped.
     }
@@ -63,7 +68,7 @@ pub fn parse_apo(content: &str) -> Result<Preset, ApoError> {
         preamp_db,
         eq_enabled: !bands.is_empty(),
         bands,
-        effects: Default::default(),
+        effects: crate::model::FxEffects::default(),
     })
 }
 
@@ -163,7 +168,7 @@ fn parse_filter_line(line: &str, ln: usize, channels: u64) -> Result<Option<EqBa
 }
 
 /// Parse a `Channel:` directive value into a channel-target bitset. `all` (or an
-/// empty / wholly-unrecognised list) means every channel. EqualizerAPO allows
+/// empty / wholly-unrecognised list) means every channel. `EqualizerAPO` allows
 /// positions by name (via [`channel_name_to_index`]) OR by 1-based number — both
 /// are accepted; numeric is exact for any layout, named tokens assume WAVE order.
 fn parse_channel_line(rest: &str) -> u64 {
@@ -189,7 +194,7 @@ fn parse_channel_line(rest: &str) -> u64 {
     if bits == 0 { u64::MAX } else { bits }
 }
 
-/// EqualizerAPO channel name → channel index (standard WAVE order). Accepts the
+/// `EqualizerAPO` channel name → channel index (standard WAVE order). Accepts the
 /// common aliases (`FL`/`L`, `LFE`/`SUB`, `BL`/`RL`, …).
 fn channel_name_to_index(s: &str) -> Option<usize> {
     Some(match s.trim().to_ascii_uppercase().as_str() {
@@ -227,22 +232,19 @@ fn channel_index_to_name(i: usize) -> Option<&'static str> {
 fn channel_bits_to_names(bits: u64) -> Vec<String> {
     (0..64)
         .filter(|&i| bits & (1u64 << i) != 0)
-        .map(|i| {
-            channel_index_to_name(i)
-                .map(str::to_string)
-                .unwrap_or_else(|| (i + 1).to_string())
-        })
+        .map(|i| channel_index_to_name(i).map_or_else(|| (i + 1).to_string(), str::to_string))
         .collect()
 }
 
-/// Serialize a preamp + EQ bands back to EqualizerAPO `.txt` syntax.
+/// Serialize a preamp + EQ bands back to `EqualizerAPO` `.txt` syntax.
 ///
 /// Inverse of [`parse_apo`] for the subset we model (per-band `Filter` lines;
-/// the GraphicEQ shorthand is not re-emitted — every band becomes an explicit
+/// the `GraphicEQ` shorthand is not re-emitted — every band becomes an explicit
 /// `Filter` line so the type/Q survive the round-trip).
+#[must_use]
 pub fn write_apo(preamp_db: f64, bands: &[EqBand]) -> String {
     let mut out = String::new();
-    out.push_str(&format!("Preamp: {preamp_db:.1} dB\n"));
+    writeln!(out, "Preamp: {preamp_db:.1} dB").unwrap();
     // APO scopes filters to the most recent `Channel:` directive (default: all).
     // Emit one only when a band's target differs from what's currently in scope,
     // so all-global band sets round-trip with no `Channel:` lines at all.
@@ -259,7 +261,7 @@ pub fn write_apo(preamp_db: f64, bands: &[EqBand]) -> String {
                 // scope in place instead — the numeric fallback means any real
                 // (non-zero) mask always yields at least one token.
                 if !names.is_empty() {
-                    out.push_str(&format!("Channel: {}\n", names.join(" ")));
+                    writeln!(out, "Channel: {}", names.join(" ")).unwrap();
                     current = b.channels;
                 }
             }
@@ -267,20 +269,22 @@ pub fn write_apo(preamp_db: f64, bands: &[EqBand]) -> String {
         let state = if b.enabled { "ON" } else { "OFF" };
         let kw = apo_keyword(b.filter_type);
         // Shelves/peaking carry gain; pass/notch/allpass omit it (APO ignores it there).
-        out.push_str(&format!(
+        write!(
+            out,
             "Filter {n}: {state} {kw} Fc {fc:.0} Hz",
             n = i + 1,
             fc = b.freq,
-        ));
+        )
+        .unwrap();
         if filter_uses_gain(b.filter_type) {
-            out.push_str(&format!(" Gain {g:.1} dB", g = b.gain_db));
+            write!(out, " Gain {g:.1} dB", g = b.gain_db).unwrap();
         }
-        out.push_str(&format!(" Q {q:.3}\n", q = b.q));
+        writeln!(out, " Q {q:.3}", q = b.q).unwrap();
     }
     out
 }
 
-/// EqualizerAPO keyword for a filter type (inverse of [`parse_filter_type`]).
+/// `EqualizerAPO` keyword for a filter type (inverse of [`parse_filter_type`]).
 fn apo_keyword(t: ApoFilterType) -> &'static str {
     match t {
         ApoFilterType::Peaking => "PK",
@@ -314,7 +318,7 @@ fn filter_uses_gain(t: ApoFilterType) -> bool {
     )
 }
 
-/// Map an EqualizerAPO filter keyword to a modelled type, or `None` if the type
+/// Map an `EqualizerAPO` filter keyword to a modelled type, or `None` if the type
 /// is unknown/unsupported (inverse of [`apo_keyword`]). A `6dB` shelf slope maps
 /// to the maximally-flat (0.707-Q) shelf — the closest slope we model.
 fn lookup_filter_type(s: &str) -> Option<ApoFilterType> {
@@ -350,14 +354,13 @@ fn parse_graphic_eq(s: &str, ln: usize) -> Result<Vec<(f64, f64)>, ApoError> {
             // The gain is normally a separate token, but AutoEq exports often
             // glue the last pair (e.g. "19871-3.0"). When there's no second
             // token, split the freq off at the gain's leading minus sign.
-            let (freq_str, gain_str) = match parts.next() {
-                Some(g) => (first, g),
-                None => {
-                    let idx = first
-                        .find('-')
-                        .ok_or_else(|| err(ln, "missing gain in GraphicEQ"))?;
-                    (&first[..idx], &first[idx..])
-                }
+            let (freq_str, gain_str) = if let Some(g) = parts.next() {
+                (first, g)
+            } else {
+                let idx = first
+                    .find('-')
+                    .ok_or_else(|| err(ln, "missing gain in GraphicEQ"))?;
+                (&first[..idx], &first[idx..])
             };
             let freq = parse_finite(freq_str, ln, "GraphicEQ freq")?;
             let gain_db = parse_finite(gain_str, ln, "GraphicEQ gain")?;

@@ -17,3 +17,6 @@ thiserror = { workspace = true }
 # (Linux XDG-autostart fallback backend).
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+
+[lints]
+workspace = true

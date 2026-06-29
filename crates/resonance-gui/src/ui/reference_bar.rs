@@ -176,7 +176,7 @@ impl GuiApp {
                     continue;
                 }
                 if drawn {
-                    self.tb_sep(ui);
+                    Self::tb_sep(ui);
                 }
                 for c in items {
                     self.ref_ctl_inline(ui, c, can_auto, busy);
@@ -187,7 +187,7 @@ impl GuiApp {
             // ☰ overflow — only when something collapsed.
             if !collapsed.is_empty() {
                 if drawn {
-                    self.tb_sep(ui);
+                    Self::tb_sep(ui);
                 }
                 self.ref_overflow(ui, &collapsed, can_auto, busy);
             }
@@ -206,12 +206,10 @@ impl GuiApp {
                 kit::text_width(ui, kit::T_VALUE, "Target") + 2.0 + kit::SP_S + 148.0
             }
             RefCtl::Customize => icon_label("Customize"),
-            RefCtl::Manage => icon_only,
+            // Icon-only ghost pills all share the same fixed width.
+            RefCtl::Manage | RefCtl::Clear | RefCtl::MeasFile | RefCtl::ToTarget => icon_only,
             RefCtl::MeasChip => label_only(&self.meas_label()),
-            RefCtl::Clear => icon_only,
             RefCtl::Channel => label_only(self.reference.channel.label()),
-            RefCtl::MeasFile => icon_only,
-            RefCtl::ToTarget => icon_only,
             RefCtl::Raw => check("Raw"),
             RefCtl::Bounds => check("Bounds"),
             RefCtl::Normalize => check("Normalize"),
@@ -1072,7 +1070,7 @@ impl GuiApp {
         }
     }
 
-    /// Auto-EQ: fit a parametric bank (peqdb's AutoEQ, ported to Rust in
+    /// Auto-EQ: fit a parametric bank (peqdb's `AutoEQ`, ported to Rust in
     /// `resonance-autoeq`) so the measurement, once EQ'd, matches the target.
     /// The 3000-step optimize runs on a background thread; [`Self::pump_autoeq`]
     /// applies the result (with a clip-safe headroom preamp) when it lands.
@@ -1091,8 +1089,14 @@ impl GuiApp {
         };
         // Sample both curves onto AutoEQ's fixed log grid (dB).
         let f = resonance_autoeq::log_freqs();
-        let target: Vec<f32> = f.iter().map(|&hz| tgt.interp(hz as f64) as f32).collect();
-        let measured: Vec<f32> = f.iter().map(|&hz| meas.interp(hz as f64) as f32).collect();
+        let target: Vec<f32> = f
+            .iter()
+            .map(|&hz| tgt.interp(f64::from(hz)) as f32)
+            .collect();
+        let measured: Vec<f32> = f
+            .iter()
+            .map(|&hz| meas.interp(f64::from(hz)) as f32)
+            .collect();
         let smoothing = if self.reference.measurement_iem {
             Smoothing::InEar
         } else {
@@ -1416,7 +1420,7 @@ impl GuiApp {
                 });
                 ui.separator();
                 ui.horizontal(|ui| {
-                    let is_file = browser.selected().map(|it| !it.is_dir).unwrap_or(false);
+                    let is_file = browser.selected().is_some_and(|it| !it.is_dir);
                     if kit::button(ui, "Load", true, is_file) {
                         if let Some(p) = browser.activate(browser.cursor) {
                             picked = Some(p);
@@ -1516,7 +1520,7 @@ fn cust_slider(
             }
         } else if resp.dragged() || resp.clicked() {
             if let Some(pp) = resp.interact_pointer_pos() {
-                let f = ((pp.x - x0) / tw).clamp(0.0, 1.0) as f64;
+                let f = f64::from(((pp.x - x0) / tw).clamp(0.0, 1.0));
                 let nv = lo + f * (hi - lo);
                 if (nv - *value).abs() > f64::EPSILON {
                     *value = nv;

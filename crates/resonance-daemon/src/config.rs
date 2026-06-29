@@ -231,7 +231,7 @@ pub fn list_profiles() -> Vec<String> {
         return Vec::new();
     };
     let mut names: Vec<String> = entries
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter_map(|e| {
             let path = e.path();
             (path.extension()?.to_str()? == "toml")

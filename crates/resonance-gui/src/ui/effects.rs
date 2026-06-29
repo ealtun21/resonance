@@ -1,4 +1,4 @@
-//! Effects section: the FxSound effect toggles + intensity sliders, drawn with
+//! Effects section: the `FxSound` effect toggles + intensity sliders, drawn with
 //! the bespoke kit so every row aligns (toggle · name · slider · value).
 
 use crate::app::GuiApp;
@@ -7,7 +7,7 @@ use eframe::egui;
 use resonance_ipc::{Command, DaemonState, FxEffectId};
 
 impl GuiApp {
-    /// Demoted FxSound effects (mockup `.fx`): each effect is a two-line block —
+    /// Demoted `FxSound` effects (mockup `.fx`): each effect is a two-line block —
     /// `[toggle]  Name ………… +NN%` over a full-width thin slider — so the EQ stays
     /// the visual lead and the effects read as a quiet secondary rack.
     pub(crate) fn effects_section(&mut self, ui: &mut egui::Ui, state: &DaemonState) {

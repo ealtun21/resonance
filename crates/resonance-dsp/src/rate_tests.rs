@@ -150,7 +150,9 @@ fn filter_at_zero_gain_is_identity() {
         .sample_rate(48_000.0)
         .build()
         .unwrap();
-    let input: Vec<f64> = (0..512).map(|i| ((i as f64) * 0.021).sin() * 0.7).collect();
+    let input: Vec<f64> = (0..512)
+        .map(|i| (f64::from(i) * 0.021).sin() * 0.7)
+        .collect();
     for &x in &input {
         let y = f.process_channel(x, 0);
         assert_eq!(y.to_bits(), x.to_bits(), "0 dB peaking must be identity");

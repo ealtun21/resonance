@@ -27,7 +27,7 @@ impl GuiApp {
 
     pub(crate) fn devices_profiles(&mut self, ui: &mut egui::Ui) {
         section_hint(ui, "Device → Profile", "auto-switch", |ui| {
-            self.device_mapping_section(ui)
+            self.device_mapping_section(ui);
         });
         ui.add_space(12.0);
         let n = self.profiles.len();
@@ -220,8 +220,7 @@ impl GuiApp {
         let (loaded_bands, loaded_preamp) = self
             .state
             .as_ref()
-            .map(|s| (s.bands.len(), s.preamp_db))
-            .unwrap_or((0, 0.0));
+            .map_or((0, 0.0), |s| (s.bands.len(), s.preamp_db));
 
         // ── unsaved-changes banner (only when the live chain is dirty) ─────────
         if self.dirty {
@@ -510,9 +509,13 @@ impl GuiApp {
     /// The device→profile mapping table. Lists every known output device
     /// (`sink_descriptions` already merges present + remembered ones); each gets
     /// a profile dropdown and a "forget" button. Forgetting only drops it until
-    /// PipeWire next reports it (plug in / select as output).
+    /// `PipeWire` next reports it (plug in / select as output).
     pub(crate) fn device_table(&mut self, ui: &mut egui::Ui, s: &DaemonState) {
         use std::collections::HashSet;
+        // Row layout widths (profile dropdown, trailing tag/forget cell, row height).
+        const DD_W: f32 = 116.0;
+        const TAIL_W: f32 = 44.0;
+        const ROW_H: f32 = 40.0;
         let present: HashSet<&str> = s.available_sinks.iter().map(String::as_str).collect();
         let active = s.active_output.as_deref();
         // Own the map so the `&self.mappings` borrow ends before the closure
@@ -529,9 +532,6 @@ impl GuiApp {
         // Manual two-line rows (mockup `.drow`): a status dot, the device name over
         // a transport/rate sub-line, a profile picker, then a LIVE tag (active) or
         // a forget ✕ (others). A hairline rules each row but the last.
-        const DD_W: f32 = 116.0;
-        const TAIL_W: f32 = 44.0;
-        const ROW_H: f32 = 40.0;
         let full_w = ui.available_width();
         let name_w = (full_w - 14.0 - DD_W - TAIL_W - 3.0 * kit::SP_S).max(80.0);
         let n = s.sink_descriptions.len();

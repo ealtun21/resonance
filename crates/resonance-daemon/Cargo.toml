@@ -87,3 +87,6 @@ assets = [
 
 [package.metadata.generate-rpm.requires]
 pipewire = "*"
+
+[lints]
+workspace = true

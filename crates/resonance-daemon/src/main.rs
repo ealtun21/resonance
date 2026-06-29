@@ -137,7 +137,7 @@ async fn main() -> Result<()> {
             {
                 let mut inner = output_state.0.lock().unwrap();
                 inner.active_output = Some(output.clone());
-                inner.mapped_profile = mapped.clone();
+                inner.mapped_profile.clone_from(&mapped);
             }
             if let Some(name) = mapped {
                 match apply_profile(&name, &output_state) {

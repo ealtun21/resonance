@@ -1,10 +1,10 @@
 //! Linux service backend: a thin dispatcher.
 //!
 //! Prefers the systemd *user* manager when `systemctl --user` is reachable
-//! (the common case on most desktops, including SteamOS). Otherwise falls back
+//! (the common case on most desktops, including `SteamOS`). Otherwise falls back
 //! to the freedesktop.org Autostart entry plus direct process control, so the
 //! daemon is still installable and controllable on init systems without a
-//! per-user service manager (OpenRC, runit, SysV, or a bare session).
+//! per-user service manager (`OpenRC`, runit, `SysV`, or a bare session).
 //!
 //! The choice is made per call from the live environment, so a machine that
 //! gains or loses `systemctl --user` between calls still behaves correctly.

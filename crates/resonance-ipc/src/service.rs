@@ -4,7 +4,7 @@
 //!   - Linux: systemd user-service unit at `$XDG_CONFIG_HOME/systemd/user/resonanced.service`,
 //!     or, where `systemctl --user` is absent (OpenRC/runit/SysV/bare session),
 //!     a freedesktop Autostart `.desktop` plus direct process control.
-//!   - macOS: launchd LaunchAgent plist at `~/Library/LaunchAgents/com.ealtun21.resonanced.plist`
+//!   - macOS: launchd `LaunchAgent` plist at `~/Library/LaunchAgents/com.ealtun21.resonanced.plist`
 //!
 //! Every backend exposes the same operations so callers stay platform-agnostic:
 //! `status()`, `install()`, `uninstall()`, `start()`, `stop()`, `restart()`,
@@ -53,12 +53,14 @@ pub struct Status {
 }
 
 /// Path the unit file is written to (OS-specific).
+#[must_use]
 pub fn unit_path() -> PathBuf {
     backend::unit_path()
 }
 
 /// Resolve the `resonanced` binary: prefer a sibling of the current executable
 /// (covers a co-installed CLI/daemon pair), then `$PATH`, else the bare name.
+#[must_use]
 pub fn daemon_bin() -> PathBuf {
     // Platform-correct binary name (Windows appends `.exe`).
     const BIN: &str = if cfg!(windows) {
@@ -97,33 +99,39 @@ pub fn daemon_bin() -> PathBuf {
 }
 
 /// Whether the underlying service manager is reachable for this user.
+#[must_use]
 pub fn manager_available() -> bool {
     backend::manager_available()
 }
 
 /// Backend-specific explanation shown when `manager_available()` is false, so a
 /// client never prints "systemctl" on macOS or Windows.
+#[must_use]
 pub fn manager_unavailable_message() -> &'static str {
     backend::UNAVAILABLE_MESSAGE
 }
 
 /// True if the service is installed (unit/plist on disk, or the autostart
 /// mechanism present on platforms without a unit file).
+#[must_use]
 pub fn is_installed() -> bool {
     backend::is_installed()
 }
 
 /// True if the service is currently running.
+#[must_use]
 pub fn is_active() -> bool {
     backend::is_active()
 }
 
 /// True if the service is enabled for autostart.
+#[must_use]
 pub fn is_enabled() -> bool {
     backend::is_enabled()
 }
 
 /// Combined installed/active/enabled snapshot.
+#[must_use]
 pub fn status() -> Status {
     Status {
         installed: is_installed(),
@@ -157,17 +165,29 @@ fn settle(reachable: bool, timeout: std::time::Duration) {
 }
 
 /// Write (or refresh) the unit file and reload the user manager. Idempotent.
+///
+/// # Errors
+/// Returns an error if the unit file cannot be written or the service manager
+/// reload fails.
 pub fn install() -> io::Result<()> {
     backend::install()
 }
 
 /// Remove the unit file (disabling first) and reload the user manager.
+///
+/// # Errors
+/// Returns an error if the unit file cannot be removed or the service manager
+/// reload fails.
 pub fn uninstall() -> io::Result<()> {
     backend::uninstall()
 }
 
 /// Ensure the unit is installed, then start the service now. Returns once the
 /// daemon is actually reachable (or the settle window elapses).
+///
+/// # Errors
+/// Returns an error if installing the unit or asking the service manager to
+/// start it fails.
 pub fn start() -> io::Result<()> {
     if !is_installed() {
         install()?;
@@ -178,6 +198,9 @@ pub fn start() -> io::Result<()> {
 }
 
 /// Stop the running service. Returns once it has actually stopped serving.
+///
+/// # Errors
+/// Returns an error if the service manager fails to stop the service.
 pub fn stop() -> io::Result<()> {
     backend::stop()?;
     settle(false, STOP_SETTLE);
@@ -186,6 +209,10 @@ pub fn stop() -> io::Result<()> {
 
 /// Restart the service (installing the unit first if needed). Returns once the
 /// daemon is serving again.
+///
+/// # Errors
+/// Returns an error if installing the unit or asking the service manager to
+/// restart it fails.
 pub fn restart() -> io::Result<()> {
     if !is_installed() {
         install()?;
@@ -198,6 +225,9 @@ pub fn restart() -> io::Result<()> {
 /// Enable autostart and start now. Each backend's `enable` ensures the unit is
 /// installed itself (the macOS plist bootstrap is part of `enable`), so the
 /// facade does not pre-install — doing so double-bootstrapped launchd.
+///
+/// # Errors
+/// Returns an error if the service manager fails to enable or start the service.
 pub fn enable() -> io::Result<()> {
     backend::enable()?;
     settle(true, START_SETTLE);
@@ -205,6 +235,9 @@ pub fn enable() -> io::Result<()> {
 }
 
 /// Disable autostart and stop now.
+///
+/// # Errors
+/// Returns an error if the service manager fails to disable or stop the service.
 pub fn disable() -> io::Result<()> {
     backend::disable()?;
     settle(false, STOP_SETTLE);

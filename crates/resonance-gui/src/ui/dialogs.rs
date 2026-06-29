@@ -216,8 +216,7 @@ impl GuiApp {
                 ui.separator();
                 let loadable = browser
                     .selected()
-                    .map(|it| !it.is_dir && it.is_preset)
-                    .unwrap_or(false);
+                    .is_some_and(|it| !it.is_dir && it.is_preset);
                 ui.horizontal(|ui| {
                     if kit::button(ui, "Load", true, loadable) {
                         to_load = browser.activate(browser.cursor);

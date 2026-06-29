@@ -47,6 +47,20 @@ fn text_width(ui: &egui::Ui, font: egui::FontId, s: &str) -> f32 {
 
 impl GuiApp {
     pub(crate) fn toolbar(&mut self, ui: &mut egui::Ui) {
+        // Build the list of present groups, then draw them joined by exactly
+        // one separator between consecutive groups (never leading, trailing or
+        // doubled — the structural fix for the adjacent-separator bug). Power
+        // and Preamp are always present; Overflow always closes the row.
+        #[derive(Clone, Copy)]
+        enum Grp {
+            Power,
+            Preamp,
+            Output,
+            History,
+            Daemon,
+            Help,
+            Overflow,
+        }
         let state = self.state.clone();
         // macOS reserves the far-left of the toolbar for the traffic-light buttons
         // (unified titlebar); elsewhere just a small inset. That space isn't usable
@@ -106,20 +120,6 @@ impl GuiApp {
             ui.spacing_mut().item_spacing.x = kit::SP_S;
             ui.add_space(lead);
 
-            // Build the list of present groups, then draw them joined by exactly
-            // one separator between consecutive groups (never leading, trailing or
-            // doubled — the structural fix for the adjacent-separator bug). Power
-            // and Preamp are always present; Overflow always closes the row.
-            #[derive(Clone, Copy)]
-            enum Grp {
-                Power,
-                Preamp,
-                Output,
-                History,
-                Daemon,
-                Help,
-                Overflow,
-            }
             // Preamp + Output draw nothing without a connected daemon — omit them
             // (not just their content) so no stranded separators are left behind
             // on the disconnected toolbar.
@@ -142,18 +142,18 @@ impl GuiApp {
 
             for (i, g) in groups.iter().enumerate() {
                 if i > 0 {
-                    self.tb_sep(ui);
+                    Self::tb_sep(ui);
                 }
                 match g {
-                    Grp::Power => self.tb_power(ui, &state),
-                    Grp::Preamp => self.tb_preamp(ui, &state, !preamp_full),
-                    Grp::Output => self.tb_output(ui, &state),
+                    Grp::Power => self.tb_power(ui, state.as_ref()),
+                    Grp::Preamp => self.tb_preamp(ui, state.as_ref(), !preamp_full),
+                    Grp::Output => self.tb_output(ui, state.as_ref()),
                     Grp::History => self.tb_history(ui),
                     Grp::Daemon => self.daemon_menu(ui),
                     Grp::Help => self.tb_help(ui),
                     Grp::Overflow => self.overflow_menu(
                         ui,
-                        &state,
+                        state.as_ref(),
                         Overflow {
                             preamp: false,
                             output: !out_inline,
@@ -178,7 +178,7 @@ impl GuiApp {
     /// A thin vertical hairline between toolbar groups, matching the kit's rule
     /// colour (egui's default separator is heavier and theme-mismatched). Also
     /// reused by the reference bar to separate its sections.
-    pub(crate) fn tb_sep(&self, ui: &mut egui::Ui) {
+    pub(crate) fn tb_sep(ui: &mut egui::Ui) {
         let line = kit::tokens(ui).line;
         let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, 22.0), egui::Sense::hover());
         ui.painter().rect_filled(rect, 0.0, line);
@@ -187,9 +187,14 @@ impl GuiApp {
     /// Prominent power toggle (mockup `.power`): a translucent, accent-bordered
     /// pill with a status dot, a coloured ON/OFF, and a dim "POWER" sub-label —
     /// fully painter-drawn, not an `egui::Button`. Green when on, red when off.
-    fn tb_power(&mut self, ui: &mut egui::Ui, state: &Option<DaemonState>) {
+    fn tb_power(&mut self, ui: &mut egui::Ui, state: Option<&DaemonState>) {
+        const PAD_L: f32 = 12.0;
+        const PAD_R: f32 = 14.0;
+        const DOT_D: f32 = 9.0;
+        const GAP: f32 = 8.0;
+        const SUB_GAP: f32 = 7.0;
         let connected = state.is_some();
-        let on = state.as_ref().map(|s| s.enabled).unwrap_or(false);
+        let on = state.is_some_and(|s| s.enabled);
         let t = kit::tokens(ui);
         let color = if !connected {
             t.dim
@@ -200,11 +205,6 @@ impl GuiApp {
         };
         let label = if on { "ON" } else { "OFF" };
 
-        const PAD_L: f32 = 12.0;
-        const PAD_R: f32 = 14.0;
-        const DOT_D: f32 = 9.0;
-        const GAP: f32 = 8.0;
-        const SUB_GAP: f32 = 7.0;
         let lab_font = egui::FontId::proportional(13.5);
         let sub_font = egui::FontId::proportional(kit::T_CAPTION);
         let lab_w = text_width(ui, lab_font.clone(), label);
@@ -255,7 +255,7 @@ impl GuiApp {
 
     /// Preamp gain. `compact` shows just a draggable value chip (label "Pre");
     /// otherwise the full labelled slider + dB readout.
-    fn tb_preamp(&mut self, ui: &mut egui::Ui, state: &Option<DaemonState>, compact: bool) {
+    fn tb_preamp(&mut self, ui: &mut egui::Ui, state: Option<&DaemonState>, compact: bool) {
         let Some(s) = state else {
             return;
         };
@@ -285,7 +285,7 @@ impl GuiApp {
     /// Output device picker (left-to-right: speaker icon then a 2-line combo
     /// showing the friendly device name over its node id, like the mockup
     /// `.device` chip).
-    fn tb_output(&mut self, ui: &mut egui::Ui, state: &Option<DaemonState>) {
+    fn tb_output(&mut self, ui: &mut egui::Ui, state: Option<&DaemonState>) {
         if let Some(s) = state {
             let (r, resp) = ui.allocate_exact_size(egui::vec2(18.0, 32.0), egui::Sense::hover());
             let g = egui::Rect::from_center_size(r.center(), egui::Vec2::splat(16.0));
@@ -390,7 +390,7 @@ impl GuiApp {
     /// Overflow menu (☰): hosts whatever has collapsed off the bar at the current
     /// width, plus the always-present preset/view/theme actions — so nothing is
     /// ever unreachable on a small window.
-    fn overflow_menu(&mut self, ui: &mut egui::Ui, state: &Option<DaemonState>, of: Overflow) {
+    fn overflow_menu(&mut self, ui: &mut egui::Ui, state: Option<&DaemonState>, of: Overflow) {
         kit::icon_menu_button(
             ui,
             Icon::Menu,
@@ -638,7 +638,7 @@ impl GuiApp {
                 }
             };
             let khz = |hz: f64| format!("{:.1}k", hz / 1000.0);
-            let clip_active = self.clip_until.map(|t| Instant::now() < t).unwrap_or(false);
+            let clip_active = self.clip_until.is_some_and(|t| Instant::now() < t);
             let lvl_col = if clip_active {
                 self.palette.cut
             } else {
@@ -653,7 +653,7 @@ impl GuiApp {
 
             let segs: Vec<(String, String, egui::Color32)> = vec![
                 (format!("{} · ", backend_label()), rate, t.text),
-                ("".into(), format!("{} ch", s.channels.max(1)), t.dim),
+                (String::new(), format!("{} ch", s.channels.max(1)), t.dim),
                 ("in ".into(), format!("{:>4} dB", db(m.in_peak)), lvl_col),
                 ("out ".into(), format!("{:>4} dB", db(m.out_peak)), lvl_col),
                 (
@@ -673,7 +673,7 @@ impl GuiApp {
                 seg(ui, label, value, *vcol);
                 if i + 1 < n {
                     ui.add_space(kit::SP_M);
-                    self.tb_sep(ui);
+                    Self::tb_sep(ui);
                     ui.add_space(kit::SP_M);
                 }
             }

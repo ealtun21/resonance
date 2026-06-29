@@ -280,7 +280,7 @@ pub(crate) fn slider_h(
     let mut changed = false;
     if resp.dragged() || resp.clicked() {
         if let Some(p) = resp.interact_pointer_pos() {
-            let f = ((p.x - x0) / tw).clamp(0.0, 1.0) as f64;
+            let f = f64::from(((p.x - x0) / tw).clamp(0.0, 1.0));
             let nv = lo + f * (hi - lo);
             if (nv - *value).abs() > f64::EPSILON {
                 *value = nv;
@@ -344,6 +344,7 @@ pub(crate) fn toggle(ui: &mut egui::Ui, on: &mut bool) -> bool {
 /// toggled. The house replacement for `egui::Checkbox`/`selectable_label` in
 /// menus, popups and dialogs.
 pub(crate) fn checkbox(ui: &mut egui::Ui, on: &mut bool, label: &str) -> bool {
+    const BOX: f32 = 16.0;
     let t = tokens(ui);
     let font = egui::FontId::proportional(T_BODY);
     let lab_w = if label.is_empty() {
@@ -351,7 +352,6 @@ pub(crate) fn checkbox(ui: &mut egui::Ui, on: &mut bool, label: &str) -> bool {
     } else {
         text_width(ui, T_BODY, label) + SP_S
     };
-    const BOX: f32 = 16.0;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(BOX + lab_w, ROW_H), egui::Sense::click());
     let mut changed = false;
     if resp.clicked() {
@@ -715,10 +715,10 @@ fn marquee_offset(elapsed: f32, over: f32) -> f32 {
 /// fade can melt away as the marquee reveals that edge. Stepped strips avoid
 /// needing a gradient mesh.
 fn fade_strip(painter: &egui::Painter, rect: egui::Rect, bg: Color32, right: bool, strength: f32) {
+    const N: usize = 14;
     if strength <= 0.01 {
         return;
     }
-    const N: usize = 14;
     let w = FADE_W / N as f32;
     for k in 0..N {
         let frac = k as f32 / (N as f32 - 1.0);
@@ -839,7 +839,7 @@ fn num_field_impl(
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         }
         if resp.dragged() {
-            let dx = resp.drag_delta().x as f64;
+            let dx = f64::from(resp.drag_delta().x);
             if dx != 0.0 {
                 let nv = (*value + dx * speed).clamp(*range.start(), *range.end());
                 if (nv - *value).abs() > f64::EPSILON {
@@ -1518,7 +1518,7 @@ pub(crate) fn menu_button(
     popup_id: egui::Id,
     add: impl FnOnce(&mut egui::Ui),
 ) {
-    menu_button_ex(ui, label, label_color, popup_id, true, "", add)
+    menu_button_ex(ui, label, label_color, popup_id, true, "", add);
 }
 
 /// [`menu_button`] with two extra knobs: `close_on_click` false keeps the menu

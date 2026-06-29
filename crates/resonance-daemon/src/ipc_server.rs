@@ -78,9 +78,8 @@ where
     let mut writer = tokio::io::BufWriter::new(writer);
 
     loop {
-        let cmd = match read_command_async(&mut reader).await {
-            Ok(c) => c,
-            Err(_) => break,
+        let Ok(cmd) = read_command_async(&mut reader).await else {
+            break;
         };
 
         // Shutdown must reply *before* the process exits, or the client always
@@ -160,7 +159,7 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
             let p = path.clone();
             match tokio::task::spawn_blocking(move || parse_preset_file(&p)).await {
                 Ok(Ok(preset)) => {
-                    apply_preset(preset, state);
+                    apply_preset(&preset, state);
                     state.0.lock().unwrap().current_preset = Some(path);
                     Response::Ok
                 }
@@ -173,7 +172,7 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
             // Parsing a preset can be expensive — a GraphicEQ `.txt` runs a
             // curve-fit optimisation. Do it (and the file IO) on a blocking
             // thread so the async IPC loop keeps serving other clients.
-            tokio::task::spawn_blocking(move || import_preset(path, name))
+            tokio::task::spawn_blocking(move || import_preset(&path, name))
                 .await
                 .unwrap_or_else(|e| Response::Error(format!("import task failed: {e}")))
         }
@@ -621,7 +620,7 @@ fn slot_index(slot: AbSlot) -> usize {
     }
 }
 
-/// Render the daemon's current preamp + bands as EqualizerAPO `.txt` text.
+/// Render the daemon's current preamp + bands as `EqualizerAPO` `.txt` text.
 fn export_apo_text(snap: &resonance_ipc::DaemonState) -> String {
     let bands: Vec<EqBand> = snap
         .bands
@@ -654,7 +653,10 @@ fn band_type_to_apo(t: BandType) -> ApoFilterType {
 /// Read + parse a preset file, dispatching on extension (`.fac` vs APO `.txt`).
 fn parse_preset_file(path: &str) -> Result<resonance_preset::model::Preset, String> {
     let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    if path.ends_with(".fac") {
+    let is_fac = std::path::Path::new(path)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("fac"));
+    if is_fac {
         parse_fac(&content).map_err(|e| e.to_string())
     } else {
         parse_apo(&content).map_err(|e| e.to_string())
@@ -663,26 +665,29 @@ fn parse_preset_file(path: &str) -> Result<resonance_preset::model::Preset, Stri
 
 /// Default profile name for an imported file: its stem (e.g. `Rock.fac` → `Rock`).
 fn file_stem_name(path: &str) -> String {
-    std::path::Path::new(path)
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "imported".to_string())
+    std::path::Path::new(path).file_stem().map_or_else(
+        || "imported".to_string(),
+        |s| s.to_string_lossy().into_owned(),
+    )
 }
 
 /// Import a preset file into the managed profile store. Sync + CPU-heavy
-/// (GraphicEQ files curve-fit) — call from a blocking context, never directly on
+/// (`GraphicEQ` files curve-fit) — call from a blocking context, never directly on
 /// the async runtime.
-fn import_preset(path: String, name: Option<String>) -> Response {
+fn import_preset(path: &str, name: Option<String>) -> Response {
     // Our own `.toml` exports load directly as a Profile; `.fac` / APO `.txt`
     // go through the preset parser first.
-    let profile = if path.ends_with(".toml") {
-        config::load_profile_file(&path)
+    let is_toml = std::path::Path::new(path)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("toml"));
+    let profile = if is_toml {
+        config::load_profile_file(path)
     } else {
-        parse_preset_file(&path).map(|p| Profile::from_preset(&p))
+        parse_preset_file(path).map(|p| Profile::from_preset(&p))
     };
     match profile {
         Ok(profile) => {
-            let raw = name.unwrap_or_else(|| file_stem_name(&path));
+            let raw = name.unwrap_or_else(|| file_stem_name(path));
             let profile_name = config::sanitize_name(&raw);
             if profile_name.is_empty() {
                 return Response::Error("profile name is empty".to_string());
@@ -697,7 +702,7 @@ fn import_preset(path: String, name: Option<String>) -> Response {
 }
 
 /// Build the DSP chain from an already-parsed preset and swap it in.
-fn apply_preset(preset: resonance_preset::model::Preset, state: &SharedState) {
+fn apply_preset(preset: &resonance_preset::model::Preset, state: &SharedState) {
     state.rebuild_chain(|ch, sr| preset.clone().into_chain(ch, sr));
 }
 
@@ -711,24 +716,23 @@ fn load_profile(name: &str, state: &SharedState) -> Result<(), String> {
 /// List preset files. `Some(dir)` scans that directory; `None` scans the XDG
 /// preset library + system dirs, with user entries shadowing system ones.
 fn list_presets(dir: Option<&str>) -> Vec<String> {
-    match dir {
-        Some(d) => list_dir_presets(std::path::Path::new(d)),
-        None => {
-            let _ = std::fs::create_dir_all(resonance_ipc::paths::user_preset_dir());
-            // filename → full path; first writer wins (search dirs are user-first).
-            let mut by_name = std::collections::BTreeMap::new();
-            for d in resonance_ipc::paths::preset_search_dirs() {
-                for path in list_dir_presets(&d) {
-                    if let Some(fname) = std::path::Path::new(&path)
-                        .file_name()
-                        .and_then(|f| f.to_str())
-                    {
-                        by_name.entry(fname.to_string()).or_insert(path);
-                    }
+    if let Some(d) = dir {
+        list_dir_presets(std::path::Path::new(d))
+    } else {
+        let _ = std::fs::create_dir_all(resonance_ipc::paths::user_preset_dir());
+        // filename → full path; first writer wins (search dirs are user-first).
+        let mut by_name = std::collections::BTreeMap::new();
+        for d in resonance_ipc::paths::preset_search_dirs() {
+            for path in list_dir_presets(&d) {
+                if let Some(fname) = std::path::Path::new(&path)
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                {
+                    by_name.entry(fname.to_string()).or_insert(path);
                 }
             }
-            by_name.into_values().collect()
         }
+        by_name.into_values().collect()
     }
 }
 
@@ -737,7 +741,7 @@ fn list_dir_presets(dir: &std::path::Path) -> Vec<String> {
         return Vec::new();
     };
     entries
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|e| {
             let name = e.file_name();
             let n = name.to_string_lossy();

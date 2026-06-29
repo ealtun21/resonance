@@ -75,8 +75,7 @@ impl TextInput {
             let prev = self.buf[..self.cursor]
                 .char_indices()
                 .last()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
+                .map_or(0, |(i, _)| i);
             self.buf.remove(prev);
             self.cursor = prev;
         }
@@ -87,8 +86,7 @@ impl TextInput {
             self.cursor = self.buf[..self.cursor]
                 .char_indices()
                 .last()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
+                .map_or(0, |(i, _)| i);
         }
     }
 
@@ -97,8 +95,7 @@ impl TextInput {
             self.cursor = self.buf[self.cursor..]
                 .char_indices()
                 .nth(1)
-                .map(|(i, _)| self.cursor + i)
-                .unwrap_or(self.buf.len());
+                .map_or(self.buf.len(), |(i, _)| self.cursor + i);
         }
     }
 }

@@ -149,7 +149,7 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
     if matches!(app.focus, Panel::Bands | Panel::Graph) && app.show_ch() {
         ctx.push_str("  [c] chans");
     }
-    if app.state.as_ref().map(|s| s.channels >= 2).unwrap_or(false) {
+    if app.state.as_ref().is_some_and(|s| s.channels >= 2) {
         ctx.push_str("  [w] swap L/R");
     }
     let line = Line::from(vec![
@@ -162,7 +162,7 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
 // ── Status bar ────────────────────────────────────────────────────────────
 
 fn render_status(app: &App, frame: &mut Frame, area: Rect) {
-    let power_span = if app.state.as_ref().map(|s| s.enabled).unwrap_or(false) {
+    let power_span = if app.state.as_ref().is_some_and(|s| s.enabled) {
         Span::styled("● ON ", Style::default().fg(Color::Green).bold())
     } else {
         Span::styled("○ OFF", Style::default().fg(Color::DarkGray))
@@ -187,7 +187,7 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         })
         .unwrap_or_default();
 
-    let preamp_db = app.state.as_ref().map(|s| s.preamp_db).unwrap_or(0.0);
+    let preamp_db = app.state.as_ref().map_or(0.0, |s| s.preamp_db);
     let preamp = if preamp_db.abs() < 0.05 {
         "preamp 0 dB".to_string()
     } else {
@@ -231,8 +231,7 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
     let db = |lin: f32| format!("{:>4}", db(lin));
     let clip_active = app
         .clip_until
-        .map(|t| std::time::Instant::now() < t)
-        .unwrap_or(false);
+        .is_some_and(|t| std::time::Instant::now() < t);
     let level_color = if clip_active {
         Color::Red
     } else {
@@ -313,6 +312,8 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
 // ── EQ curve ──────────────────────────────────────────────────────────────
 
 fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
+    // (colour, legend name, points) per reference series.
+    type RefRun = (Color, &'static str, Vec<(f64, f64)>);
     // The graph reads as "focused" (cyan border, highlighted node) for both the
     // Bands table and the interactive Graph panel.
     let graph_focus = app.focus == Panel::Graph;
@@ -440,8 +441,6 @@ fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
         log_max,
         if app.reference.normalized { 1.0 } else { 0.0 },
     );
-    // (colour, legend name, points) per reference series.
-    type RefRun = (Color, &'static str, Vec<(f64, f64)>);
     let ref_runs: Vec<RefRun> = ref_series
         .iter()
         .map(|s| {
@@ -594,13 +593,7 @@ fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
 /// previous run's last point so the coloured segments join seamlessly.
 fn curve_runs(points: &[(f64, f64)]) -> Vec<(Color, Vec<(f64, f64)>)> {
     fn bucket(g: f64) -> u8 {
-        if g >= 1.0 {
-            2
-        } else if g <= -1.0 {
-            0
-        } else {
-            1
-        }
+        if g >= 1.0 { 2 } else { u8::from(g > -1.0) }
     }
     fn colour(bk: u8) -> Color {
         match bk {
@@ -648,6 +641,8 @@ fn spectrum_color(t: f64) -> Color {
 /// Mirrored spectrum: an interpolated silhouette grows up and down from a
 /// centre baseline, with 8-level partial blocks for smooth sub-row height.
 fn render_spectrum(app: &App, frame: &mut Frame, area: Rect) {
+    // 8-level partial blocks (fill from bottom of a cell — used for upward bars).
+    const LOWER: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let block = Block::default()
         .title(Line::from(" Spectrum ").fg(Color::Magenta))
         .borders(Borders::ALL)
@@ -669,27 +664,24 @@ fn render_spectrum(app: &App, frame: &mut Frame, area: Rect) {
     if rows < 1 {
         return;
     }
-    let half = rows as f64;
+    let half = f64::from(rows);
     let center_up = inner.y + inner.height / 2; // first row of the lower half
     let n = bins.len();
     let buf = frame.buffer_mut();
-
-    // 8-level partial blocks (fill from bottom of a cell — used for upward bars).
-    const LOWER: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
     // Linearly interpolate the bins across the full width → smooth silhouette
     // where every column gets its own height (no flat, blocky plateaus).
     let w = inner.width;
     let sample = |data: &[f32], cx: u16| -> f64 {
         if w <= 1 {
-            return data[0].clamp(0.0, 1.0) as f64;
+            return f64::from(data[0].clamp(0.0, 1.0));
         }
-        let pos = cx as f64 / (w - 1) as f64 * (n - 1) as f64;
+        let pos = f64::from(cx) / f64::from(w - 1) * (n - 1) as f64;
         let i0 = pos.floor() as usize;
         let i1 = (i0 + 1).min(n - 1);
         let frac = pos - i0 as f64;
-        let a = data[i0].clamp(0.0, 1.0) as f64;
-        let b = data[i1].clamp(0.0, 1.0) as f64;
+        let a = f64::from(data[i0].clamp(0.0, 1.0));
+        let b = f64::from(data[i1].clamp(0.0, 1.0));
         a + (b - a) * frac
     };
 
@@ -706,7 +698,7 @@ fn render_spectrum(app: &App, frame: &mut Frame, area: Rect) {
         let idle = eighths <= 1;
 
         for r in 0..full {
-            let color = spectrum_color(r as f64 / half);
+            let color = spectrum_color(f64::from(r) / half);
             let yu = center_up - 1 - r;
             buf[(x, yu)].set_char('█').set_fg(color);
             let yd = center_up + r;
@@ -718,7 +710,7 @@ fn render_spectrum(app: &App, frame: &mut Frame, area: Rect) {
             let color = if idle {
                 Color::DarkGray // baseline tint when there's no signal
             } else {
-                spectrum_color(full as f64 / half)
+                spectrum_color(f64::from(full) / half)
             };
             // Up tip: lower block fills from the cell bottom (continuous upward).
             let yu = center_up - 1 - full;
@@ -769,8 +761,7 @@ fn render_effect_row(app: &App, frame: &mut Frame, idx: usize, area: Rect, panel
     let (intensity, enabled) = app
         .state
         .as_ref()
-        .map(|s| (fx_intensity(s, idx), fx_enabled(s, idx)))
-        .unwrap_or((0.0, false));
+        .map_or((0.0, false), |s| (fx_intensity(s, idx), fx_enabled(s, idx)));
 
     let bipolar = fx_min(idx) < 0.0;
 
@@ -1072,7 +1063,7 @@ fn channel_tag(mask: ChannelMask, layout: &[String], channels: usize) -> String 
     }
     let names: Vec<&str> = (0..channels)
         .filter(|&c| mask.contains(c))
-        .map(|c| layout.get(c).map(String::as_str).unwrap_or("?"))
+        .map(|c| layout.get(c).map_or("?", String::as_str))
         .collect();
     match names.len() {
         0 => "none".to_string(),
@@ -1153,8 +1144,8 @@ fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (u8, u8, u8) {
 
 fn centered_rect(area: Rect, pct_w: u16, pct_h: u16) -> Rect {
     // Widen the multiply: area.width * pct_w overflows u16 past ~819 columns.
-    let w = (area.width as u32 * pct_w as u32 / 100) as u16;
-    let h = (area.height as u32 * pct_h as u32 / 100) as u16;
+    let w = (u32::from(area.width) * u32::from(pct_w) / 100) as u16;
+    let h = (u32::from(area.height) * u32::from(pct_h) / 100) as u16;
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     Rect::new(x, y, w, h)
@@ -1267,12 +1258,11 @@ fn render_output_selector(
     let items: Vec<ListItem> = sinks
         .iter()
         .map(|s| {
-            let is_active = active.map(|a| a == s).unwrap_or(false);
+            let is_active = active.is_some_and(|a| a == s);
             let name = app
                 .state
                 .as_ref()
-                .map(|st| st.sink_label(s))
-                .unwrap_or_else(|| s.clone());
+                .map_or_else(|| s.clone(), |st| st.sink_label(s));
             let label = if is_active {
                 format!("● {name}")
             } else {
@@ -1308,8 +1298,7 @@ fn render_band_channels(
     let (channels, layout) = app
         .state
         .as_ref()
-        .map(|s| (s.channels, s.channel_layout.clone()))
-        .unwrap_or((0, vec![]));
+        .map_or((0, vec![]), |s| (s.channels, s.channel_layout.clone()));
 
     // Grow to fit the channel list, but never past the screen: clamp the height
     // to `area` and recentre so the bottom border + keybind footer stay visible.
@@ -1346,7 +1335,7 @@ fn render_band_channels(
 
     let items: Vec<ListItem> = (0..channels)
         .map(|c| {
-            let name = layout.get(c).map(String::as_str).unwrap_or("?");
+            let name = layout.get(c).map_or("?", String::as_str);
             // A global (ALL) mask shows every channel as selected.
             let on = mask.is_global(channels) || mask.contains(c);
             let check = if on { "[x]" } else { "[ ]" };
@@ -1773,14 +1762,14 @@ fn render_tab_mappings(s: &SettingsState, app: &App, frame: &mut Frame, area: Re
         .as_ref()
         .and_then(|st| st.mapped_profile.as_deref());
 
-    let active_label = active_output
-        .map(|o| {
+    let active_label = active_output.map_or_else(
+        || "none".to_string(),
+        |o| {
             app.state
                 .as_ref()
-                .map(|st| st.sink_label(o))
-                .unwrap_or_else(|| o.to_string())
-        })
-        .unwrap_or_else(|| "none".to_string());
+                .map_or_else(|| o.to_string(), |st| st.sink_label(o))
+        },
+    );
     frame.render_widget(
         Paragraph::new(format!(
             "Active: {}   Mapped profile: {}",
@@ -1823,8 +1812,7 @@ fn render_tab_mappings(s: &SettingsState, app: &App, frame: &mut Frame, area: Re
             let out = app
                 .state
                 .as_ref()
-                .map(|st| st.sink_label(out))
-                .unwrap_or_else(|| out.clone());
+                .map_or_else(|| out.clone(), |st| st.sink_label(out));
             frame.render_widget(
                 Paragraph::new(format!(" {marker} {out:<32} {profile}")).style(style),
                 row,
@@ -1876,8 +1864,7 @@ fn render_tab_devices(s: &SettingsState, app: &App, frame: &mut Frame, area: Rec
             let sink = app
                 .state
                 .as_ref()
-                .map(|st| st.sink_label(sink))
-                .unwrap_or_else(|| sink.clone());
+                .map_or_else(|| sink.clone(), |st| st.sink_label(sink));
             frame.render_widget(
                 Paragraph::new(format!(" {active_mark} {sink}{map_mark}")).style(style),
                 row,
@@ -2127,7 +2114,7 @@ fn fmt_freq(hz: f64) -> String {
     if hz >= 1000.0 {
         format!("{:.1}kHz", hz / 1000.0)
     } else {
-        format!("{:.0}Hz", hz)
+        format!("{hz:.0}Hz")
     }
 }
 
@@ -2352,6 +2339,8 @@ mod tests {
         }
     }
 
+    // float_cmp: asserts adj_tilt is unchanged vs a stored snapshot (exact, no math).
+    #[allow(clippy::float_cmp)]
     #[test]
     fn reference_customizer_adjust_is_reference_tab_only() {
         let mut app = App::new();
@@ -2451,6 +2440,8 @@ mod tests {
         assert_eq!(off.spectrum.height, 0, "hidden spectrum takes no rows");
     }
 
+    // float_cmp: asserts the JSON round-trip preserves the exact 3.0 literal.
+    #[allow(clippy::float_cmp)]
     #[test]
     fn reference_persists_as_json_round_trip() {
         use resonance_reference::reference::{PersistedReference, ReferenceState};

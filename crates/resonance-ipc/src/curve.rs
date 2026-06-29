@@ -2,7 +2,7 @@
 //!
 //! A [`RefCurve`] is a frequency→dB point set: a headphone/IEM *measurement*
 //! (fetched from squig.link) or a *target* response (a reference to EQ toward).
-//! This module parses the squig.link / AutoEq text format (`freq  dB` rows,
+//! This module parses the squig.link / `AutoEq` text format (`freq  dB` rows,
 //! tolerating header/footer noise), interpolates in log-frequency, averages L/R
 //! channels in the amplitude domain, smooths by fractional octave, and
 //! *generates* parametric targets — a base curve plus a spectral tilt and
@@ -33,12 +33,16 @@ pub struct RefCurve {
 }
 
 impl RefCurve {
-    /// Parse the squig.link / AutoEq / REW text format: one `frequency dB` pair
+    /// Parse the squig.link / `AutoEq` / REW text format: one `frequency dB` pair
     /// per line (whitespace-, comma-, tab-, or semicolon-separated; a third
     /// column such as phase is ignored). Header and footer lines that don't
     /// start with two numbers are skipped, so real AudioTools/REW exports (blank
     /// line + `Frequency / dB / Unweighted` header + `saved`/`peak` footer) parse
     /// cleanly. Returns `None` if fewer than two valid points are found.
+    #[must_use]
+    // float_cmp: dedup_by compares parsed frequencies for exact equality to drop
+    // identical-frequency rows after sorting — exact-key dedup, not a tolerance compare.
+    #[allow(clippy::float_cmp)]
     pub fn parse(text: &str) -> Option<RefCurve> {
         let mut pts: Vec<(f64, f64)> = Vec::new();
         for line in text.lines() {
@@ -65,6 +69,7 @@ impl RefCurve {
 
     /// Build directly from points (already validated/generated). Sorts to keep
     /// the ascending-frequency invariant.
+    #[must_use]
     pub fn from_points(mut points: Vec<(f64, f64)>) -> RefCurve {
         points.sort_by(|a, b| a.0.total_cmp(&b.0));
         RefCurve { points }
@@ -72,6 +77,7 @@ impl RefCurve {
 
     /// Level (dB) at `hz`, linearly interpolated in log-frequency. Clamps flat
     /// to the nearest endpoint outside the measured range (no extrapolation).
+    #[must_use]
     pub fn interp(&self, hz: f64) -> f64 {
         let p = &self.points;
         let n = p.len();
@@ -93,6 +99,7 @@ impl RefCurve {
 
     /// Resample onto `n` log-spaced points over `[log_min, log_max]` (log10 Hz).
     /// Returns `(log10(freq), dB)` — the form the GUI draws with.
+    #[must_use]
     pub fn resample_log(&self, n: usize, log_min: f64, log_max: f64) -> Vec<(f64, f64)> {
         let n = n.max(2);
         (0..n)
@@ -104,6 +111,7 @@ impl RefCurve {
     }
 
     /// Mean level (dB) over `[log_min, log_max]`, sampled on a fixed grid.
+    #[must_use]
     pub fn mean_db(&self, log_min: f64, log_max: f64) -> f64 {
         const N: usize = 64;
         let s: f64 = (0..N)
@@ -117,18 +125,21 @@ impl RefCurve {
 
     /// dB offset that zeroes this curve's mean over the band — so an absolute
     /// SPL curve sits centred on the graph's ± dB axis.
+    #[must_use]
     pub fn norm_offset_mean(&self, log_min: f64, log_max: f64) -> f64 {
         -self.mean_db(log_min, log_max)
     }
 
-    /// dB offset that pins this curve to 0 dB at `hz` (CrinGraph "normalize at a
+    /// dB offset that pins this curve to 0 dB at `hz` (`CrinGraph` "normalize at a
     /// frequency"; 500 Hz is the IEC-recommended default).
+    #[must_use]
     pub fn norm_offset_at(&self, hz: f64) -> f64 {
         -self.interp(hz)
     }
 
     /// Fractional-octave smoothing (running average in log-frequency). `oct` is
     /// the window *width* in octaves (e.g. `1.0/24.0`); `<= 0` returns a copy.
+    #[must_use]
     pub fn smoothed(&self, oct: f64) -> RefCurve {
         if oct <= 0.0 || self.points.len() < 3 {
             return self.clone();
@@ -150,6 +161,7 @@ impl RefCurve {
 
     /// Average two curves (e.g. L and R channels) in the **amplitude** domain, so
     /// the mono result never dips below either channel the way a dB average would.
+    #[must_use]
     pub fn average(a: &RefCurve, b: &RefCurve) -> RefCurve {
         let pts = (0..GRID_N)
             .map(|i| {
@@ -167,8 +179,8 @@ impl RefCurve {
 // ── Parametric target generation ────────────────────────────────────────────
 
 /// A shaping filter used to *build* a target curve (low-shelf bass, ear-gain
-/// peak, treble high-shelf). Mirrors the three-filter model used by the PEQdB
-/// "Optimized Headphone Target" paper and the CrinGraph target customizer.
+/// peak, treble high-shelf). Mirrors the three-filter model used by the `PEQdB`
+/// "Optimized Headphone Target" paper and the `CrinGraph` target customizer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TKind {
     LowShelf,
@@ -190,18 +202,19 @@ fn tfilter_db(filt: &TFilter, hz: f64) -> f64 {
         TKind::Peak => BiquadCoeffs::peaking(filt.fc, filt.gain, filt.q, GEN_SR),
         TKind::HighShelf => BiquadCoeffs::high_shelf(filt.fc, filt.gain, filt.q, GEN_SR),
     };
-    coeffs.ok().map(|c| biquad_db(&c, hz)).unwrap_or(0.0)
+    coeffs.ok().map_or(0.0, |c| biquad_db(&c, hz))
 }
 
 /// Generate a target curve = `base` (or flat) + a spectral `tilt` (dB/octave,
 /// pivoting at 1 kHz) + the sum of `filters`. The result is a dense
 /// [`RefCurve`] ready to overlay or normalise against.
+#[must_use]
 pub fn generate_target(base: Option<&RefCurve>, tilt_db_oct: f64, filters: &[TFilter]) -> RefCurve {
     let pts = (0..GRID_N)
         .map(|i| {
             let lf = LOG_MIN + (i as f64 / (GRID_N - 1) as f64) * (LOG_MAX - LOG_MIN);
             let f = 10f64.powf(lf);
-            let mut db = base.map(|b| b.interp(f)).unwrap_or(0.0);
+            let mut db = base.map_or(0.0, |b| b.interp(f));
             db += tilt_db_oct * (f / 1000.0).log2();
             db += filters.iter().map(|filt| tfilter_db(filt, f)).sum::<f64>();
             (f, db)
@@ -212,7 +225,8 @@ pub fn generate_target(base: Option<&RefCurve>, tilt_db_oct: f64, filters: &[TFi
 
 /// The on-the-fly customizer's three shaping filters (bass low-shelf, ~2.75 kHz
 /// ear-gain peak, treble high-shelf) for the given gains. Fixed
-/// frequencies/Q follow the CrinGraph target customizer.
+/// frequencies/Q follow the `CrinGraph` target customizer.
+#[must_use]
 pub fn customizer_filters(bass_db: f64, ear_db: f64, treble_db: f64) -> Vec<TFilter> {
     vec![
         TFilter {
@@ -236,7 +250,8 @@ pub fn customizer_filters(bass_db: f64, ear_db: f64, treble_db: f64) -> Vec<TFil
     ]
 }
 
-/// PEQdB Diamond β = Diffuse Field + these filters (paper Table 2).
+/// `PEQdB` Diamond β = Diffuse Field + these filters (paper Table 2).
+#[must_use]
 pub fn diamond_beta_filters() -> Vec<TFilter> {
     vec![
         TFilter {
@@ -260,7 +275,8 @@ pub fn diamond_beta_filters() -> Vec<TFilter> {
     ]
 }
 
-/// PEQdB Ultra = Diffuse Field + these filters (paper Table 1 / Figure 1).
+/// `PEQdB` Ultra = Diffuse Field + these filters (paper Table 1 / Figure 1).
+#[must_use]
 pub fn ultra_filters() -> Vec<TFilter> {
     vec![
         TFilter {
@@ -324,6 +340,9 @@ mod tests {
     }
 
     #[test]
+    // float_cmp: the clamp path returns the stored endpoint level verbatim, so the
+    // out-of-range asserts check exact expected literals (0.0 / 10.0).
+    #[allow(clippy::float_cmp)]
     fn interp_is_log_linear_and_clamped() {
         let c = RefCurve::from_points(vec![(100.0, 0.0), (1000.0, 10.0)]);
         // Geometric midpoint (~316 Hz) sits halfway in dB.

@@ -177,9 +177,7 @@ fn first_existing_dir(start: PathBuf) -> PathBuf {
 }
 
 pub fn home_dir() -> PathBuf {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/"))
+    std::env::var("HOME").map_or_else(|_| PathBuf::from("/"), PathBuf::from)
 }
 
 /// Expand a leading `~` to `$HOME` (only the simple `~` / `~/...` forms).
@@ -205,7 +203,7 @@ fn read_entries(dir: &Path, show_non_presets: bool) -> Vec<Item> {
                 continue;
             }
             let path = e.path();
-            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
             if is_dir {
                 dirs.push(Item {
                     name,
@@ -238,8 +236,11 @@ fn read_entries(dir: &Path, show_non_presets: bool) -> Vec<Item> {
 }
 
 pub fn is_preset(name: &str) -> bool {
-    let n = name.to_lowercase();
-    n.ends_with(".fac") || n.ends_with(".txt") || n.ends_with(".toml")
+    Path::new(name).extension().is_some_and(|e| {
+        ["fac", "txt", "toml"]
+            .iter()
+            .any(|ext| e.eq_ignore_ascii_case(ext))
+    })
 }
 
 /// Our own `.toml` export format (mirror of the daemon's `Profile`), used here
@@ -253,12 +254,13 @@ struct ProfilePreview {
 }
 
 fn preview_file(path: &Path) -> Vec<String> {
+    const MAX_BANDS: usize = 16;
     let Ok(content) = std::fs::read_to_string(path) else {
         return vec!["(cannot read file)".to_string()];
     };
 
     // Native `.toml` profiles render their own compact summary.
-    if path.extension().map(|e| e == "toml").unwrap_or(false) {
+    if path.extension().is_some_and(|e| e == "toml") {
         return match toml::from_str::<ProfilePreview>(&content) {
             Ok(p) => {
                 let mut out = vec![
@@ -289,7 +291,7 @@ fn preview_file(path: &Path) -> Vec<String> {
         return summary;
     }
 
-    let is_fac = path.extension().map(|e| e == "fac").unwrap_or(false);
+    let is_fac = path.extension().is_some_and(|e| e == "fac");
     let parsed = if is_fac {
         parse_fac(&content).map_err(|e| e.to_string())
     } else {
@@ -326,7 +328,6 @@ fn preview_file(path: &Path) -> Vec<String> {
             }
             out.push(String::new());
             out.push(format!("EQ bands: {}", p.bands.len()));
-            const MAX_BANDS: usize = 16;
             for b in p.bands.iter().take(MAX_BANDS) {
                 let bt: BandType = FilterType::from(b.filter_type).into();
                 out.push(format!(
@@ -344,7 +345,12 @@ fn preview_file(path: &Path) -> Vec<String> {
         }
         Err(e) => {
             let mut out = vec![format!("(parse error: {e})"), String::new()];
-            out.extend(content.lines().take(30).map(|l| l.to_string()));
+            out.extend(
+                content
+                    .lines()
+                    .take(30)
+                    .map(std::string::ToString::to_string),
+            );
             out
         }
     }
@@ -358,7 +364,7 @@ fn fmt_freq(hz: f64) -> String {
     }
 }
 
-/// Cheap preview for an EqualizerAPO `GraphicEQ:` target line — point count and
+/// Cheap preview for an `EqualizerAPO` `GraphicEQ:` target line — point count and
 /// range, without running the (expensive) curve-fit that import performs.
 fn graphic_eq_preview(content: &str) -> Option<Vec<String>> {
     let s = resonance_preset::graphic::graphic_eq_summary(content)?;

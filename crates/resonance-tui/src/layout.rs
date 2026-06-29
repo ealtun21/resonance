@@ -129,9 +129,9 @@ pub fn graph_log_range() -> (f64, f64) {
 /// Best-effort (our y labels are 3 chars wide, +1 axis column; 2 bottom rows);
 /// click/drag uses nearest-node selection, so a 1-cell offset stays usable.
 pub fn eq_plot_area(eq: Rect) -> Rect {
-    let inner = block_inner(eq);
     const LEFT: u16 = 4; // 3-char y labels ("-18"/" 0"/"+18") + axis column
     const BOTTOM: u16 = 2; // x-axis line row + label row
+    let inner = block_inner(eq);
     Rect::new(
         inner.x.saturating_add(LEFT),
         inner.y,
@@ -144,10 +144,10 @@ pub fn eq_plot_area(eq: Rect) -> Rect {
 /// visible ranges.
 pub fn graph_pixel_to_data(plot: Rect, col: u16, row: u16) -> (f64, f64) {
     let (lmin, lmax) = graph_log_range();
-    let w = (plot.width.max(2) - 1) as f64;
-    let h = (plot.height.max(2) - 1) as f64;
-    let fx = ((col.saturating_sub(plot.x)) as f64 / w).clamp(0.0, 1.0);
-    let fy = ((row.saturating_sub(plot.y)) as f64 / h).clamp(0.0, 1.0);
+    let w = f64::from(plot.width.max(2) - 1);
+    let h = f64::from(plot.height.max(2) - 1);
+    let fx = (f64::from(col.saturating_sub(plot.x)) / w).clamp(0.0, 1.0);
+    let fy = (f64::from(row.saturating_sub(plot.y)) / h).clamp(0.0, 1.0);
     let freq = 10f64.powf(lmin + fx * (lmax - lmin)).clamp(20.0, 20000.0);
     let gain = (GRAPH_DB_RANGE - fy * 2.0 * GRAPH_DB_RANGE).clamp(-GRAPH_DB_RANGE, GRAPH_DB_RANGE);
     (freq, gain)
@@ -156,14 +156,14 @@ pub fn graph_pixel_to_data(plot: Rect, col: u16, row: u16) -> (f64, f64) {
 /// Column where a band node at `freq` is drawn within the plot.
 pub fn graph_node_col(plot: Rect, freq: f64) -> u16 {
     let (lmin, lmax) = graph_log_range();
-    let w = (plot.width.max(2) - 1) as f64;
+    let w = f64::from(plot.width.max(2) - 1);
     let t = ((freq.clamp(20.0, 20000.0).log10() - lmin) / (lmax - lmin)).clamp(0.0, 1.0);
     plot.x + (t * w).round() as u16
 }
 
 /// Row where a band node at `gain` is drawn within the plot.
 pub fn graph_node_row(plot: Rect, gain: f64) -> u16 {
-    let h = (plot.height.max(2) - 1) as f64;
+    let h = f64::from(plot.height.max(2) - 1);
     let t = ((GRAPH_DB_RANGE - gain.clamp(-GRAPH_DB_RANGE, GRAPH_DB_RANGE))
         / (2.0 * GRAPH_DB_RANGE))
         .clamp(0.0, 1.0);

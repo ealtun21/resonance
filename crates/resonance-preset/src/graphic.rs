@@ -1,12 +1,12 @@
-//! Fit a GraphicEQ *target curve* to a bank of parametric filters.
+//! Fit a `GraphicEQ` *target curve* to a bank of parametric filters.
 //!
-//! EqualizerAPO's `GraphicEQ:` directive is a desired magnitude response sampled
+//! `EqualizerAPO`'s `GraphicEQ:` directive is a desired magnitude response sampled
 //! at a list of frequencies — **not** a set of filters. Realising it as one
 //! peaking filter per point is wrong: the bells overlap and sum, so the result
 //! is far more extreme than the target. Instead we *fit* a small bank of
 //! parametric filters (a broadband preamp, a low-shelf, a high-shelf, and a
 //! handful of peaking filters) to the curve so the summed response matches the
-//! target. This mirrors AutoEq's parametric export and keeps the result as
+//! target. This mirrors `AutoEq`'s parametric export and keeps the result as
 //! ordinary, editable EQ bands.
 //!
 //! The fit is a full nonlinear least-squares optimisation (Levenberg–Marquardt)
@@ -69,7 +69,7 @@ struct Filt {
     q: f64,
 }
 
-/// Lightweight summary of an EqualizerAPO `GraphicEQ:` target line: point count
+/// Lightweight summary of an `EqualizerAPO` `GraphicEQ:` target line: point count
 /// plus frequency and gain spans. For previews — it does NOT run the (expensive)
 /// curve fit that [`fit_graphic_eq`] / import performs.
 #[derive(Debug, Clone, Copy)]
@@ -124,6 +124,7 @@ pub fn graphic_eq_summary(content: &str) -> Option<GraphicEqSummary> {
 ///
 /// Returns `(preamp_db, bands)`: the broadband level lands in `preamp_db`, the
 /// shape in the bands. Returns an empty band list if there are too few points.
+#[must_use]
 pub fn fit_graphic_eq(points: &[(f64, f64)]) -> (f64, Vec<EqBand>) {
     let mut pts: Vec<(f64, f64)> = points
         .iter()
@@ -153,7 +154,7 @@ pub fn fit_graphic_eq(points: &[(f64, f64)]) -> (f64, Vec<EqBand>) {
     let mut best: Option<(f64, Vec<Filt>, f64)> = None; // (preamp, filts, rms)
     for &n_peaks in &PEAK_COUNTS {
         let (preamp0, filts0) = seed(&freqs, &target, n_peaks);
-        let (preamp, filts, rms) = lm_optimize(preamp0, filts0, &freqs, &target);
+        let (preamp, filts, rms) = lm_optimize(preamp0, &filts0, &freqs, &target);
         let better = match &best {
             None => true,
             // Accept a larger bank only if it cuts RMS by a worthwhile margin
@@ -331,12 +332,12 @@ fn cost(r: &[f64]) -> f64 {
 /// target. Returns the optimised parameters and the final RMS error (dB).
 fn lm_optimize(
     preamp: f64,
-    filts: Vec<Filt>,
+    filts: &[Filt],
     freqs: &[f64],
     target: &[f64],
 ) -> (f64, Vec<Filt>, f64) {
-    let template = filts.clone();
-    let mut p = pack(preamp, &filts);
+    let template = filts.to_vec();
+    let mut p = pack(preamp, filts);
     let n_pts = freqs.len();
     let n_par = p.len();
 
@@ -440,7 +441,7 @@ fn coeffs_of(f: &Filt) -> Option<BiquadCoeffs> {
 
 /// dB response of one filter at its own parameters, at frequency `f`.
 fn filt_db(filt: &Filt, f: f64) -> f64 {
-    coeffs_of(filt).map(|c| biquad_db(&c, f)).unwrap_or(0.0)
+    coeffs_of(filt).map_or(0.0, |c| biquad_db(&c, f))
 }
 
 /// dB response of a filter at a +1 dB reference gain (the shape that scales
@@ -564,7 +565,7 @@ mod tests {
         };
         let pts: Vec<(f64, f64)> = (0..60)
             .map(|i| {
-                let f = 20.0 * 2f64.powf(i as f64 / 6.0);
+                let f = 20.0 * 2f64.powf(f64::from(i) / 6.0);
                 (f, filt_db(&ls, f) + filt_db(&pk, f))
             })
             .filter(|(f, _)| *f < 20_000.0)
@@ -586,7 +587,7 @@ mod tests {
         };
         let pts: Vec<(f64, f64)> = (0..120)
             .map(|i| {
-                let f = 20.0 * 2f64.powf(i as f64 / 12.0);
+                let f = 20.0 * 2f64.powf(f64::from(i) / 12.0);
                 (f, filt_db(&spike, f))
             })
             .filter(|(f, _)| *f < 20_000.0)
@@ -617,7 +618,7 @@ mod tests {
         // optimiser: it's downsampled to MAX_FIT_POINTS, so the fit works on a
         // bounded set and returns promptly no matter how dense the input.
         let pts: Vec<(f64, f64)> = (0..5_000)
-            .map(|i| (20.0 + i as f64 * 4.0, 0.0))
+            .map(|i| (20.0 + f64::from(i) * 4.0, 0.0))
             .filter(|(f, _)| *f < 20_000.0)
             .collect();
         assert!(pts.len() > MAX_FIT_POINTS);

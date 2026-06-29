@@ -71,7 +71,7 @@ impl SpectrumEnvelope {
     /// fully silent.
     fn decay(&mut self) -> Option<[f32; BINS]> {
         if self.lit() {
-            for e in self.bins.iter_mut() {
+            for e in &mut self.bins {
                 *e *= 1.0 - Self::RELEASE;
                 if *e < 1e-4 {
                     *e = 0.0;
@@ -101,7 +101,7 @@ impl SpectrumEnvelope {
 }
 
 /// Drains the spectrum ring buffer periodically, computes FFT-based band energies,
-/// and publishes normalised bins to SharedState.
+/// and publishes normalised bins to `SharedState`.
 pub async fn run(mut rx: rtrb::Consumer<f32>, state: SharedState) {
     let mut planner = FftPlanner::<f32>::new();
     let fft = planner.plan_fft_forward(FFT_SIZE);
@@ -155,8 +155,7 @@ pub async fn run(mut rx: rtrb::Consumer<f32>, state: SharedState) {
             let inner = state.0.lock().unwrap();
             let watching = inner
                 .last_poll
-                .map(|t| t.elapsed() < Duration::from_millis(1500))
-                .unwrap_or(false);
+                .is_some_and(|t| t.elapsed() < Duration::from_millis(1500));
             let r = inner.chain.sample_rate;
             (if r.is_finite() && r > 0.0 { r } else { 48000.0 }, watching)
         };

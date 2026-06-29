@@ -169,7 +169,7 @@ impl Pen<'_> {
     }
     /// Tip + tangent direction of an arc end at `ang` degrees (radius `rad`,
     /// centre `cx,cy`). `cw` = the arc was drawn clockwise (increasing angle).
-    fn arc_end(&self, cx: f32, cy: f32, rad: f32, ang: f32, cw: bool) -> ((f32, f32), (f32, f32)) {
+    fn arc_end(cx: f32, cy: f32, rad: f32, ang: f32, cw: bool) -> ((f32, f32), (f32, f32)) {
         let a = ang.to_radians();
         let tip = (cx + rad * a.cos(), cy + rad * a.sin());
         // d/dθ(cos,sin) = (-sin, cos); reverse it for a counter-clockwise sweep.
@@ -269,7 +269,7 @@ fn paths(p: &Pen, icon: Icon) {
             // head — the universal "reload".
             let (cx, cy, r) = (0.50, 0.50, 0.30);
             p.arc(cx, cy, r, 300.0, 600.0); // 300°→240° (wraps), ~300° clockwise
-            let (tip, dir) = p.arc_end(cx, cy, r, 600.0, true);
+            let (tip, dir) = Pen::arc_end(cx, cy, r, 600.0, true);
             p.head(tip, dir, 0.20);
         }
         Icon::Sliders => {
@@ -311,14 +311,14 @@ fn paths(p: &Pen, icon: Icon) {
             // right→top→left, with the head at the left end pointing down.
             let (cx, cy, r) = (0.50, 0.55, 0.27);
             p.arc(cx, cy, r, 380.0, 180.0); // decreasing = counter-clockwise
-            let (tip, dir) = p.arc_end(cx, cy, r, 180.0, false);
+            let (tip, dir) = Pen::arc_end(cx, cy, r, 180.0, false);
             p.head(tip, dir, 0.18);
         }
         Icon::Redo => {
             // ↷ — mirror of Undo: left→top→right, head at the right end.
             let (cx, cy, r) = (0.50, 0.55, 0.27);
             p.arc(cx, cy, r, 160.0, 360.0); // increasing = clockwise
-            let (tip, dir) = p.arc_end(cx, cy, r, 360.0, true);
+            let (tip, dir) = Pen::arc_end(cx, cy, r, 360.0, true);
             p.head(tip, dir, 0.18);
         }
         Icon::Up => {

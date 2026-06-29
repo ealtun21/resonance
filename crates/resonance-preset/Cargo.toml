@@ -11,3 +11,6 @@ rust-version.workspace = true
 resonance-dsp = { path = "../resonance-dsp" }
 serde = { workspace = true }
 thiserror = { workspace = true }
+
+[lints]
+workspace = true

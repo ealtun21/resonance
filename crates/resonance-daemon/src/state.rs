@@ -74,13 +74,13 @@ pub struct Inner {
     pub needs_resync: bool,
     /// Latest spectrum — updated by the spectrum task, read by IPC handler.
     pub spectrum: [f32; SPECTRUM_BINS],
-    /// Available PipeWire Audio/Sink names (updated by pw_node).
+    /// Available `PipeWire` Audio/Sink names (updated by `pw_node`).
     pub available_sinks: Vec<String>,
-    /// Friendly `node.description` per sink as `(node_name, description)` (updated by pw_node).
+    /// Friendly `node.description` per sink as `(node_name, description)` (updated by `pw_node`).
     pub sink_descriptions: Vec<(String, String)>,
-    /// Preferred output node name set by SetOutputTarget.
+    /// Preferred output node name set by `SetOutputTarget`.
     pub preferred_output: Option<String>,
-    /// Send a preferred-output name to the pw_node main-loop thread.
+    /// Send a preferred-output name to the `pw_node` main-loop thread.
     pub route_tx: std::sync::mpsc::Sender<String>,
     /// In-memory A/B comparison slots ([A, B]); filled by `StoreSlot`.
     pub ab_slots: [Option<crate::config::Profile>; 2],
@@ -293,7 +293,7 @@ impl SharedState {
 
     /// Read the live `(channels, sample_rate)` and rebuild both the RT and the
     /// shadow chain from the same builder, then swap them in. `build` is invoked
-    /// twice — the RT thread and the GetState shadow each need their own
+    /// twice — the RT thread and the `GetState` shadow each need their own
     /// instance — so it must produce an identical chain on each call.
     pub fn rebuild_chain(&self, build: impl Fn(usize, f64) -> ProcessorChain) {
         let (channels, sample_rate) = {

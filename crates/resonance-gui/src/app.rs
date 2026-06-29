@@ -7,10 +7,10 @@
 
 use crate::curve;
 use crate::ipc::IpcClient;
-use crate::state::*;
+use crate::state::{Confirm, Dialog, Snapshot};
 use crate::theme::{Palette, Theme};
 use crate::ui::kit;
-use crate::ui::widgets::*;
+use crate::ui::widgets::{dialog_window, install_symbol_fonts};
 use eframe::egui;
 use resonance_ipc::{Command, DaemonState, Response, service, transport::TransportError};
 use std::sync::{Arc, Mutex};
@@ -27,7 +27,7 @@ const FRAME_INTERVAL: Duration = Duration::from_micros(6_944);
 /// frame both hammered the socket and made the bars jitter.
 const STATE_INTERVAL: Duration = Duration::from_millis(33);
 /// Profiles/mappings rarely change — poll them far less often than state.
-const META_INTERVAL: Duration = Duration::from_millis(1000);
+const META_INTERVAL: Duration = Duration::from_secs(1);
 /// How often the worker retries `connect()` while the daemon is unreachable.
 /// Snappy so a reconnect lands well inside `CONN_GRACE` after a daemon restart.
 const RECONNECT_INTERVAL: Duration = Duration::from_millis(500);
@@ -36,7 +36,7 @@ const RECONNECT_INTERVAL: Duration = Duration::from_millis(500);
 /// falling back to the "No daemon connected" start screen. A daemon restart or
 /// a momentary stall reconnects well within this window, so the UI no longer
 /// flickers between connected and disconnected on every blip.
-const CONN_GRACE: Duration = Duration::from_millis(3000);
+const CONN_GRACE: Duration = Duration::from_secs(3);
 /// Matugen colour-file mtime poll: snappy so the GUI recolours nearly as fast
 /// as other matugen-aware apps when the wallpaper/theme changes.
 const MATUGEN_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -281,7 +281,7 @@ pub struct GuiApp {
     pub(crate) last_service_poll: Instant,
     /// Channel into the service worker. We send `ServiceAction` requests
     /// off the UI thread because `launchctl` calls + the daemon's
-    /// CoreAudio teardown can take 200–800 ms — synchronous on the UI
+    /// `CoreAudio` teardown can take 200–800 ms — synchronous on the UI
     /// thread froze egui visibly when the user clicked Start/Stop.
     pub(crate) service_tx: std::sync::mpsc::Sender<ServiceAction>,
     /// Worker result channel. Each tick we drain it and apply updates
@@ -383,23 +383,20 @@ fn spawn_ipc_worker(
         .name("resonance-ipc".into())
         .spawn(move || {
             let mut ipc: Option<IpcClient> = None;
-            let mut last_meta = Instant::now() - META_INTERVAL;
+            let mut last_meta = Instant::now().checked_sub(META_INTERVAL).unwrap();
             let mut refresh_meta_now = true;
             loop {
                 if ipc.is_none() {
-                    match crate::ipc::connect() {
-                        Ok(c) => {
-                            ipc = Some(c);
-                            refresh_meta_now = true;
+                    if let Ok(c) = crate::ipc::connect() {
+                        ipc = Some(c);
+                        refresh_meta_now = true;
+                    } else {
+                        if let Ok(mut s) = shared.lock() {
+                            s.state = None;
                         }
-                        Err(_) => {
-                            if let Ok(mut s) = shared.lock() {
-                                s.state = None;
-                            }
-                            ctx.request_repaint();
-                            std::thread::sleep(RECONNECT_INTERVAL);
-                            continue;
-                        }
+                        ctx.request_repaint();
+                        std::thread::sleep(RECONNECT_INTERVAL);
+                        continue;
                     }
                 }
 
@@ -434,7 +431,7 @@ fn spawn_ipc_worker(
                                     worker_status(&shared, format!("imported + loaded '{name}'"));
                                 }
                                 Ok(Response::Error(e)) => {
-                                    worker_status(&shared, format!("import failed: {e}"))
+                                    worker_status(&shared, format!("import failed: {e}"));
                                 }
                                 Ok(_) => worker_status(&shared, "import failed".into()),
                                 Err(_) => {
@@ -446,10 +443,10 @@ fn spawn_ipc_worker(
                         WorkerCmd::Export(path) => {
                             match c.send_recv(Command::ExportProfile { path: path.clone() }) {
                                 Ok(Response::Ok) => {
-                                    worker_status(&shared, format!("exported → {path}"))
+                                    worker_status(&shared, format!("exported → {path}"));
                                 }
                                 Ok(Response::Error(e)) => {
-                                    worker_status(&shared, format!("export failed: {e}"))
+                                    worker_status(&shared, format!("export failed: {e}"));
                                 }
                                 Ok(_) => worker_status(&shared, "export failed".into()),
                                 Err(_) => {
@@ -464,10 +461,10 @@ fn spawn_ipc_worker(
                                 path: path.clone(),
                             }) {
                                 Ok(Response::Ok) => {
-                                    worker_status(&shared, format!("exported '{name}' → {path}"))
+                                    worker_status(&shared, format!("exported '{name}' → {path}"));
                                 }
                                 Ok(Response::Error(e)) => {
-                                    worker_status(&shared, format!("export failed: {e}"))
+                                    worker_status(&shared, format!("export failed: {e}"));
                                 }
                                 Ok(_) => worker_status(&shared, "export failed".into()),
                                 Err(_) => {
@@ -481,20 +478,17 @@ fn spawn_ipc_worker(
 
                 // Poll state.
                 if let Some(c) = ipc.as_mut() {
-                    match c.get_state() {
-                        Ok(st) => {
-                            if let Ok(mut s) = shared.lock() {
-                                s.state = Some(st);
-                            }
-                            ctx.request_repaint();
+                    if let Ok(st) = c.get_state() {
+                        if let Ok(mut s) = shared.lock() {
+                            s.state = Some(st);
                         }
-                        Err(_) => {
-                            ipc = None;
-                            if let Ok(mut s) = shared.lock() {
-                                s.state = None;
-                            }
-                            ctx.request_repaint();
+                        ctx.request_repaint();
+                    } else {
+                        ipc = None;
+                        if let Ok(mut s) = shared.lock() {
+                            s.state = None;
                         }
+                        ctx.request_repaint();
                     }
                 }
 
@@ -541,6 +535,7 @@ fn spawn_ipc_worker(
 
 impl GuiApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        use egui::containers::panel::PanelState;
         install_symbol_fonts(&cc.egui_ctx);
         let (service_tx, service_worker_rx) = std::sync::mpsc::channel::<ServiceAction>();
         let (service_worker_tx, service_rx) = std::sync::mpsc::channel::<ServiceWorkerResult>();
@@ -553,8 +548,7 @@ impl GuiApp {
         let theme = cc
             .storage
             .and_then(|s| s.get_string("theme"))
-            .map(|s| Theme::from_label(&s))
-            .unwrap_or(Theme::Resonance);
+            .map_or(Theme::Resonance, |s| Theme::from_label(&s));
         cc.egui_ctx.set_visuals(theme.visuals());
         // Restore the reference overlay (measurement + target) from a previous
         // session so a loaded measurement persists across restarts.
@@ -649,8 +643,7 @@ impl GuiApp {
             per_channel_eq: cc
                 .storage
                 .and_then(|s| s.get_string("per_channel_eq"))
-                .map(|v| v == "true")
-                .unwrap_or(false),
+                .is_some_and(|v| v == "true"),
             hidden_curves: std::collections::HashSet::new(),
             demo: std::env::var("RESONANCE_DEMO").is_ok(),
             open_customizer: std::env::var("RESONANCE_OPEN").as_deref() == Ok("customize"),
@@ -680,7 +673,7 @@ impl GuiApp {
             // the demo shows the full reference workflow like the design mock.
             let meas: Vec<(f64, f64)> = (0..96)
                 .map(|i| {
-                    let f = 20.0 * 1000f64.powf(i as f64 / 95.0); // 20 Hz → 20 kHz
+                    let f = 20.0 * 1000f64.powf(f64::from(i) / 95.0); // 20 Hz → 20 kHz
                     let l = f.log10();
                     let db = 84.0
                         + 4.0 / (1.0 + (f / 110.0).powi(2))
@@ -733,7 +726,6 @@ impl GuiApp {
                     app.reference.show_bounds = true;
                 }
             }
-            use egui::containers::panel::PanelState;
             cc.egui_ctx.data_mut(|d| {
                 d.remove::<PanelState>(egui::Id::new("controls_panel"));
                 d.remove::<PanelState>(egui::Id::new("graph_narrow"));
@@ -767,7 +759,7 @@ impl GuiApp {
         }
     }
 
-    /// Apply a finished background Auto-EQ fit (undo snapshot + ApplyState).
+    /// Apply a finished background Auto-EQ fit (undo snapshot + `ApplyState`).
     pub(crate) fn pump_autoeq(&mut self) {
         while let Ok(o) = self.autoeq_rx.try_recv() {
             self.autoeq_busy = false;
@@ -819,8 +811,7 @@ impl GuiApp {
         let now = Instant::now();
         let coalesce = self
             .last_edit
-            .map(|t| now.duration_since(t) < UNDO_COALESCE)
-            .unwrap_or(false);
+            .is_some_and(|t| now.duration_since(t) < UNDO_COALESCE);
         if !coalesce {
             if let Some(s) = self.snapshot() {
                 self.undo_stack.push(s);
@@ -918,7 +909,7 @@ impl GuiApp {
         // Drop lock pins that no longer name a valid band — a profile load or
         // another client can shrink the band list, after which a stale pin would
         // silently apply to a different band.
-        let bands = self.state.as_ref().map(|s| s.bands.len()).unwrap_or(0);
+        let bands = self.state.as_ref().map_or(0, |s| s.bands.len());
         self.vlock = self.vlock.filter(|&i| i < bands);
         self.hlock = self.hlock.filter(|&i| i < bands);
         if let Some(msg) = status {
@@ -1103,6 +1094,7 @@ impl eframe::App for GuiApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        use egui::containers::panel::PanelState;
         // Read the latest snapshot the IPC worker published (never blocks).
         self.pull_shared();
 
@@ -1154,7 +1146,6 @@ impl eframe::App for GuiApp {
                 // Window has settled to its windowed size; drop the stale panel
                 // sizes so the proportional defaults re-apply to that size.
                 self.migrate_settle = None;
-                use egui::containers::panel::PanelState;
                 ui.ctx()
                     .data_mut(|d| d.remove::<PanelState>(egui::Id::new("controls_panel")));
             } else {

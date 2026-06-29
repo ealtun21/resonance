@@ -98,6 +98,7 @@ impl Default for EffectState {
 }
 
 impl Preset {
+    #[must_use]
     pub fn into_chain(self, channels: usize, sample_rate: f64) -> ProcessorChain {
         let mut builder = ProcessorChainBuilder::default()
             .channels(channels)

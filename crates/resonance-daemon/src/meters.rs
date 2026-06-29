@@ -38,7 +38,7 @@ pub struct AtomicMeters {
     live_capture_rate: AtomicU32,
     /// The live channel count the RT path is actually running at. 0 until the
     /// backend reports one. Same rationale as `live_sample_rate`: the daemon's
-    /// mirror chain stays frozen at its construction width, but the PipeWire
+    /// mirror chain stays frozen at its construction width, but the `PipeWire`
     /// backend follows the output device's channel count live — so `status` and
     /// any `rebuild_chain` must read THIS, not the stale mirror, or they'd report
     /// (and rebuild at) the wrong width after a device-channel hot-swap.
@@ -56,7 +56,7 @@ impl AtomicMeters {
     pub fn sample_rate(&self) -> Option<f64> {
         match self.live_sample_rate.load(Ordering::Relaxed) {
             0 => None,
-            hz => Some(hz as f64),
+            hz => Some(f64::from(hz)),
         }
     }
 
@@ -70,12 +70,12 @@ impl AtomicMeters {
     pub fn capture_rate(&self) -> Option<f64> {
         match self.live_capture_rate.load(Ordering::Relaxed) {
             0 => None,
-            hz => Some(hz as f64),
+            hz => Some(f64::from(hz)),
         }
     }
 
     /// Record the live channel count the RT path is running at (RT thread).
-    /// Only the PipeWire backend follows the device channel count, so this writer
+    /// Only the `PipeWire` backend follows the device channel count, so this writer
     /// is unused on macOS/Windows (their backends are stereo-bounded / APO-owned);
     /// `channels()` still reads it everywhere and falls back to the mirror width.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -148,7 +148,7 @@ pub fn peak_rms_f32(buf: &[f32]) -> (f32, f32) {
         if a > peak {
             peak = a;
         }
-        sumsq += (x as f64) * (x as f64);
+        sumsq += f64::from(x) * f64::from(x);
     }
     let rms = (sumsq / buf.len() as f64).sqrt() as f32;
     (peak, rms)

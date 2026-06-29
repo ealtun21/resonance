@@ -83,7 +83,7 @@ pub struct ChainSnapshot {
     /// of `route_gains`. Only applied by the APO when `N` equals its live channel
     /// count (the in-graph filter is in-place, so remap must be square).
     pub route_channels: u32,
-    pub _pad_route: u32,
+    _pad_route: u32,
     pub route_gains: [f64; MAX_ROUTE * MAX_ROUTE],
 }
 
@@ -181,7 +181,7 @@ pub struct SharedState {
     /// Set by the daemon (1) while a client is watching; the APO skips all
     /// metering/FFT work when 0 — zero added cost on the audio thread.
     pub telemetry_enabled: AtomicU32,
-    pub _pad2: u32,
+    _pad2: u32,
     pub telemetry: Telemetry,
 }
 
@@ -200,20 +200,21 @@ fn effect(chain: &ProcessorChain, e: FxEffect) -> EffectSnapshot {
         FxEffect::Bass => (chain.bass.intensity(), chain.bass.enabled()),
     };
     EffectSnapshot {
-        enabled: enabled as u32,
+        enabled: u32::from(enabled),
         intensity,
     }
 }
 
 impl ChainSnapshot {
     /// Capture the daemon's current chain (format-independent parameters only).
+    #[must_use]
     pub fn from_chain(chain: &ProcessorChain) -> Self {
         let mut filters = [FilterSnapshot::default(); MAX_FILTERS];
         let n = chain.filters.len().min(MAX_FILTERS);
         for (dst, f) in filters.iter_mut().zip(chain.filters.iter()).take(n) {
             *dst = FilterSnapshot {
                 kind: filter_type_to_u32(f.filter_type),
-                enabled: f.enabled as u32,
+                enabled: u32::from(f.enabled),
                 freq: f.freq,
                 gain_db: f.gain_db,
                 q: f.q,
@@ -222,7 +223,7 @@ impl ChainSnapshot {
         }
         let (route_channels, route_gains) = route_snapshot(chain);
         Self {
-            enabled: chain.enabled as u32,
+            enabled: u32::from(chain.enabled),
             preamp_db: chain.preamp_db,
             fidelity: effect(chain, FxEffect::Fidelity),
             ambience: effect(chain, FxEffect::Ambience),
@@ -239,6 +240,7 @@ impl ChainSnapshot {
 
     /// Rebuild a `ProcessorChain` at the APO's negotiated format, applying these
     /// parameters. Filters that fail to build (bad coeffs) are skipped.
+    #[must_use]
     pub fn build_chain(&self, channels: usize, sample_rate: f64) -> ProcessorChain {
         let mut builder = ProcessorChain::builder()
             .channels(channels)
@@ -326,6 +328,7 @@ impl ChainSnapshot {
 }
 
 /// Stable `FilterType` → `u32` mapping for the shared block (must round-trip).
+#[must_use]
 pub fn filter_type_to_u32(t: FilterType) -> u32 {
     match t {
         FilterType::Peaking => 0,
@@ -346,6 +349,7 @@ pub fn filter_type_to_u32(t: FilterType) -> u32 {
 }
 
 /// Inverse of [`filter_type_to_u32`]; unknown values fall back to `Peaking`.
+#[must_use]
 pub fn filter_type_from_u32(v: u32) -> FilterType {
     match v {
         1 => FilterType::LowShelf,
@@ -367,6 +371,7 @@ pub fn filter_type_from_u32(v: u32) -> FilterType {
 
 /// Default shared-state file path. `%ProgramData%\Resonance\apo_state.bin` on
 /// Windows (readable by `audiodg.exe`), a temp path elsewhere (tests only).
+#[must_use]
 pub fn default_state_path() -> PathBuf {
     #[cfg(windows)]
     {
@@ -394,6 +399,14 @@ impl SharedFile {
     /// Open (creating if needed) the shared file at `path`, sized to
     /// [`STATE_SIZE`]. Initialises the header only if it isn't already valid, so
     /// it's safe regardless of which process opens first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] if the parent directory cannot be created, the
+    /// file cannot be opened, it cannot be sized to [`STATE_SIZE`], or the
+    /// memory map fails.
+    // mmap base is page-aligned, exceeding SharedState's alignment.
+    #[allow(clippy::cast_ptr_alignment)]
     pub fn open(path: &Path) -> io::Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -409,7 +422,7 @@ impl SharedFile {
         let mmap = unsafe { memmap2::MmapMut::map_mut(&file)? };
         let this = Self { mmap };
         // SAFETY: map is STATE_SIZE bytes; SharedState is repr(C).
-        let st = unsafe { &*(this.mmap.as_ptr() as *const SharedState) };
+        let st = unsafe { &*this.mmap.as_ptr().cast::<SharedState>() };
         if st.magic != STATE_MAGIC || st.version != STATE_VERSION {
             let st = unsafe { &mut *(this.mmap.as_ptr() as *mut SharedState) };
             st.magic = STATE_MAGIC;
@@ -422,16 +435,23 @@ impl SharedFile {
     }
 
     /// Backwards-compatible alias used by the daemon.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] under the same conditions as [`Self::open`].
     pub fn create(path: &Path) -> io::Result<Self> {
         Self::open(path)
     }
 
+    // mmap base is page-aligned, exceeding SharedState's alignment.
+    #[allow(clippy::cast_ptr_alignment)]
     fn state(&self) -> &SharedState {
         // SAFETY: map is STATE_SIZE bytes; SharedState is repr(C).
-        unsafe { &*(self.mmap.as_ptr() as *const SharedState) }
+        unsafe { &*self.mmap.as_ptr().cast::<SharedState>() }
     }
 
-    #[allow(clippy::mut_from_ref)]
+    // mmap base is page-aligned, exceeding SharedState's alignment.
+    #[allow(clippy::mut_from_ref, clippy::cast_ptr_alignment)]
     fn state_mut(&self) -> &mut SharedState {
         // SAFETY: map is STATE_SIZE bytes; SharedState is repr(C). Field-level
         // seqlocks/atomics guard concurrent access across processes.
@@ -451,11 +471,13 @@ impl SharedFile {
     }
 
     /// Current chain generation (cheap; lets the APO poller skip unchanged state).
+    #[must_use]
     pub fn generation(&self) -> u64 {
         self.state().generation.load(Ordering::Acquire)
     }
 
     /// Read a consistent chain snapshot (seqlock retry), or `None`.
+    #[must_use]
     pub fn read(&self) -> Option<ChainSnapshot> {
         let st = self.state();
         if st.magic != STATE_MAGIC || st.version != STATE_VERSION {
@@ -482,10 +504,11 @@ impl SharedFile {
     pub fn set_telemetry_enabled(&self, on: bool) {
         self.state()
             .telemetry_enabled
-            .store(on as u32, Ordering::Release);
+            .store(u32::from(on), Ordering::Release);
     }
 
     /// APO: is a client watching? Cheap atomic load on the audio thread.
+    #[must_use]
     pub fn telemetry_enabled(&self) -> bool {
         self.state().telemetry_enabled.load(Ordering::Acquire) != 0
     }
@@ -515,6 +538,7 @@ impl SharedFile {
     }
 
     /// Daemon: read a consistent telemetry snapshot (seqlock retry), or `None`.
+    #[must_use]
     pub fn read_telemetry(&self) -> Option<TelemetrySnapshot> {
         let t = &self.state().telemetry;
         for _ in 0..16 {
@@ -569,9 +593,10 @@ fn read_f32(buf: &[u8], off: usize) -> Option<f32> {
 }
 
 /// Fresh read of the daemon's chain snapshot + telemetry gate (generation,
-/// snapshot, telemetry_enabled). Seqlock: read twice and require an even,
+/// snapshot, `telemetry_enabled`). Seqlock: read twice and require an even,
 /// unchanged generation. `None` while a write is in flight or the header is
 /// not yet valid — the caller simply polls again.
+#[must_use]
 pub fn read_chain_fresh(path: &Path) -> Option<(u64, ChainSnapshot, bool)> {
     let ver_off = std::mem::offset_of!(SharedState, version);
     let gen_off = std::mem::offset_of!(SharedState, generation);
@@ -596,7 +621,7 @@ pub fn read_chain_fresh(path: &Path) -> Option<(u64, ChainSnapshot, bool)> {
         // SAFETY: ChainSnapshot is repr(C) + Copy with no padding-sensitive
         // invariants; read unaligned from the heap buffer at its field offset.
         let snap =
-            unsafe { std::ptr::read_unaligned(b1.as_ptr().add(snap_off) as *const ChainSnapshot) };
+            unsafe { std::ptr::read_unaligned(b1.as_ptr().add(snap_off).cast::<ChainSnapshot>()) };
         let gate = read_u32(&b1, gate_off)? != 0;
         // Confirm the generation didn't change across the copy (no torn read).
         let g2 = read_u64(&std::fs::read(path).ok()?, gen_off)?;
@@ -609,6 +634,7 @@ pub fn read_chain_fresh(path: &Path) -> Option<(u64, ChainSnapshot, bool)> {
 
 /// Fresh read of the APO's telemetry block (meters + spectrum), used by the
 /// daemon. Same seqlock-over-fresh-reads scheme as [`read_chain_fresh`].
+#[must_use]
 pub fn read_telemetry_fresh(path: &Path) -> Option<TelemetrySnapshot> {
     let tel_off = std::mem::offset_of!(SharedState, telemetry);
     let gen_off = tel_off + std::mem::offset_of!(Telemetry, generation);
@@ -644,6 +670,8 @@ pub fn read_telemetry_fresh(path: &Path) -> Option<TelemetrySnapshot> {
 
 #[cfg(test)]
 mod tests {
+    // Asserts compare against exact stored/expected round-trip values.
+    #![allow(clippy::float_cmp)]
     use super::*;
     use resonance_dsp::filter::{ApoFilter, FilterType};
 

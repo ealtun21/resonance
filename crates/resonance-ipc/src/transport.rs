@@ -20,6 +20,10 @@ pub enum TransportError {
 pub const MAX_MSG_LEN: u32 = 4 * 1024 * 1024;
 
 /// Write a length-prefixed postcard message to a stream.
+///
+/// # Errors
+/// Returns an error if encoding the message fails, the encoded frame exceeds
+/// [`MAX_MSG_LEN`], or the write to the stream fails.
 pub fn write_msg<W: Write, T: serde::Serialize>(
     writer: &mut W,
     msg: &T,
@@ -41,6 +45,10 @@ pub fn write_msg<W: Write, T: serde::Serialize>(
 }
 
 /// Read a length-prefixed postcard message from a stream.
+///
+/// # Errors
+/// Returns an error if the read fails, the framed length exceeds
+/// [`MAX_MSG_LEN`], or the payload fails to decode.
 pub fn read_msg<R: Read, T: serde::de::DeserializeOwned>(
     reader: &mut R,
 ) -> Result<T, TransportError> {
@@ -58,18 +66,26 @@ pub fn read_msg<R: Read, T: serde::de::DeserializeOwned>(
     Ok(from_bytes(&buf)?)
 }
 
+/// # Errors
+/// Returns an error if the command cannot be encoded or written (see [`write_msg`]).
 pub fn write_command<W: Write>(writer: &mut W, cmd: &Command) -> Result<(), TransportError> {
     write_msg(writer, cmd)
 }
 
+/// # Errors
+/// Returns an error if the command cannot be read or decoded (see [`read_msg`]).
 pub fn read_command<R: Read>(reader: &mut R) -> Result<Command, TransportError> {
     read_msg(reader)
 }
 
+/// # Errors
+/// Returns an error if the response cannot be encoded or written (see [`write_msg`]).
 pub fn write_response<W: Write>(writer: &mut W, resp: &Response) -> Result<(), TransportError> {
     write_msg(writer, resp)
 }
 
+/// # Errors
+/// Returns an error if the response cannot be read or decoded (see [`read_msg`]).
 pub fn read_response<R: Read>(reader: &mut R) -> Result<Response, TransportError> {
     read_msg(reader)
 }
@@ -90,6 +106,10 @@ pub type ClientStream = std::net::TcpStream;
 
 /// Connect to the running daemon. On Unix this dials the Unix socket; on Windows
 /// it reads the daemon's port file and dials `127.0.0.1:<port>`.
+///
+/// # Errors
+/// Returns an error if the daemon is not running or the socket/port cannot be
+/// reached (on Windows, also if the port file is missing).
 pub fn connect() -> io::Result<ClientStream> {
     #[cfg(unix)]
     {
@@ -111,6 +131,7 @@ pub fn connect() -> io::Result<ClientStream> {
 }
 
 /// Best-effort check whether the daemon is currently accepting connections.
+#[must_use]
 pub fn is_reachable() -> bool {
     connect().is_ok()
 }
@@ -134,7 +155,11 @@ impl SyncClient {
     }
 
     /// Connect with no I/O timeout (blocking). Use for the CLI, where a command
-    /// may legitimately wait on slower daemon work (preset import, AutoEq).
+    /// may legitimately wait on slower daemon work (preset import, `AutoEq`).
+    ///
+    /// # Errors
+    /// Returns an error if the daemon cannot be reached or the stream cannot be
+    /// cloned for the buffered reader/writer pair.
     pub fn connect() -> Result<Self, TransportError> {
         Self::from_stream(connect()?)
     }
@@ -142,6 +167,10 @@ impl SyncClient {
     /// Connect with a read+write timeout, so a stalled daemon can't wedge an
     /// interactive client. Both directions are bounded (the TUI previously
     /// bounded only reads).
+    ///
+    /// # Errors
+    /// Returns an error if the daemon cannot be reached, the timeouts cannot be
+    /// set, or the stream cannot be cloned for the buffered reader/writer pair.
     pub fn connect_with_timeout(timeout: Duration) -> Result<Self, TransportError> {
         let stream = connect()?;
         stream.set_read_timeout(Some(timeout))?;
@@ -150,6 +179,13 @@ impl SyncClient {
     }
 
     /// Send a command and return the raw response.
+    ///
+    /// # Errors
+    /// Returns an error if writing the command, flushing, or reading the
+    /// response fails.
+    // consume-style send API — the command is handed off to be sent; by-ref would
+    // force &Command at all call sites for no gain.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn send_recv(&mut self, cmd: Command) -> Result<Response, TransportError> {
         write_command(&mut self.writer, &cmd)?;
         self.writer.flush()?;
@@ -157,6 +193,10 @@ impl SyncClient {
     }
 
     /// Fetch the daemon state snapshot.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails, the daemon replies with an error,
+    /// or the reply is not a state snapshot.
     pub fn get_state(&mut self) -> Result<DaemonState, TransportError> {
         match self.send_recv(Command::GetState)? {
             Response::State(s) => Ok(s),
@@ -167,6 +207,10 @@ impl SyncClient {
 
     /// Send a command and treat only `Response::Error` as failure; any other
     /// reply (Ok / State / lists) counts as success.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails or the daemon replies with
+    /// `Response::Error`.
     pub fn send(&mut self, cmd: Command) -> Result<(), TransportError> {
         match self.send_recv(cmd)? {
             Response::Error(e) => Err(TransportError::Daemon(e)),

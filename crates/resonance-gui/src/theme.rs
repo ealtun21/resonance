@@ -252,24 +252,24 @@ fn rgb(r: u8, g: u8, b: u8) -> Color32 {
 
 fn darken(c: Color32, f: f32) -> Color32 {
     Color32::from_rgb(
-        (c.r() as f32 / f) as u8,
-        (c.g() as f32 / f) as u8,
-        (c.b() as f32 / f) as u8,
+        (f32::from(c.r()) / f) as u8,
+        (f32::from(c.g()) / f) as u8,
+        (f32::from(c.b()) / f) as u8,
     )
 }
 
 fn lighten(c: Color32, f: f32) -> Color32 {
     Color32::from_rgb(
-        (c.r() as f32 * f).min(255.0) as u8,
-        (c.g() as f32 * f).min(255.0) as u8,
-        (c.b() as f32 * f).min(255.0) as u8,
+        (f32::from(c.r()) * f).min(255.0) as u8,
+        (f32::from(c.g()) * f).min(255.0) as u8,
+        (f32::from(c.b()) * f).min(255.0) as u8,
     )
 }
 
 /// Linear interpolation `a → b` by `t` (0..1), per channel.
 fn blend(a: Color32, b: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
-    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t) as u8;
+    let mix = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t) as u8;
     Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
 }
 
@@ -377,7 +377,7 @@ fn kde_globals() -> Option<String> {
 fn kde_color(text: &str, section: &str, key: &str) -> Option<Color32> {
     let start = text.find(&format!("[{section}]"))?;
     let rest = &text[start..];
-    let end = rest[1..].find('[').map(|i| i + 1).unwrap_or(rest.len());
+    let end = rest[1..].find('[').map_or(rest.len(), |i| i + 1);
     for line in rest[..end].lines() {
         if let Some(v) = line.trim().strip_prefix(&format!("{key}=")) {
             let c: Vec<u8> = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
@@ -402,7 +402,7 @@ fn kde_accent() -> Option<Color32> {
 fn kde_is_dark() -> Option<bool> {
     let t = kde_globals()?;
     let bg = kde_color(&t, "Colors:Window", "BackgroundNormal")?;
-    Some((bg.r() as u32 + bg.g() as u32 + bg.b() as u32) / 3 < 128)
+    Some((u32::from(bg.r()) + u32::from(bg.g()) + u32::from(bg.b())) / 3 < 128)
 }
 
 /// Read a `HKCU` registry value via `reg query`, returning the raw token (the
@@ -610,10 +610,8 @@ pub fn matugen_source_mtime() -> Option<std::time::SystemTime> {
 
 /// Heuristic: a matugen background brighter than mid-grey ⇒ light theme.
 fn matugen_is_light() -> bool {
-    matugen_palette()
-        .map(|p| {
-            let c = p.graph_bg;
-            (c.r() as u32 + c.g() as u32 + c.b() as u32) / 3 > 140
-        })
-        .unwrap_or(false)
+    matugen_palette().is_some_and(|p| {
+        let c = p.graph_bg;
+        (u32::from(c.r()) + u32::from(c.g()) + u32::from(c.b())) / 3 > 140
+    })
 }

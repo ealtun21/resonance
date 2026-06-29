@@ -126,7 +126,7 @@ pub fn apply_command(chain: &mut ProcessorChain, cmd: AudioCommand) {
         AudioCommand::SetPower(on) => chain.enabled = on,
         AudioCommand::SetPreamp(db) => chain.preamp_db = db,
         AudioCommand::SetEffectIntensity { effect, value } => {
-            chain.set_effect_intensity(effect, value)
+            chain.set_effect_intensity(effect, value);
         }
         AudioCommand::SetEffectEnabled { effect, on } => chain.set_effect_enabled(effect, on),
         AudioCommand::ReplaceChain(c) => *chain = *c,
@@ -197,7 +197,7 @@ mod tests {
     fn chain() -> ProcessorChain {
         ProcessorChain::builder()
             .channels(CHANNELS)
-            .sample_rate(SAMPLE_RATE as f64)
+            .sample_rate(f64::from(SAMPLE_RATE))
             .build()
     }
 

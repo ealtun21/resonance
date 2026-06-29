@@ -87,108 +87,113 @@ impl GuiApp {
             ui.add_space(kit::CARD_PAD_X);
             let font = egui::FontId::monospace(kit::T_VALUE);
             let sep = "  ·  ";
-            match state.bands.get(self.selected_band) {
-                Some(b) => {
-                    let freq = if b.freq >= 1000.0 {
-                        format!("{:.2}k Hz", b.freq / 1000.0)
-                    } else {
-                        format!("{:.0} Hz", b.freq)
-                    };
-                    let ch = crate::ui::bands::channel_tag(
-                        b.channels,
-                        &state.channel_layout,
-                        state.channels,
+            if let Some(b) = state.bands.get(self.selected_band) {
+                let freq = if b.freq >= 1000.0 {
+                    format!("{:.2}k Hz", b.freq / 1000.0)
+                } else {
+                    format!("{:.0} Hz", b.freq)
+                };
+                let ch = crate::ui::bands::channel_tag(
+                    b.channels,
+                    &state.channel_layout,
+                    state.channels,
+                );
+                let mut job = egui::text::LayoutJob::default();
+                let mut push = |s: &str, col: egui::Color32| {
+                    job.append(
+                        s,
+                        0.0,
+                        egui::TextFormat {
+                            font_id: font.clone(),
+                            color: col,
+                            ..Default::default()
+                        },
                     );
-                    let mut job = egui::text::LayoutJob::default();
-                    let mut push = |s: &str, col: egui::Color32| {
-                        job.append(
-                            s,
-                            0.0,
-                            egui::TextFormat {
-                                font_id: font.clone(),
-                                color: col,
-                                ..Default::default()
-                            },
-                        );
-                    };
-                    push(
-                        &format!("Band {}", self.selected_band + 1),
-                        self.palette.highlight,
-                    );
+                };
+                push(
+                    &format!("Band {}", self.selected_band + 1),
+                    self.palette.highlight,
+                );
+                push(sep, t.faint);
+                push(b.band_type.abbrev(), t.text);
+                push(sep, t.faint);
+                push(&freq, t.text);
+                push(sep, t.faint);
+                push(
+                    &format!("{:+.1} dB", b.gain_db),
+                    gain_color(b.gain_db, &self.palette),
+                );
+                push(sep, t.faint);
+                push(&format!("Q {:.2}", b.q), t.text);
+                if state.channels >= 2 {
                     push(sep, t.faint);
-                    push(b.band_type.abbrev(), t.text);
-                    push(sep, t.faint);
-                    push(&freq, t.text);
-                    push(sep, t.faint);
-                    push(
-                        &format!("{:+.1} dB", b.gain_db),
-                        gain_color(b.gain_db, &self.palette),
-                    );
-                    push(sep, t.faint);
-                    push(&format!("Q {:.2}", b.q), t.text);
-                    if state.channels >= 2 {
-                        push(sep, t.faint);
-                        push(&ch, t.dim);
-                    }
-                    if !b.enabled {
-                        push(sep, t.faint);
-                        push("bypassed", t.faint);
-                    }
-                    let galley = ui.painter().layout_job(job);
-                    let (r, _) = ui.allocate_exact_size(
-                        egui::vec2(galley.size().x, 22.0),
-                        egui::Sense::hover(),
-                    );
-                    ui.painter().galley(
-                        egui::pos2(r.left(), r.center().y - galley.size().y / 2.0),
-                        galley,
-                        t.text,
-                    );
-                    // Right-aligned: the active lock state when a node is locked,
-                    // otherwise the gesture legend (the card has no head bar now,
-                    // so this is the one place the gestures are spelled out).
-                    let (hint, col) = if self.vlock == Some(self.selected_band) {
-                        ("vertical-locked · gain only", self.palette.highlight)
-                    } else if self.hlock == Some(self.selected_band) {
-                        ("gain-locked · freq only", self.palette.highlight)
-                    } else {
-                        (
-                            "drag = move · right-drag = Q · scroll = zoom · double-right-click = lock axis",
-                            t.faint,
-                        )
-                    };
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(kit::CARD_PAD_X);
-                        let w = kit::text_width(ui, kit::T_CAPTION, hint);
-                        let (hr, _) =
-                            ui.allocate_exact_size(egui::vec2(w, 22.0), egui::Sense::hover());
-                        ui.painter().text(
-                            egui::pos2(hr.right(), hr.center().y),
-                            egui::Align2::RIGHT_CENTER,
-                            hint,
-                            egui::FontId::proportional(kit::T_CAPTION),
-                            col,
-                        );
-                    });
+                    push(&ch, t.dim);
                 }
-                None => {
-                    let (r, _) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), 22.0),
-                        egui::Sense::hover(),
-                    );
-                    ui.painter().text(
-                        egui::pos2(r.left(), r.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        "double-click the graph to add a band",
-                        egui::FontId::proportional(kit::T_CAPTION),
+                if !b.enabled {
+                    push(sep, t.faint);
+                    push("bypassed", t.faint);
+                }
+                let galley = ui.painter().layout_job(job);
+                let (r, _) = ui.allocate_exact_size(
+                    egui::vec2(galley.size().x, 22.0),
+                    egui::Sense::hover(),
+                );
+                ui.painter().galley(
+                    egui::pos2(r.left(), r.center().y - galley.size().y / 2.0),
+                    galley,
+                    t.text,
+                );
+                // Right-aligned: the active lock state when a node is locked,
+                // otherwise the gesture legend (the card has no head bar now,
+                // so this is the one place the gestures are spelled out).
+                let (hint, col) = if self.vlock == Some(self.selected_band) {
+                    ("vertical-locked · gain only", self.palette.highlight)
+                } else if self.hlock == Some(self.selected_band) {
+                    ("gain-locked · freq only", self.palette.highlight)
+                } else {
+                    (
+                        "drag = move · right-drag = Q · scroll = zoom · double-right-click = lock axis",
                         t.faint,
+                    )
+                };
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(kit::CARD_PAD_X);
+                    let w = kit::text_width(ui, kit::T_CAPTION, hint);
+                    let (hr, _) =
+                        ui.allocate_exact_size(egui::vec2(w, 22.0), egui::Sense::hover());
+                    ui.painter().text(
+                        egui::pos2(hr.right(), hr.center().y),
+                        egui::Align2::RIGHT_CENTER,
+                        hint,
+                        egui::FontId::proportional(kit::T_CAPTION),
+                        col,
                     );
-                }
+                });
+            } else {
+                let (r, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 22.0),
+                    egui::Sense::hover(),
+                );
+                ui.painter().text(
+                    egui::pos2(r.left(), r.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    "double-click the graph to add a band",
+                    egui::FontId::proportional(kit::T_CAPTION),
+                    t.faint,
+                );
             }
         });
     }
 
     pub(crate) fn eq_curve(&mut self, ui: &mut egui::Ui, state: &DaemonState) {
+        use egui::PointerButton::{Primary, Secondary};
+        // Spectrum-bar tuning (used in the analyzer fill below). A small minimum
+        // body + floor alpha keep a faint analyzer band visible even in silence,
+        // so the spectrum never looks "gone" — it just lights up with audio.
+        const MIN_BODY: f32 = 0.016;
+        // Small inter-bar gap so the analyzer reads as discrete columns rather
+        // than one opaque slab — keeps the response curve the focus.
+        const GAP: f32 = 1.0;
         // Fill the FR panel so dragging its bottom edge resizes the graph.
         let height = ui.available_height().max(50.0);
         let (rect, response) = ui.allocate_exact_size(
@@ -234,11 +239,11 @@ impl GuiApp {
         // Animate the normalise toggle: `na` eases 0↔1 so the target line visibly
         // flattens to the 0-line and the result/measurement stretch into deviation,
         // instead of snapping. Fed into `series` (the geometry) and the draw below.
-        let na = ui.ctx().animate_bool_with_time(
+        let na = f64::from(ui.ctx().animate_bool_with_time(
             egui::Id::new("ref_norm_morph"),
             self.reference.norm_view(),
             0.35,
-        ) as f64;
+        ));
         let ref_series = if self.reference.active() {
             self.reference
                 .series(&bands, state.sample_rate, 240, vlo, vhi, na)
@@ -265,11 +270,7 @@ impl GuiApp {
                         .find(|s| s.role == SeriesRole::Result)
                         .map(|s| s.pts)
                         .unwrap_or_default();
-                    let label = state
-                        .channel_layout
-                        .get(c)
-                        .map(String::as_str)
-                        .unwrap_or("?");
+                    let label = state.channel_layout.get(c).map_or("?", String::as_str);
                     (format!("Result {label}"), channel_color(c), pts)
                 })
                 .collect()
@@ -304,8 +305,7 @@ impl GuiApp {
                     let name = state
                         .channel_layout
                         .get(c)
-                        .map(String::as_str)
-                        .unwrap_or("?")
+                        .map_or("?", String::as_str)
                         .to_string();
                     (name, channel_color(c), false)
                 })
@@ -334,14 +334,13 @@ impl GuiApp {
             ref_series
                 .iter()
                 .find(|s| s.role == resonance_reference::reference::SeriesRole::Target)
-                .map(|t| {
+                .map_or(peak, |t| {
                     t.pts.iter().fold(peak, |acc, &(lf, y)| {
                         let (below, above) =
                             resonance_reference::reference::preference_bounds(10f64.powf(lf));
                         acc.max(y.abs() + below.max(above))
                     })
                 })
-                .unwrap_or(peak)
         } else {
             peak
         };
@@ -374,9 +373,9 @@ impl GuiApp {
             plot.top() + (1.0 - ((gain + db) / (2.0 * db)) as f32) * plot.height()
         };
         let logf_of =
-            |x: f32| -> f64 { vlo + ((x - plot.left()) / plot.width()) as f64 * (vhi - vlo) };
+            |x: f32| -> f64 { vlo + f64::from((x - plot.left()) / plot.width()) * (vhi - vlo) };
         let db_of =
-            |y: f32| -> f64 { ((1.0 - (y - plot.top()) / plot.height()) as f64) * 2.0 * db - db };
+            |y: f32| -> f64 { f64::from(1.0 - (y - plot.top()) / plot.height()) * 2.0 * db - db };
 
         // Frequency-region background bands (sub/bass/lo-mid/hi-mid/treble/air).
         // Alternating faint fills make each tonal region lightly noticeable
@@ -414,7 +413,7 @@ impl GuiApp {
         let grid = egui::Stroke::new(1.0, pal.grid.gamma_multiply(0.6));
         let n_lines = (db / db_step) as i32;
         for k in -n_lines..=n_lines {
-            let g = k as f64 * db_step;
+            let g = f64::from(k) * db_step;
             let y = y_of(g);
             let stroke = if g == 0.0 {
                 // Emphasised 0 dB reference line.
@@ -488,10 +487,6 @@ impl GuiApp {
                 // analyzer. A small minimum body + floor alpha keep a faint
                 // analyzer band visible even in silence, so the spectrum never
                 // looks "gone" — it just lights up with audio.
-                const MIN_BODY: f32 = 0.016;
-                // Small inter-bar gap so the analyzer reads as discrete columns
-                // rather than one opaque slab — keeps the response curve the focus.
-                const GAP: f32 = 1.0;
                 for (i, &v) in self.spectrum_display.iter().enumerate() {
                     let v = v.clamp(0.0, 1.0);
                     let lo = curve::LOG_MIN + i as f64 / n as f64 * range;
@@ -570,11 +565,7 @@ impl GuiApp {
         } else if per_channel {
             // One response per channel, from only the bands targeting it.
             for c in 0..channels {
-                let label = state
-                    .channel_layout
-                    .get(c)
-                    .map(String::as_str)
-                    .unwrap_or("?");
+                let label = state.channel_layout.get(c).map_or("?", String::as_str);
                 if hidden.contains(label) {
                     continue;
                 }
@@ -602,15 +593,12 @@ impl GuiApp {
             }
         }
 
-        use egui::PointerButton::{Primary, Secondary};
-
         // The legend (with its eye toggles) sits inside the graph; a click there
         // must toggle a curve, not grab/create a node. Skip node interactions
         // whose pointer is over the legend box.
         let over_legend = response
             .interact_pointer_pos()
-            .map(|p| legend_rect.contains(p))
-            .unwrap_or(false);
+            .is_some_and(|p| legend_rect.contains(p));
 
         // ── Zoom ────────────────────────────────────────────────────────────
         // Scroll wheel over the graph zooms the x-axis around the pointer;
@@ -624,7 +612,7 @@ impl GuiApp {
                 if let Some(p) = response.hover_pos() {
                     let center = logf_of(p.x).clamp(vlo, vhi);
                     // Positive scroll = zoom in; shrink the span toward center.
-                    let factor = (-scroll as f64 * 0.0015).exp();
+                    let factor = (f64::from(-scroll) * 0.0015).exp();
                     let new_span =
                         ((vhi - vlo) * factor).clamp(0.15, curve::LOG_MAX - curve::LOG_MIN);
                     let t = (center - vlo) / (vhi - vlo);
@@ -740,7 +728,7 @@ impl GuiApp {
             let locked = self.vlock == Some(i);
             let gain_locked = self.hlock == Some(i);
             if self.drag_q && response.dragged_by(Secondary) {
-                let dy = response.drag_delta().y as f64;
+                let dy = f64::from(response.drag_delta().y);
                 if dy != 0.0 {
                     if let Some(b) = state.bands.get(i) {
                         // Exponential so Q scales smoothly across its range.
@@ -1178,7 +1166,7 @@ fn nearest_band(
         }
         let node = egui::pos2(x_of(curve::clampf_log(b.freq)), y_of(b.gain_db));
         let d = node.distance(p);
-        if d < 14.0 && best.map(|(_, bd)| d < bd).unwrap_or(true) {
+        if d < 14.0 && best.is_none_or(|(_, bd)| d < bd) {
             best = Some((i, d));
         }
     }
