@@ -476,6 +476,7 @@ mod hires_harness {
     //!     correct rate (a rate bug would move the band off 1 kHz, dropping the
     //!     gain), and
     //!   * the output peak is still at 1 kHz        → no pitch shift.
+    //!
     //! This is the on-VM stand-in for a real >48 kHz Windows endpoint (which the
     //! emulated HD-Audio codec can't provide): it exercises the exact shipping
     //! APO code path at hi-res.
