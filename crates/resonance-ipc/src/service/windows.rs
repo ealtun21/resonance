@@ -11,9 +11,9 @@
 //!   - enable    → add the Run key (autostart at logon) and start now.
 //!   - disable   → remove the Run key and stop the daemon.
 //!   - start/stop/restart → spawn / kill `resonanced.exe`.
-//!   - is_installed → the daemon binary is resolvable (it's what the installer ships).
-//!   - is_active  → a `resonanced.exe` process is running.
-//!   - is_enabled → the Run key value is present.
+//!   - `is_installed` → the daemon binary is resolvable (it's what the installer ships).
+//!   - `is_active`  → a `resonanced.exe` process is running.
+//!   - `is_enabled` → the Run key value is present.
 
 use std::io;
 use std::path::PathBuf;
@@ -70,8 +70,7 @@ pub fn is_enabled() -> bool {
     hidden("reg")
         .args(["query", RUN_KEY, "/v", RUN_VALUE])
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 fn daemon_exe() -> String {
@@ -80,6 +79,8 @@ fn daemon_exe() -> String {
 
 /// Nothing to install: there is no unit file, and the daemon binary is placed
 /// by the installer. Autostart is configured separately via `enable`.
+// Returns Result for parity with the Linux/macOS service API, where install can fail.
+#[allow(clippy::unnecessary_wraps)]
 pub fn install() -> io::Result<()> {
     Ok(())
 }
@@ -118,6 +119,8 @@ pub fn start() -> io::Result<()> {
     spawn_daemon()
 }
 
+// Returns Result for parity with the Linux/macOS service API, where stop can fail.
+#[allow(clippy::unnecessary_wraps)]
 pub fn stop() -> io::Result<()> {
     // `/t` kills the process tree; taskkill blocks until termination is
     // initiated. A new daemon spawned right after still reclaims the pidfile:

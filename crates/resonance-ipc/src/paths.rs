@@ -226,6 +226,7 @@ pub fn runtime_dir() -> PathBuf {
 /// Clients read it to discover where to connect. Honours `$RESONANCE_SOCKET`
 /// (treated as a full path) for parity with the Unix socket override.
 #[cfg(windows)]
+#[must_use]
 pub fn port_file_path() -> PathBuf {
     if let Ok(p) = std::env::var(crate::SOCKET_PATH_ENV) {
         if !p.is_empty() {
@@ -237,6 +238,7 @@ pub fn port_file_path() -> PathBuf {
 
 /// Windows-only: read the daemon's loopback TCP port from the port file.
 #[cfg(windows)]
+#[must_use]
 pub fn read_port_file() -> Option<u16> {
     std::fs::read_to_string(port_file_path())
         .ok()

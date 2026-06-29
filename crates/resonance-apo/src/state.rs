@@ -376,8 +376,7 @@ pub fn default_state_path() -> PathBuf {
     #[cfg(windows)]
     {
         let base = std::env::var_os("ProgramData")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+            .map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from);
         base.join("Resonance").join("apo_state.bin")
     }
     #[cfg(not(windows))]
