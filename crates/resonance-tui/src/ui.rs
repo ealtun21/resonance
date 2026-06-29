@@ -2491,12 +2491,31 @@ mod tests {
         app.reference.enabled = true;
         app.reference.show_bounds = true; // exercise the tolerance-band path too
         assert!(app.reference.active(), "measurement + enabled → active");
+        // Reference mode must produce the named target + result series that the
+        // graph's legend is built from. Assert on the series MODEL, not on the
+        // rendered legend text: the ratatui Chart legend auto-hides when it
+        // doesn't fit the available space, and that space depends on layout/prefs
+        // loaded from disk (e.g. `show_spectrum`), so a rendered-text check is
+        // non-hermetic — it passes on a dev machine but fails on a clean CI box.
+        let roles: Vec<SeriesRole> = app
+            .reference
+            .series(
+                &[],
+                48000.0,
+                64,
+                resonance_ipc::fr::LOG_MIN,
+                resonance_ipc::fr::LOG_MAX,
+                0.0,
+            )
+            .into_iter()
+            .map(|s| s.role)
+            .collect();
+        assert!(roles.contains(&SeriesRole::Target), "no Target series");
+        assert!(roles.contains(&SeriesRole::Result), "no Result series");
         // The overlay + bounds (shaded band) path must render without panicking,
         // both with the spectrum shown and hidden (different graph height).
         let text = render_to_text(&app, 120, 44);
-        // Reference mode shows the named-series legend (Target/Result).
-        assert!(text.contains("Target"), "missing legend Target:\n{text}");
-        assert!(text.contains("Result"), "missing legend Result:\n{text}");
+        assert!(!text.trim().is_empty());
         app.prefs.show_spectrum = false;
         let text2 = render_to_text(&app, 120, 44);
         assert!(!text2.trim().is_empty());
