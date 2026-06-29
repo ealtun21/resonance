@@ -1132,8 +1132,12 @@ fn pw_props_raw(pairs: &[(&str, &str)]) -> *mut pw_sys::pw_properties {
     unsafe {
         let p = pw_sys::pw_properties_new(std::ptr::null());
         for (k, v) in pairs {
-            let kc = CString::new(*k).unwrap();
-            let vc = CString::new(*v).unwrap();
+            // Skip a pair with an interior NUL rather than panic. Current callers
+            // pass only static literals (none contain NUL), so this never fires —
+            // but a future dynamic caller must not be able to crash the daemon.
+            let (Ok(kc), Ok(vc)) = (CString::new(*k), CString::new(*v)) else {
+                continue;
+            };
             pw_sys::pw_properties_set(p, kc.as_ptr(), vc.as_ptr());
         }
         p

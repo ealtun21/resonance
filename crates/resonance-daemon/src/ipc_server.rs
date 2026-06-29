@@ -389,10 +389,14 @@ fn handle_unmap_output_for(state: &SharedState, node_name: &str) -> Response {
 fn handle_forget_sink(state: &SharedState, node_name: &str) -> Response {
     let mut known = KnownSinks::load();
     known.devices.remove(node_name);
-    let _ = known.save();
+    if let Err(e) = known.save() {
+        return Response::Error(e);
+    }
     let mut maps = Mappings::load();
     maps.remove(node_name);
-    let _ = maps.save();
+    if let Err(e) = maps.save() {
+        return Response::Error(e);
+    }
     let mut inner = state.0.lock().unwrap();
     let present: std::collections::HashSet<String> =
         inner.available_sinks.iter().cloned().collect();
@@ -586,7 +590,9 @@ fn handle_set_output_target(state: &SharedState, node_name: String) -> Response 
     #[cfg(not(target_os = "windows"))]
     {
         let route_tx = state.0.lock().unwrap().route_tx.clone();
-        let _ = route_tx.send(node_name.clone());
+        if route_tx.send(node_name.clone()).is_err() {
+            warn!("audio thread unavailable; output route '{node_name}' not applied live");
+        }
     }
     state.0.lock().unwrap().preferred_output = Some(node_name);
     Response::Ok
@@ -600,7 +606,9 @@ fn handle_follow_system_output(state: &SharedState) -> Response {
     #[cfg(not(target_os = "windows"))]
     {
         let route_tx = state.0.lock().unwrap().route_tx.clone();
-        let _ = route_tx.send(String::new());
+        if route_tx.send(String::new()).is_err() {
+            warn!("audio thread unavailable; system-default follow not applied live");
+        }
     }
     state.0.lock().unwrap().preferred_output = None;
     Response::Ok
