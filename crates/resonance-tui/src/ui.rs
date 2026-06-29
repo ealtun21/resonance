@@ -311,15 +311,13 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
 
 // ── EQ curve ──────────────────────────────────────────────────────────────
 
-fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
-    // (colour, legend name, points) per reference series.
-    type RefRun = (Color, &'static str, Vec<(f64, f64)>);
-    // The graph reads as "focused" (cyan border, highlighted node) for both the
-    // Bands table and the interactive Graph panel.
-    let graph_focus = app.focus == Panel::Graph;
-    let focused = app.focus == Panel::Bands || graph_focus;
-    // Title. The reference series get a real chart legend (below); the title
-    // just names the panel and, in reference mode, says so.
+/// One reference-overlay polyline ready to plot: (colour, legend name, points).
+type RefRun = (Color, &'static str, Vec<(f64, f64)>);
+
+/// Build the EQ-graph title: panel name, a "· reference" tag in reference mode,
+/// and — in Graph-edit focus — a live readout of the selected node so the user
+/// sees what they are dragging.
+fn eq_curve_title(app: &App, graph_focus: bool) -> Vec<Span<'static>> {
     let mut title = vec![Span::styled(
         " EQ Frequency Response ",
         Style::default().fg(Color::Magenta),
@@ -330,7 +328,6 @@ fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
             Style::default().fg(Color::DarkGray),
         ));
     }
-    // In Graph-edit mode, show what the selected node is (and how to move it).
     if graph_focus {
         if let Some(b) = app
             .state
@@ -348,8 +345,146 @@ fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
             ));
         }
     }
+    title
+}
+
+/// Map a band to its graph marker position `(log10(freq), clamped gain_db)`.
+/// Clamping keeps an out-of-range gain pinned to the chart edge instead of
+/// jumping off it.
+fn band_marker_point(b: &resonance_ipc::BandState) -> (f64, f64) {
+    (
+        curve::band_marker_x(b.freq),
+        b.gain_db.clamp(-DB_RANGE, DB_RANGE),
+    )
+}
+
+/// A set of `(log-freq-x, gain-db-y)` plot points.
+type MarkerPts = Vec<(f64, f64)>;
+
+/// Split the enabled bands' markers into (all-but-selected, selected) so the
+/// selected node can be drawn last (on top) in its own highlight colour.
+fn band_markers(bands: &[resonance_ipc::BandState], sel: usize) -> (MarkerPts, MarkerPts) {
+    let others = bands
+        .iter()
+        .enumerate()
+        .filter(|(i, b)| b.enabled && *i != sel)
+        .map(|(_, b)| band_marker_point(b))
+        .collect();
+    let selected = bands
+        .get(sel)
+        .filter(|b| b.enabled)
+        .map(band_marker_point)
+        .into_iter()
+        .collect();
+    (others, selected)
+}
+
+/// Top-to-bottom vertical guide line through the selected band's frequency
+/// (Graph-edit mode only), so the column being dragged is obvious. Empty when
+/// not in Graph focus or the cursor is out of range.
+fn selected_guide_points(
+    bands: &[resonance_ipc::BandState],
+    cursor: usize,
+    graph_focus: bool,
+) -> Vec<(f64, f64)> {
+    if !graph_focus {
+        return Vec::new();
+    }
+    bands
+        .get(cursor)
+        .map(|b| {
+            let x = curve::band_marker_x(b.freq);
+            vec![(x, -DB_RANGE), (x, DB_RANGE)]
+        })
+        .unwrap_or_default()
+}
+
+/// Map reference series into plottable runs: a fixed colour + legend name per
+/// role, with each series' dB clamped to the chart's ±range. Result is white
+/// (the curve shaped onto the target) — yellow is reserved for the selected
+/// band marker, so it is deliberately not used here.
+fn reference_runs(series: &[resonance_reference::reference::RefSeries]) -> Vec<RefRun> {
+    series
+        .iter()
+        .map(|s| {
+            let (color, name) = match s.role {
+                SeriesRole::Target => (Color::Magenta, "Target"),
+                SeriesRole::Result => (Color::White, "Result"),
+                SeriesRole::Measurement => (Color::DarkGray, "Meas"),
+            };
+            let pts = s
+                .pts
+                .iter()
+                .map(|&(x, y)| (x, y.clamp(-DB_RANGE, DB_RANGE)))
+                .collect();
+            (color, name, pts)
+        })
+        .collect()
+}
+
+/// Fill points for the listener-preference tolerance band around the target
+/// (asymmetric below/above). Returns a dim half-block scatter that reads as a
+/// solid shaded region. Columns are subsampled to ~`width` and the vertical
+/// fill steps ~0.5 dB so the point count stays bounded. Empty unless a Target
+/// series is present.
+fn preference_shade_points(
+    series: &[resonance_reference::reference::RefSeries],
+    width: u16,
+) -> Vec<(f64, f64)> {
+    let Some(target) = series.iter().find(|s| s.role == SeriesRole::Target) else {
+        return Vec::new();
+    };
+    let step = (target.pts.len() / (width.max(1) as usize)).max(1);
+    let mut pts = Vec::new();
+    for (i, &(lf, ty)) in target.pts.iter().enumerate() {
+        if i % step != 0 {
+            continue;
+        }
+        let (below, above) = resonance_reference::reference::preference_bounds(10f64.powf(lf));
+        let lo = (ty - below).clamp(-DB_RANGE, DB_RANGE);
+        let hi = (ty + above).clamp(-DB_RANGE, DB_RANGE);
+        let mut y = lo;
+        while y <= hi {
+            pts.push((lf, y));
+            y += 0.5;
+        }
+    }
+    pts
+}
+
+/// The ±`DB_RANGE` y-axis tick labels (-N / 0 / +N), with the zero tick brighter.
+fn eq_y_axis_labels() -> Vec<Span<'static>> {
+    vec![
+        Span::styled(
+            format!("-{DB_RANGE:.0}"),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(" 0", Style::default().fg(Color::Gray)),
+        Span::styled(
+            format!("+{DB_RANGE:.0}"),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]
+}
+
+/// A single-coloured polyline dataset (used for the zero line, guide, and
+/// coloured response runs).
+fn line_dataset(color: Color, pts: &[(f64, f64)]) -> Dataset<'_> {
+    Dataset::default()
+        .marker(symbols::Marker::Braille)
+        .graph_type(GraphType::Line)
+        .style(Style::default().fg(color))
+        .data(pts)
+}
+
+fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
+    // The graph reads as "focused" (cyan border, highlighted node) for both the
+    // Bands table and the interactive Graph panel.
+    let graph_focus = app.focus == Panel::Graph;
+    let focused = app.focus == Panel::Bands || graph_focus;
+
     let block = Block::default()
-        .title(Line::from(title))
+        .title(Line::from(eq_curve_title(app, graph_focus)))
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(if focused {
@@ -370,69 +505,27 @@ fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
     let n_points = (inner.width as usize * 2).clamp(240, 1600);
     let curve_data = curve::curve_points(&bands, sr, n_points);
 
-    let log_min = curve::x_axis_ticks()[0].0;
-    let log_max = curve::x_axis_ticks().last().unwrap().0;
+    let ticks = curve::x_axis_ticks();
+    // x_axis_ticks() is a non-empty constant list, so first/last always exist.
+    let log_min = ticks[0].0;
+    let log_max = ticks[ticks.len() - 1].0;
 
-    // Band markers: a dot at (log10(freq), gain) for each enabled band.
+    // Band markers: a dot at (log10(freq), gain) for each enabled band, with the
+    // selected one split out so it draws last in its highlight colour.
     let sel = if focused { app.band_cursor } else { usize::MAX };
-    let markers_other: Vec<(f64, f64)> = bands
-        .iter()
-        .enumerate()
-        .filter(|(i, b)| b.enabled && *i != sel)
-        .map(|(_, b)| {
-            (
-                curve::band_marker_x(b.freq),
-                b.gain_db.clamp(-DB_RANGE, DB_RANGE),
-            )
-        })
-        .collect();
-    let marker_sel: Vec<(f64, f64)> = bands
-        .get(sel)
-        .filter(|b| b.enabled)
-        .map(|b| {
-            (
-                curve::band_marker_x(b.freq),
-                b.gain_db.clamp(-DB_RANGE, DB_RANGE),
-            )
-        })
-        .into_iter()
-        .collect();
-
-    // Graph-edit mode: a faint vertical guide through the selected node's
-    // frequency, so the column you're dragging on is obvious.
-    let guide_pts: Vec<(f64, f64)> = if graph_focus {
-        bands
-            .get(app.band_cursor)
-            .map(|b| {
-                let x = curve::band_marker_x(b.freq);
-                vec![(x, -DB_RANGE), (x, DB_RANGE)]
-            })
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let (markers_other, marker_sel) = band_markers(&bands, sel);
+    let guide_pts = selected_guide_points(&bands, app.band_cursor, graph_focus);
 
     let zero_pts: Vec<(f64, f64)> = vec![(log_min, 0.0), (log_max, 0.0)];
 
-    let x_labels: Vec<Span> = curve::x_axis_ticks()
+    let x_labels: Vec<Span> = ticks
         .iter()
         .map(|(_, label)| Span::styled(*label, Style::default().fg(Color::DarkGray)))
         .collect();
-    let y_labels = vec![
-        Span::styled(
-            format!("-{DB_RANGE:.0}"),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled(" 0", Style::default().fg(Color::Gray)),
-        Span::styled(
-            format!("+{DB_RANGE:.0}"),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ];
+    let y_labels = eq_y_axis_labels();
 
-    // Reference overlay (target / measurement / result), when active. Each
-    // series is a polyline in the same (log10 freq, dB) space as the EQ curve;
-    // clamp dB to the chart's ±range so an out-of-range curve doesn't jump.
+    // Reference overlay (target / measurement / result) and its tolerance band,
+    // when active — all in the same (log10 freq, dB) space as the EQ curve.
     let ref_series = app.reference.series(
         &bands,
         sr,
@@ -441,54 +534,9 @@ fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
         log_max,
         if app.reference.normalized { 1.0 } else { 0.0 },
     );
-    let ref_runs: Vec<RefRun> = ref_series
-        .iter()
-        .map(|s| {
-            // Result is white (the curve you shape onto the target); yellow is
-            // reserved for the selected band marker, so avoid it here.
-            let (color, name) = match s.role {
-                SeriesRole::Target => (Color::Magenta, "Target"),
-                SeriesRole::Result => (Color::White, "Result"),
-                SeriesRole::Measurement => (Color::DarkGray, "Meas"),
-            };
-            let pts: Vec<(f64, f64)> = s
-                .pts
-                .iter()
-                .map(|&(x, y)| (x, y.clamp(-DB_RANGE, DB_RANGE)))
-                .collect();
-            (color, name, pts)
-        })
-        .collect();
-
-    // Listener-preference tolerance band around the target (asymmetric): a
-    // *shaded* region (not just edge lines) — fill the band with dim half-block
-    // points, drawn through the chart so they map to the same plot area as the
-    // curve. Subsample columns to ~the inner width and step ~0.5 dB vertically
-    // to keep the point count bounded while still reading as a solid fill.
-    let shade_pts: Vec<(f64, f64)> = if app.reference.show_bounds {
-        ref_series
-            .iter()
-            .find(|s| s.role == SeriesRole::Target)
-            .map(|t| {
-                let mut pts = Vec::new();
-                let step = (t.pts.len() / (inner.width.max(1) as usize)).max(1);
-                for (i, &(lf, ty)) in t.pts.iter().enumerate() {
-                    if i % step != 0 {
-                        continue;
-                    }
-                    let (below, above) =
-                        resonance_reference::reference::preference_bounds(10f64.powf(lf));
-                    let lo = (ty - below).clamp(-DB_RANGE, DB_RANGE);
-                    let hi = (ty + above).clamp(-DB_RANGE, DB_RANGE);
-                    let mut y = lo;
-                    while y <= hi {
-                        pts.push((lf, y));
-                        y += 0.5;
-                    }
-                }
-                pts
-            })
-            .unwrap_or_default()
+    let ref_runs = reference_runs(&ref_series);
+    let shade_pts = if app.reference.show_bounds {
+        preference_shade_points(&ref_series, inner.width)
     } else {
         Vec::new()
     };
@@ -514,43 +562,18 @@ fn render_eq_curve(app: &App, frame: &mut Frame, area: Rect) {
                 .data(&shade_pts),
         );
     }
-    datasets.push(
-        Dataset::default()
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(Color::DarkGray))
-            .data(&zero_pts),
-    );
+    datasets.push(line_dataset(Color::DarkGray, &zero_pts));
     if !reference_active {
         for (color, pts) in &runs {
-            datasets.push(
-                Dataset::default()
-                    .marker(symbols::Marker::Braille)
-                    .graph_type(GraphType::Line)
-                    .style(Style::default().fg(*color))
-                    .data(pts),
-            );
+            datasets.push(line_dataset(*color, pts));
         }
     }
     for (color, name, pts) in &ref_runs {
-        datasets.push(
-            Dataset::default()
-                .name(*name)
-                .marker(symbols::Marker::Braille)
-                .graph_type(GraphType::Line)
-                .style(Style::default().fg(*color))
-                .data(pts),
-        );
+        datasets.push(line_dataset(*color, pts).name(*name));
     }
     // Selected-node vertical guide (Graph-edit mode), under the markers.
     if !guide_pts.is_empty() {
-        datasets.push(
-            Dataset::default()
-                .marker(symbols::Marker::Braille)
-                .graph_type(GraphType::Line)
-                .style(Style::default().fg(Color::Rgb(90, 80, 40)))
-                .data(&guide_pts),
-        );
+        datasets.push(line_dataset(Color::Rgb(90, 80, 40), &guide_pts));
     }
     datasets.push(
         Dataset::default()
@@ -826,6 +849,89 @@ fn render_effect_row(app: &App, frame: &mut Frame, idx: usize, area: Rect, panel
 
 // ── EQ bands panel ────────────────────────────────────────────────────────
 
+/// Render a single text cell into `rect`. Shared by the band header and data
+/// rows so every cell aligns and styles identically.
+fn put_cell(frame: &mut Frame, rect: Rect, text: &str, style: Style, align: Alignment) {
+    frame.render_widget(Paragraph::new(text).style(style).alignment(align), rect);
+}
+
+/// Header-row column labels, chosen by available width: long words when the
+/// table is wide, terse abbreviations when narrow. (`h_bar` is the gain-graph
+/// column header, blank in the narrow layout.)
+struct BandHeaderLabels {
+    freq: &'static str,
+    gain: &'static str,
+    enabled: &'static str,
+    bar: &'static str,
+}
+
+impl BandHeaderLabels {
+    /// Pick labels for the wide (`full_names`) or narrow layout.
+    fn for_width(full_names: bool) -> Self {
+        if full_names {
+            Self {
+                freq: "Freq",
+                gain: "Gain",
+                enabled: "Enabled",
+                bar: "Gain Graph",
+            }
+        } else {
+            Self {
+                freq: "Hz",
+                gain: "dB",
+                enabled: "On",
+                bar: "",
+            }
+        }
+    }
+}
+
+/// The two layout-dependent column indices that aren't positional constants:
+/// the (optional) per-channel column and the always-last gain-bar column.
+struct BandColumnIndices {
+    /// Per-band channel column — present only on >2-channel devices.
+    ch: Option<usize>,
+    /// Gain-bar column — always the last rect from `band_columns`.
+    bar: usize,
+}
+
+impl BandColumnIndices {
+    /// Resolve from a `band_columns` split. The channel column sits at index 7
+    /// (when shown); the gain bar is always the final rect.
+    fn resolve(n_cols: usize, show_ch: bool) -> Self {
+        Self {
+            ch: show_ch.then_some(7usize),
+            bar: n_cols - 1,
+        }
+    }
+}
+
+/// The band-table title with a "▸ Field" hint pointing at the active edit field
+/// (only when the panel is focused).
+fn band_panel_title(focused: bool, field: BandField) -> String {
+    let field_hint = if focused {
+        match field {
+            BandField::Freq => " ▸ Freq",
+            BandField::Gain => " ▸ Gain",
+            BandField::Q => " ▸ Q",
+        }
+    } else {
+        ""
+    };
+    format!(" EQ Bands{field_hint} ")
+}
+
+/// On/off glyph for a band's enabled state — wordy when the table is wide,
+/// a bare bullet when narrow.
+fn band_enable_label(enabled: bool, full_names: bool) -> &'static str {
+    match (enabled, full_names) {
+        (true, true) => "● On",
+        (false, true) => "○ Off",
+        (true, false) => "●",
+        (false, false) => "○",
+    }
+}
+
 fn render_bands(app: &App, frame: &mut Frame, area: Rect) {
     let focused = app.focus == Panel::Bands;
     let border_style = if focused {
@@ -834,18 +940,9 @@ fn render_bands(app: &App, frame: &mut Frame, area: Rect) {
         Style::default().fg(Color::DarkGray)
     };
 
-    let field_hint = if focused {
-        match app.band_field {
-            BandField::Freq => " ▸ Freq",
-            BandField::Gain => " ▸ Gain",
-            BandField::Q => " ▸ Q",
-        }
-    } else {
-        ""
-    };
     let block = Block::default()
         .title(
-            Line::from(format!(" EQ Bands{field_hint} ")).fg(if focused {
+            Line::from(band_panel_title(focused, app.band_field)).fg(if focused {
                 Color::Cyan
             } else {
                 Color::Magenta
@@ -879,16 +976,36 @@ fn render_bands(app: &App, frame: &mut Frame, area: Rect) {
     let show_ch = channels > 2;
     let full_names = crate::layout::band_type_full(inner.width);
 
-    // One cell renderer for both header and data rows.
-    let put = |frame: &mut Frame, rect: Rect, text: &str, style: Style, align: Alignment| {
-        frame.render_widget(Paragraph::new(text).style(style).alignment(align), rect);
-    };
-
-    // ── Header row ──
     let header_rect = Rect::new(inner.x, inner.y, inner.width, 1);
+    render_band_header(app, frame, header_rect, focused, show_ch, full_names);
+
+    // ── Data rows (with scroll) ──
+    let visible = (inner.height - 1) as usize;
+    let offset = crate::layout::band_scroll_offset(app.band_cursor, bands.len(), visible);
+
+    for (vis, i) in (offset..bands.len()).take(visible).enumerate() {
+        let y = inner.y + 1 + vis as u16;
+        let row_rect = Rect::new(inner.x, y, inner.width, 1);
+        let selected = focused && app.band_cursor == i;
+        render_band_row(
+            app, frame, row_rect, i, &bands[i], selected, show_ch, full_names, &layout, channels,
+        );
+    }
+}
+
+/// Render the band-table header row: the static `#`/`Type`/`Q` labels plus the
+/// width-dependent freq/gain/enabled/bar labels, with the active edit field's
+/// header highlighted yellow.
+fn render_band_header(
+    app: &App,
+    frame: &mut Frame,
+    header_rect: Rect,
+    focused: bool,
+    show_ch: bool,
+    full_names: bool,
+) {
     let hcols = crate::layout::band_columns(header_rect, show_ch);
-    let bar_idx = hcols.len() - 1; // gain bar is always the last rect
-    let ch_idx = if show_ch { Some(7usize) } else { None };
+    let idx = BandColumnIndices::resolve(hcols.len(), show_ch);
 
     let hdr = Style::default().bold().fg(Color::DarkGray);
     let active_hdr = Style::default().bold().fg(Color::Yellow);
@@ -899,160 +1016,150 @@ fn render_bands(app: &App, frame: &mut Frame, area: Rect) {
             hdr
         }
     };
-    put(frame, hcols[0], "#", hdr, Alignment::Right);
-    put(frame, hcols[1], "Type", hdr, Alignment::Left);
-    let (h_freq, h_gain, h_en, h_bar) = if full_names {
-        ("Freq", "Gain", "Enabled", "Gain Graph")
-    } else {
-        ("Hz", "dB", "On", "")
-    };
-    put(
+
+    let labels = BandHeaderLabels::for_width(full_names);
+    put_cell(frame, hcols[0], "#", hdr, Alignment::Right);
+    put_cell(frame, hcols[1], "Type", hdr, Alignment::Left);
+    put_cell(
         frame,
         hcols[2],
-        h_freq,
+        labels.freq,
         field_hdr(BandField::Freq),
         Alignment::Right,
     );
-    put(
+    put_cell(
         frame,
         hcols[3],
-        h_gain,
+        labels.gain,
         field_hdr(BandField::Gain),
         Alignment::Right,
     );
-    put(
+    put_cell(
         frame,
         hcols[4],
         "Q",
         field_hdr(BandField::Q),
         Alignment::Center,
     );
-    put(frame, hcols[6], h_en, hdr, Alignment::Center);
-    if let Some(ci) = ch_idx {
-        put(frame, hcols[ci], "Ch", hdr, Alignment::Left);
+    put_cell(frame, hcols[6], labels.enabled, hdr, Alignment::Center);
+    if let Some(ci) = idx.ch {
+        put_cell(frame, hcols[ci], "Ch", hdr, Alignment::Left);
     }
-    put(frame, hcols[bar_idx], h_bar, hdr, Alignment::Center);
+    put_cell(frame, hcols[idx.bar], labels.bar, hdr, Alignment::Center);
+}
 
-    // ── Data rows (with scroll) ──
-    let visible = (inner.height - 1) as usize;
-    let offset = crate::layout::band_scroll_offset(app.band_cursor, bands.len(), visible);
+/// Render one band's data row: index, type, freq, gain, Q, enable, optional
+/// channel tag, and the gain bar. The active edit field is drawn inverse, a
+/// disabled band greys out, and the selected row gets a subtle background
+/// stripe + bold cells.
+#[allow(clippy::too_many_arguments)]
+fn render_band_row(
+    app: &App,
+    frame: &mut Frame,
+    row_rect: Rect,
+    i: usize,
+    b: &resonance_ipc::BandState,
+    selected: bool,
+    show_ch: bool,
+    full_names: bool,
+    layout: &[String],
+    channels: usize,
+) {
+    let cols = crate::layout::band_columns(row_rect, show_ch);
+    let idx = BandColumnIndices::resolve(cols.len(), show_ch);
+    let bar_rect = cols[idx.bar];
 
-    for (vis, i) in (offset..bands.len()).take(visible).enumerate() {
-        let b = &bands[i];
-        let y = inner.y + 1 + vis as u16;
-        let row_rect = Rect::new(inner.x, y, inner.width, 1);
-        let cols = crate::layout::band_columns(row_rect, show_ch);
-        let bar_rect = cols[cols.len() - 1];
-        let selected = focused && app.band_cursor == i;
-
-        // Subtle stripe on the selected row so it reads as a row, not a cell.
-        if selected {
-            frame.render_widget(
-                Block::default().style(Style::default().bg(Color::Rgb(28, 28, 36))),
-                row_rect,
-            );
-        }
-
-        // Active field → strong highlight; disabled band → grey; else colour by
-        // meaning. Selected rows are bold.
-        let field_style = Style::default().fg(Color::Black).bg(Color::Yellow).bold();
-        let cell = |fg: Color| {
-            let s = if b.enabled {
-                Style::default().fg(fg)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            if selected { s.bold() } else { s }
-        };
-        let active = |field: BandField| selected && app.band_field == field;
-
-        let type_name = if full_names {
-            b.band_type.full().to_string()
-        } else {
-            b.band_type.abbrev().to_string()
-        };
-        let enable = if full_names {
-            if b.enabled { "● On" } else { "○ Off" }
-        } else if b.enabled {
-            "●"
-        } else {
-            "○"
-        };
-
-        put(
-            frame,
-            cols[0],
-            &format!("{}", i + 1),
-            cell(Color::Gray),
-            Alignment::Right,
-        );
-        put(
-            frame,
-            cols[1],
-            &type_name,
-            cell(Color::Cyan),
-            Alignment::Left,
-        );
-        put(
-            frame,
-            cols[2],
-            &fmt_freq(b.freq),
-            if active(BandField::Freq) {
-                field_style
-            } else {
-                cell(freq_color(b.freq))
-            },
-            Alignment::Right,
-        );
-        put(
-            frame,
-            cols[3],
-            &format!("{:+.1}", b.gain_db),
-            if active(BandField::Gain) {
-                field_style
-            } else {
-                cell(gain_color(b.gain_db))
-            },
-            Alignment::Right,
-        );
-        put(
-            frame,
-            cols[4],
-            &format!("{:.2}", b.q),
-            if active(BandField::Q) {
-                field_style
-            } else {
-                cell(Color::Gray)
-            },
-            Alignment::Right,
-        );
-        put(
-            frame,
-            cols[6],
-            enable,
-            cell(Color::Green),
-            Alignment::Center,
-        );
-        if let Some(ci) = ch_idx {
-            let tag = channel_tag(b.channels, &layout, channels);
-            // Global (the common default) reads as dim "no override"; a real
-            // subset stands out in cyan.
-            let col = if b.channels.is_global(channels) {
-                Color::DarkGray
-            } else {
-                Color::Cyan
-            };
-            put(frame, cols[ci], &tag, cell(col), Alignment::Left);
-        }
-        let bar = gain_bar(b.gain_db, bar_rect.width as usize);
-        put(
-            frame,
-            bar_rect,
-            &bar,
-            cell(gain_color(b.gain_db)),
-            Alignment::Left,
+    // Subtle stripe on the selected row so it reads as a row, not a cell.
+    if selected {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(Color::Rgb(28, 28, 36))),
+            row_rect,
         );
     }
+
+    // Active field → strong highlight; disabled band → grey; else colour by
+    // meaning. Selected rows are bold.
+    let field_style = Style::default().fg(Color::Black).bg(Color::Yellow).bold();
+    let cell = |fg: Color| {
+        let s = if b.enabled {
+            Style::default().fg(fg)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        if selected { s.bold() } else { s }
+    };
+    let active = |field: BandField| selected && app.band_field == field;
+    let field_or = |field: BandField, fg: Color| {
+        if active(field) { field_style } else { cell(fg) }
+    };
+
+    let type_name = if full_names {
+        b.band_type.full().to_string()
+    } else {
+        b.band_type.abbrev().to_string()
+    };
+
+    put_cell(
+        frame,
+        cols[0],
+        &format!("{}", i + 1),
+        cell(Color::Gray),
+        Alignment::Right,
+    );
+    put_cell(
+        frame,
+        cols[1],
+        &type_name,
+        cell(Color::Cyan),
+        Alignment::Left,
+    );
+    put_cell(
+        frame,
+        cols[2],
+        &fmt_freq(b.freq),
+        field_or(BandField::Freq, freq_color(b.freq)),
+        Alignment::Right,
+    );
+    put_cell(
+        frame,
+        cols[3],
+        &format!("{:+.1}", b.gain_db),
+        field_or(BandField::Gain, gain_color(b.gain_db)),
+        Alignment::Right,
+    );
+    put_cell(
+        frame,
+        cols[4],
+        &format!("{:.2}", b.q),
+        field_or(BandField::Q, Color::Gray),
+        Alignment::Right,
+    );
+    put_cell(
+        frame,
+        cols[6],
+        band_enable_label(b.enabled, full_names),
+        cell(Color::Green),
+        Alignment::Center,
+    );
+    if let Some(ci) = idx.ch {
+        let tag = channel_tag(b.channels, layout, channels);
+        // Global (the common default) reads as dim "no override"; a real
+        // subset stands out in cyan.
+        let col = if b.channels.is_global(channels) {
+            Color::DarkGray
+        } else {
+            Color::Cyan
+        };
+        put_cell(frame, cols[ci], &tag, cell(col), Alignment::Left);
+    }
+    let bar = gain_bar(b.gain_db, bar_rect.width as usize);
+    put_cell(
+        frame,
+        bar_rect,
+        &bar,
+        cell(gain_color(b.gain_db)),
+        Alignment::Left,
+    );
 }
 
 /// Short label for a band's channel target: `all` / `FL` / `FL FR` / `FL +2`
@@ -2591,5 +2698,96 @@ mod tests {
         rebuilt.extend(runs[1].1.iter().skip(1).copied());
         rebuilt.extend(runs[2].1.iter().skip(1).copied());
         assert_eq!(rebuilt, pts);
+    }
+
+    // ── Pure band-table / EQ-graph helpers ─────────────────────────────────
+
+    #[test]
+    fn band_panel_title_shows_field_hint_only_when_focused() {
+        assert_eq!(band_panel_title(true, BandField::Gain), " EQ Bands ▸ Gain ");
+        assert_eq!(band_panel_title(true, BandField::Q), " EQ Bands ▸ Q ");
+        // Unfocused: no field hint.
+        assert_eq!(band_panel_title(false, BandField::Gain), " EQ Bands ");
+    }
+
+    #[test]
+    fn band_enable_label_varies_by_state_and_width() {
+        assert_eq!(band_enable_label(true, true), "● On");
+        assert_eq!(band_enable_label(false, true), "○ Off");
+        assert_eq!(band_enable_label(true, false), "●");
+        assert_eq!(band_enable_label(false, false), "○");
+    }
+
+    #[test]
+    fn band_header_labels_switch_on_width() {
+        let wide = BandHeaderLabels::for_width(true);
+        assert_eq!(
+            (wide.freq, wide.gain, wide.enabled, wide.bar),
+            ("Freq", "Gain", "Enabled", "Gain Graph")
+        );
+        let narrow = BandHeaderLabels::for_width(false);
+        assert_eq!(
+            (narrow.freq, narrow.gain, narrow.enabled, narrow.bar),
+            ("Hz", "dB", "On", "")
+        );
+    }
+
+    #[test]
+    fn band_column_indices_resolve() {
+        // Channel column only when shown; gain bar is always the last rect.
+        let with_ch = BandColumnIndices::resolve(9, true);
+        assert_eq!(with_ch.ch, Some(7));
+        assert_eq!(with_ch.bar, 8);
+        let no_ch = BandColumnIndices::resolve(8, false);
+        assert_eq!(no_ch.ch, None);
+        assert_eq!(no_ch.bar, 7);
+    }
+
+    // float_cmp: marker mapping is a copy/clamp, not arithmetic — exact equality.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn band_marker_point_clamps_gain_to_range() {
+        let mut b = band(1000.0, ChannelMask::ALL);
+        b.gain_db = 99.0;
+        let (x, y) = band_marker_point(&b);
+        assert_eq!(x, curve::band_marker_x(1000.0));
+        assert_eq!(y, DB_RANGE); // clamped from 99 dB to the chart edge
+        b.gain_db = -99.0;
+        assert_eq!(band_marker_point(&b).1, -DB_RANGE);
+    }
+
+    #[test]
+    fn band_markers_split_selected_and_skip_disabled() {
+        let mut bands = vec![
+            band(100.0, ChannelMask::ALL),
+            band(1000.0, ChannelMask::ALL),
+            band(5000.0, ChannelMask::ALL),
+        ];
+        bands[2].enabled = false; // disabled bands are dropped from both sets
+        let (others, selected) = band_markers(&bands, 1);
+        assert_eq!(others.len(), 1, "only band 0 is an 'other' enabled marker");
+        assert_eq!(selected.len(), 1, "band 1 is the selected marker");
+        // No selection in range → no selected marker, all enabled bands are others.
+        let (others, selected) = band_markers(&bands, usize::MAX);
+        assert_eq!(others.len(), 2);
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn selected_guide_points_only_in_graph_focus() {
+        let bands = vec![band(1000.0, ChannelMask::ALL)];
+        assert!(selected_guide_points(&bands, 0, false).is_empty());
+        let g = selected_guide_points(&bands, 0, true);
+        assert_eq!(g.len(), 2, "a top-to-bottom vertical guide is two points");
+        // Out-of-range cursor → no guide, even in graph focus.
+        assert!(selected_guide_points(&bands, 9, true).is_empty());
+    }
+
+    #[test]
+    fn eq_y_axis_labels_span_the_range() {
+        let labels = eq_y_axis_labels();
+        assert_eq!(labels.len(), 3);
+        assert_eq!(labels[0].content, "-18");
+        assert_eq!(labels[2].content, "+18");
     }
 }

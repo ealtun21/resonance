@@ -4,7 +4,10 @@ use anyhow::Result;
 use resonance_dsp::chain::ProcessorChain;
 use resonance_dsp::channel::{ChannelMask as DspMask, ChannelMatrix};
 use resonance_dsp::filter::{ApoFilter, FilterError, FilterType};
-use resonance_ipc::{AbSlot, BandType, Command, Response};
+use resonance_ipc::{
+    AbSlot, BandState, BandType, ChannelMask, Command, EffectsState, FxEffectId, Response,
+    RoutingMatrix,
+};
 use resonance_preset::model::{ApoFilterType, EqBand};
 use resonance_preset::{
     apo::{parse_apo, write_apo},
@@ -101,367 +104,434 @@ where
     Ok(())
 }
 
+/// Route one client command to its handler and produce the reply.
+///
+/// Each arm is a thin delegation to a focused handler so the wiring of command
+/// variants to behaviour stays scannable; the handlers own the side effects and
+/// reply construction. Only the two parse-heavy commands run async (they offload
+/// to a blocking thread); everything else is synchronous.
 async fn dispatch(cmd: Command, state: &SharedState) -> Response {
     match cmd {
         Command::GetState => {
             state.mark_polled();
             Response::State(state.snapshot())
         }
-
-        Command::SetPower { enabled } => {
-            state.send(AudioCommand::SetPower(enabled), |chain| {
-                chain.enabled = enabled;
-            });
-            Response::Ok
-        }
-
-        Command::SetPreamp { db } => {
-            // Reject non-finite (NaN/Inf reaches here from a hostile `Preamp: nan`
-            // in an APO `.txt`): db_to_linear(NaN) = NaN → silences/poisons the
-            // whole output. Clamp to a sane dB range.
-            if !db.is_finite() {
-                return Response::Error("preamp must be a finite number".to_string());
-            }
-            let db = db.clamp(-60.0, 24.0);
-            state.send(AudioCommand::SetPreamp(db), move |chain| {
-                chain.preamp_db = db;
-            });
-            Response::Ok
-        }
-
+        Command::SetPower { enabled } => handle_set_power(state, enabled),
+        Command::SetPreamp { db } => handle_set_preamp(state, db),
         Command::SetEffectIntensity { effect, value } => {
-            let fx: resonance_dsp::chain::FxEffect = effect.into();
-            state.send(
-                AudioCommand::SetEffectIntensity { effect: fx, value },
-                |chain| {
-                    chain.set_effect_intensity(fx, value);
-                },
-            );
-            Response::Ok
+            handle_set_effect_intensity(state, effect, value)
         }
-
         Command::SetEffectEnabled { effect, enabled } => {
-            let fx: resonance_dsp::chain::FxEffect = effect.into();
-            state.send(
-                AudioCommand::SetEffectEnabled {
-                    effect: fx,
-                    on: enabled,
-                },
-                |chain| {
-                    chain.set_effect_enabled(fx, enabled);
-                },
-            );
-            Response::Ok
+            handle_set_effect_enabled(state, effect, enabled)
         }
-
-        Command::LoadPreset { path } => {
-            // Parse off the runtime (GraphicEQ files curve-fit); apply once parsed.
-            let p = path.clone();
-            match tokio::task::spawn_blocking(move || parse_preset_file(&p)).await {
-                Ok(Ok(preset)) => {
-                    apply_preset(&preset, state);
-                    state.0.lock().unwrap().current_preset = Some(path);
-                    Response::Ok
-                }
-                Ok(Err(e)) => Response::Error(e),
-                Err(e) => Response::Error(format!("load task failed: {e}")),
-            }
+        Command::LoadPreset { path } => handle_load_preset(state, path).await,
+        Command::ImportPreset { path, name } => handle_import_preset(path, name).await,
+        Command::RenameProfile { from, to } => {
+            result_to_response(config::rename_profile(&from, &to))
         }
-
-        Command::ImportPreset { path, name } => {
-            // Parsing a preset can be expensive — a GraphicEQ `.txt` runs a
-            // curve-fit optimisation. Do it (and the file IO) on a blocking
-            // thread so the async IPC loop keeps serving other clients.
-            tokio::task::spawn_blocking(move || import_preset(&path, name))
-                .await
-                .unwrap_or_else(|e| Response::Error(format!("import task failed: {e}")))
-        }
-
-        Command::RenameProfile { from, to } => match config::rename_profile(&from, &to) {
-            Ok(()) => Response::Ok,
-            Err(e) => Response::Error(e),
-        },
-
         Command::ListPresets { dir } => Response::PresetList(list_presets(dir.as_deref())),
-
-        Command::SaveProfile { name } => {
-            let profile = Profile::from_state(&state.snapshot());
-            match config::save_profile(&name, &profile) {
-                Ok(()) => Response::Ok,
-                Err(e) => Response::Error(e),
-            }
-        }
-
-        Command::LoadProfile { name } => match load_profile(&name, state) {
-            Ok(()) => {
-                state.0.lock().unwrap().current_preset = Some(name);
-                Response::Ok
-            }
-            Err(e) => Response::Error(e),
-        },
-
-        Command::DeleteProfile { name } => match config::delete_profile(&name) {
-            Ok(()) => Response::Ok,
-            Err(e) => Response::Error(e),
-        },
-
-        // Copy the stored profile under a new name without touching the live chain.
-        Command::DuplicateProfile { from, to } => match config::load_profile(&from) {
-            Ok(profile) => match config::save_profile(&to, &profile) {
-                Ok(()) => Response::Ok,
-                Err(e) => Response::Error(e),
-            },
-            Err(e) => Response::Error(e),
-        },
-
-        // Export a *named* stored profile (not the current chain state).
-        Command::ExportProfileNamed { name, path } => match config::load_profile(&name) {
-            Ok(profile) => match config::export_profile_file(&path, &profile) {
-                Ok(()) => Response::Ok,
-                Err(e) => Response::Error(e),
-            },
-            Err(e) => Response::Error(e),
-        },
-
+        Command::SaveProfile { name } => handle_save_profile(state, &name),
+        Command::LoadProfile { name } => handle_load_profile(state, name),
+        Command::DeleteProfile { name } => result_to_response(config::delete_profile(&name)),
+        Command::DuplicateProfile { from, to } => handle_duplicate_profile(&from, &to),
+        Command::ExportProfileNamed { name, path } => handle_export_profile_named(&name, &path),
         Command::ListProfiles => Response::PresetList(config::list_profiles()),
-
-        Command::MapOutput { profile } => {
-            let Some(output) = state.0.lock().unwrap().active_output.clone() else {
-                return Response::Error("no active output device detected yet".to_string());
-            };
-            if config::load_profile(&profile).is_err() {
-                return Response::Error(format!("profile '{profile}' not found"));
-            }
-            let mut maps = Mappings::load();
-            maps.set(output, profile.clone());
-            match maps.save() {
-                Ok(()) => {
-                    // Apply immediately so the mapping takes effect now.
-                    if load_profile(&profile, state).is_ok() {
-                        state.0.lock().unwrap().mapped_profile = Some(profile);
-                    }
-                    Response::Ok
-                }
-                Err(e) => Response::Error(e),
-            }
-        }
-
-        Command::UnmapOutput => {
-            let Some(output) = state.0.lock().unwrap().active_output.clone() else {
-                return Response::Error("no active output device detected yet".to_string());
-            };
-            let mut maps = Mappings::load();
-            maps.remove(&output);
-            match maps.save() {
-                Ok(()) => {
-                    state.0.lock().unwrap().mapped_profile = None;
-                    Response::Ok
-                }
-                Err(e) => Response::Error(e),
-            }
-        }
-
+        Command::MapOutput { profile } => handle_map_output(state, profile),
+        Command::UnmapOutput => handle_unmap_output(state),
         Command::MapOutputFor { node_name, profile } => {
-            if config::load_profile(&profile).is_err() {
-                return Response::Error(format!("profile '{profile}' not found"));
-            }
-            let mut maps = Mappings::load();
-            maps.set(node_name.clone(), profile.clone());
-            match maps.save() {
-                Ok(()) => {
-                    // If this is the device we're feeding right now, apply it.
-                    let is_active = state.0.lock().unwrap().active_output.as_deref()
-                        == Some(node_name.as_str());
-                    if is_active && load_profile(&profile, state).is_ok() {
-                        state.0.lock().unwrap().mapped_profile = Some(profile);
-                    }
-                    Response::Ok
-                }
-                Err(e) => Response::Error(e),
-            }
+            handle_map_output_for(state, &node_name, &profile)
         }
-
-        Command::UnmapOutputFor { node_name } => {
-            let mut maps = Mappings::load();
-            maps.remove(&node_name);
-            match maps.save() {
-                Ok(()) => {
-                    let mut inner = state.0.lock().unwrap();
-                    if inner.active_output.as_deref() == Some(node_name.as_str()) {
-                        inner.mapped_profile = None;
-                    }
-                    Response::Ok
-                }
-                Err(e) => Response::Error(e),
-            }
-        }
-
-        Command::ForgetSink { node_name } => {
-            // Drop both the remembered description and any mapping. PipeWire
-            // re-adds it (sinks task → KnownSinks::remember) when it next appears.
-            let mut known = KnownSinks::load();
-            known.devices.remove(&node_name);
-            let _ = known.save();
-            let mut maps = Mappings::load();
-            maps.remove(&node_name);
-            let _ = maps.save();
-            let mut inner = state.0.lock().unwrap();
-            let present: std::collections::HashSet<String> =
-                inner.available_sinks.iter().cloned().collect();
-            // Drop the description only if the device isn't currently present.
-            inner
-                .sink_descriptions
-                .retain(|(n, _)| n != &node_name || present.contains(n));
-            if inner.active_output.as_deref() == Some(node_name.as_str()) {
-                inner.mapped_profile = None;
-            }
-            Response::Ok
-        }
-
+        Command::UnmapOutputFor { node_name } => handle_unmap_output_for(state, &node_name),
+        Command::ForgetSink { node_name } => handle_forget_sink(state, &node_name),
         Command::ListMappings => Response::Mappings(Mappings::load().list()),
-
         Command::SetBand {
             index,
             freq,
             gain_db,
             q,
-        } => {
-            state.send(
-                AudioCommand::SetBand {
-                    index,
-                    freq,
-                    gain_db,
-                    q,
-                },
-                |chain| {
-                    if let Some(f) = chain.filters.get(index) {
-                        // Preserve the band's channel mask across a param edit —
-                        // build_band makes a fresh filter, which would otherwise
-                        // reset it to global.
-                        let (ft, en, mask) = (f.filter_type, f.enabled, f.mask);
-                        if let Ok(new_f) = build_band(chain, ft, freq, gain_db, q, en, mask) {
-                            chain.filters[index] = new_f;
-                        }
-                    }
-                },
-            );
-            Response::Ok
-        }
-
+        } => handle_set_band(state, index, freq, gain_db, q),
         Command::SetBandEnabled { index, enabled } => {
-            state.send(AudioCommand::SetBandEnabled { index, enabled }, |chain| {
-                if let Some(f) = chain.filters.get_mut(index) {
-                    f.enabled = enabled;
-                }
-            });
-            Response::Ok
+            handle_set_band_enabled(state, index, enabled)
         }
-
         Command::AddBand {
             band_type,
             freq,
             gain_db,
             q,
-        } => {
-            state.send(
-                AudioCommand::AddBand {
-                    band_type,
-                    freq,
-                    gain_db,
-                    q,
-                },
-                |chain| {
-                    // New bands are global by default; retarget with SetBandChannels.
-                    if let Ok(nf) = build_band(
-                        chain,
-                        band_type.into(),
-                        freq,
-                        gain_db,
-                        q,
-                        true,
-                        DspMask::ALL,
-                    ) {
-                        chain.filters.push(nf);
-                    }
-                },
-            );
-            Response::Ok
-        }
-
-        Command::RemoveBand { index } => {
-            state.send(AudioCommand::RemoveBand { index }, |chain| {
-                if index < chain.filters.len() {
-                    chain.filters.remove(index);
-                }
-            });
-            Response::Ok
-        }
-
-        Command::SetBandType { index, band_type } => {
-            state.send(AudioCommand::SetBandType { index, band_type }, |chain| {
-                if let Some(f) = chain.filters.get(index) {
-                    let (freq, gain_db, q, en, mask) = (f.freq, f.gain_db, f.q, f.enabled, f.mask);
-                    if let Ok(nf) = build_band(chain, band_type.into(), freq, gain_db, q, en, mask)
-                    {
-                        chain.filters[index] = nf;
-                    }
-                }
-            });
-            Response::Ok
-        }
-
+        } => handle_add_band(state, band_type, freq, gain_db, q),
+        Command::RemoveBand { index } => handle_remove_band(state, index),
+        Command::SetBandType { index, band_type } => handle_set_band_type(state, index, band_type),
         Command::SetBandChannels { index, channels } => {
-            // Reject an out-of-range band index rather than silently no-op'ing
-            // (mirrors SwapChannels' range check).
-            let nbands = state.0.lock().unwrap().chain.filters.len();
-            if index >= nbands {
-                return Response::Error(format!("no band at index {index} (have {nbands})"));
-            }
-            let mask = channels.to_dsp();
-            state.send(
-                AudioCommand::SetBandChannels { index, mask },
-                move |chain| {
-                    if let Some(f) = chain.filters.get_mut(index) {
-                        f.mask = mask;
-                    }
-                },
-            );
+            handle_set_band_channels(state, index, channels)
+        }
+        Command::SetChannelRouting { matrix } => handle_set_channel_routing(state, &matrix),
+        Command::SwapChannels { a, b } => handle_swap_channels(state, a, b),
+        Command::ClearRouting => handle_clear_routing(state),
+        Command::SetOutputTarget { node_name } => handle_set_output_target(state, node_name),
+        Command::FollowSystemOutput => handle_follow_system_output(state),
+        Command::ApplyState {
+            preamp_db,
+            enabled,
+            bands,
+            effects,
+        } => handle_apply_state(state, preamp_db, enabled, bands, effects),
+        Command::Reset => handle_reset(state),
+        Command::ExportApo { path } => handle_export_apo(state, &path),
+        Command::ExportProfile { path } => handle_export_profile(state, &path),
+        Command::StoreSlot { slot } => handle_store_slot(state, slot),
+        Command::RecallSlot { slot } => handle_recall_slot(state, slot),
+        // The actual cleanup + exit happens in `handle_client` after this Ok is
+        // flushed to the client (see the `is_shutdown` branch there).
+        Command::Shutdown => Response::Ok,
+    }
+}
+
+/// Map a `Result<(), String>` config/IO outcome onto the IPC reply: `Ok` on
+/// success, the error string passed straight back to the client otherwise. Used
+/// for the many commands whose only job is to call a `config::*` operation.
+fn result_to_response(r: Result<(), String>) -> Response {
+    match r {
+        Ok(()) => Response::Ok,
+        Err(e) => Response::Error(e),
+    }
+}
+
+/// Toggle the master power (bypass) flag.
+fn handle_set_power(state: &SharedState, enabled: bool) -> Response {
+    state.send(AudioCommand::SetPower(enabled), |chain| {
+        chain.enabled = enabled;
+    });
+    Response::Ok
+}
+
+/// Set the pre-EQ makeup gain, rejecting hostile non-finite input.
+///
+/// A non-finite value reaches here from e.g. `Preamp: nan` in an APO `.txt`;
+/// `db_to_linear(NaN) = NaN` would silence/poison the whole output, so reject it
+/// and clamp the rest to a sane dB range.
+fn handle_set_preamp(state: &SharedState, db: f64) -> Response {
+    if !db.is_finite() {
+        return Response::Error("preamp must be a finite number".to_string());
+    }
+    let db = db.clamp(-60.0, 24.0);
+    state.send(AudioCommand::SetPreamp(db), move |chain| {
+        chain.preamp_db = db;
+    });
+    Response::Ok
+}
+
+/// Set one effect's intensity (0..=1 mapped per-effect inside the chain).
+fn handle_set_effect_intensity(state: &SharedState, effect: FxEffectId, value: f64) -> Response {
+    let fx: resonance_dsp::chain::FxEffect = effect.into();
+    state.send(
+        AudioCommand::SetEffectIntensity { effect: fx, value },
+        |chain| {
+            chain.set_effect_intensity(fx, value);
+        },
+    );
+    Response::Ok
+}
+
+/// Enable or bypass a single effect.
+fn handle_set_effect_enabled(state: &SharedState, effect: FxEffectId, enabled: bool) -> Response {
+    let fx: resonance_dsp::chain::FxEffect = effect.into();
+    state.send(
+        AudioCommand::SetEffectEnabled {
+            effect: fx,
+            on: enabled,
+        },
+        |chain| {
+            chain.set_effect_enabled(fx, enabled);
+        },
+    );
+    Response::Ok
+}
+
+/// Parse a preset file off the runtime, then swap the built chain in.
+///
+/// Parsing runs on a blocking thread because `GraphicEQ` files curve-fit; the
+/// async IPC loop keeps serving other clients meanwhile.
+async fn handle_load_preset(state: &SharedState, path: String) -> Response {
+    let p = path.clone();
+    match tokio::task::spawn_blocking(move || parse_preset_file(&p)).await {
+        Ok(Ok(preset)) => {
+            apply_preset(&preset, state);
+            state.0.lock().unwrap().current_preset = Some(path);
             Response::Ok
         }
+        Ok(Err(e)) => Response::Error(e),
+        Err(e) => Response::Error(format!("load task failed: {e}")),
+    }
+}
 
-        Command::SetChannelRouting { matrix } => {
-            // The in-graph filter has a fixed `channels` ports in and out, so only
-            // a square remap at the live channel count can be applied. Reject a
-            // mismatched matrix here so it never reaches (and misframes) the RT
-            // thread. (Up/downmix to a different width is a daemon-path feature.)
-            let channels = state.0.lock().unwrap().chain.channels;
-            match matrix.to_dsp() {
-                Some(m) if m.in_ch() == channels && m.out_ch() == channels => {
-                    state.send(
-                        AudioCommand::SetRouting {
-                            matrix: Some(m.clone()),
-                        },
-                        move |chain| chain.routing = Some(m),
-                    );
-                    Response::Ok
-                }
-                Some(_) => Response::Error(format!(
-                    "routing matrix must be square at the current channel count ({channels}×{channels})"
-                )),
-                None => Response::Error("invalid routing matrix dimensions".to_string()),
-            }
+/// Import a preset file into the managed profile store on a blocking thread.
+///
+/// Parsing can be expensive (a `GraphicEQ` `.txt` runs a curve-fit optimisation),
+/// so offload the parse + file IO to keep the async IPC loop responsive.
+async fn handle_import_preset(path: String, name: Option<String>) -> Response {
+    tokio::task::spawn_blocking(move || import_preset(&path, name))
+        .await
+        .unwrap_or_else(|e| Response::Error(format!("import task failed: {e}")))
+}
+
+/// Persist the current live chain state as a named profile.
+fn handle_save_profile(state: &SharedState, name: &str) -> Response {
+    let profile = Profile::from_state(&state.snapshot());
+    result_to_response(config::save_profile(name, &profile))
+}
+
+/// Load a named profile, apply it, and record it as the current preset.
+fn handle_load_profile(state: &SharedState, name: String) -> Response {
+    match load_profile(&name, state) {
+        Ok(()) => {
+            state.0.lock().unwrap().current_preset = Some(name);
+            Response::Ok
         }
+        Err(e) => Response::Error(e),
+    }
+}
 
-        Command::SwapChannels { a, b } => {
-            // Swap two of the processing channels (square remap at the current
-            // channel count). Replaces any existing routing.
-            let channels = state.0.lock().unwrap().chain.channels;
-            if a >= channels || b >= channels {
-                return Response::Error(format!(
-                    "channel index out of range (chain has {channels} channels)"
-                ));
+/// Copy a stored profile under a new name without touching the live chain.
+fn handle_duplicate_profile(from: &str, to: &str) -> Response {
+    match config::load_profile(from) {
+        Ok(profile) => result_to_response(config::save_profile(to, &profile)),
+        Err(e) => Response::Error(e),
+    }
+}
+
+/// Export a *named* stored profile to a file (not the current chain state).
+fn handle_export_profile_named(name: &str, path: &str) -> Response {
+    match config::load_profile(name) {
+        Ok(profile) => result_to_response(config::export_profile_file(path, &profile)),
+        Err(e) => Response::Error(e),
+    }
+}
+
+/// Map a profile to the active output device and apply it immediately.
+fn handle_map_output(state: &SharedState, profile: String) -> Response {
+    let Some(output) = state.0.lock().unwrap().active_output.clone() else {
+        return Response::Error("no active output device detected yet".to_string());
+    };
+    if config::load_profile(&profile).is_err() {
+        return Response::Error(format!("profile '{profile}' not found"));
+    }
+    let mut maps = Mappings::load();
+    maps.set(output, profile.clone());
+    match maps.save() {
+        Ok(()) => {
+            // Apply immediately so the mapping takes effect now.
+            if load_profile(&profile, state).is_ok() {
+                state.0.lock().unwrap().mapped_profile = Some(profile);
             }
-            let m = ChannelMatrix::swap(channels, a, b);
+            Response::Ok
+        }
+        Err(e) => Response::Error(e),
+    }
+}
+
+/// Drop the mapping for the active output device.
+fn handle_unmap_output(state: &SharedState) -> Response {
+    let Some(output) = state.0.lock().unwrap().active_output.clone() else {
+        return Response::Error("no active output device detected yet".to_string());
+    };
+    let mut maps = Mappings::load();
+    maps.remove(&output);
+    match maps.save() {
+        Ok(()) => {
+            state.0.lock().unwrap().mapped_profile = None;
+            Response::Ok
+        }
+        Err(e) => Response::Error(e),
+    }
+}
+
+/// Map a profile to a named device; apply now only if that device is active.
+fn handle_map_output_for(state: &SharedState, node_name: &str, profile: &str) -> Response {
+    if config::load_profile(profile).is_err() {
+        return Response::Error(format!("profile '{profile}' not found"));
+    }
+    let mut maps = Mappings::load();
+    maps.set(node_name.to_owned(), profile.to_owned());
+    match maps.save() {
+        Ok(()) => {
+            // If this is the device we're feeding right now, apply it.
+            let is_active = state.0.lock().unwrap().active_output.as_deref() == Some(node_name);
+            if is_active && load_profile(profile, state).is_ok() {
+                state.0.lock().unwrap().mapped_profile = Some(profile.to_owned());
+            }
+            Response::Ok
+        }
+        Err(e) => Response::Error(e),
+    }
+}
+
+/// Drop the mapping for a named device, clearing the live mapped-profile marker
+/// only if that device is the one currently active.
+fn handle_unmap_output_for(state: &SharedState, node_name: &str) -> Response {
+    let mut maps = Mappings::load();
+    maps.remove(node_name);
+    match maps.save() {
+        Ok(()) => {
+            let mut inner = state.0.lock().unwrap();
+            if inner.active_output.as_deref() == Some(node_name) {
+                inner.mapped_profile = None;
+            }
+            Response::Ok
+        }
+        Err(e) => Response::Error(e),
+    }
+}
+
+/// Forget a sink: drop its remembered description and any mapping.
+///
+/// `PipeWire` re-adds the sink (sinks task → `KnownSinks::remember`) when it next
+/// appears, so this is safe to call on a present device.
+fn handle_forget_sink(state: &SharedState, node_name: &str) -> Response {
+    let mut known = KnownSinks::load();
+    known.devices.remove(node_name);
+    let _ = known.save();
+    let mut maps = Mappings::load();
+    maps.remove(node_name);
+    let _ = maps.save();
+    let mut inner = state.0.lock().unwrap();
+    let present: std::collections::HashSet<String> =
+        inner.available_sinks.iter().cloned().collect();
+    // Drop the description only if the device isn't currently present.
+    inner
+        .sink_descriptions
+        .retain(|(n, _)| n != node_name || present.contains(n));
+    if inner.active_output.as_deref() == Some(node_name) {
+        inner.mapped_profile = None;
+    }
+    Response::Ok
+}
+
+/// Edit one band's parameters in place, preserving its type, enabled flag and
+/// channel mask (rebuilding the biquad from a fresh filter would otherwise reset
+/// the mask to global).
+fn handle_set_band(state: &SharedState, index: usize, freq: f64, gain_db: f64, q: f64) -> Response {
+    state.send(
+        AudioCommand::SetBand {
+            index,
+            freq,
+            gain_db,
+            q,
+        },
+        move |chain| {
+            if let Some(f) = chain.filters.get(index) {
+                let (ft, en, mask) = (f.filter_type, f.enabled, f.mask);
+                if let Ok(new_f) = build_band(chain, ft, freq, gain_db, q, en, mask) {
+                    chain.filters[index] = new_f;
+                }
+            }
+        },
+    );
+    Response::Ok
+}
+
+/// Enable or bypass a single band.
+fn handle_set_band_enabled(state: &SharedState, index: usize, enabled: bool) -> Response {
+    state.send(
+        AudioCommand::SetBandEnabled { index, enabled },
+        move |chain| {
+            if let Some(f) = chain.filters.get_mut(index) {
+                f.enabled = enabled;
+            }
+        },
+    );
+    Response::Ok
+}
+
+/// Append a new band. New bands are global by default; retarget with
+/// `SetBandChannels`.
+fn handle_add_band(
+    state: &SharedState,
+    band_type: BandType,
+    freq: f64,
+    gain_db: f64,
+    q: f64,
+) -> Response {
+    state.send(
+        AudioCommand::AddBand {
+            band_type,
+            freq,
+            gain_db,
+            q,
+        },
+        move |chain| {
+            if let Ok(nf) = build_band(
+                chain,
+                band_type.into(),
+                freq,
+                gain_db,
+                q,
+                true,
+                DspMask::ALL,
+            ) {
+                chain.filters.push(nf);
+            }
+        },
+    );
+    Response::Ok
+}
+
+/// Remove the band at `index` (no-op if out of range).
+fn handle_remove_band(state: &SharedState, index: usize) -> Response {
+    state.send(AudioCommand::RemoveBand { index }, move |chain| {
+        if index < chain.filters.len() {
+            chain.filters.remove(index);
+        }
+    });
+    Response::Ok
+}
+
+/// Change a band's filter type, preserving its other parameters and mask.
+fn handle_set_band_type(state: &SharedState, index: usize, band_type: BandType) -> Response {
+    state.send(
+        AudioCommand::SetBandType { index, band_type },
+        move |chain| {
+            if let Some(f) = chain.filters.get(index) {
+                let (freq, gain_db, q, en, mask) = (f.freq, f.gain_db, f.q, f.enabled, f.mask);
+                if let Ok(nf) = build_band(chain, band_type.into(), freq, gain_db, q, en, mask) {
+                    chain.filters[index] = nf;
+                }
+            }
+        },
+    );
+    Response::Ok
+}
+
+/// Retarget an existing band to a channel subset (per-channel EQ).
+///
+/// Rejects an out-of-range band index rather than silently no-op'ing (mirrors
+/// `SwapChannels`' range check).
+fn handle_set_band_channels(state: &SharedState, index: usize, channels: ChannelMask) -> Response {
+    let nbands = state.0.lock().unwrap().chain.filters.len();
+    if index >= nbands {
+        return Response::Error(format!("no band at index {index} (have {nbands})"));
+    }
+    let mask = channels.to_dsp();
+    state.send(
+        AudioCommand::SetBandChannels { index, mask },
+        move |chain| {
+            if let Some(f) = chain.filters.get_mut(index) {
+                f.mask = mask;
+            }
+        },
+    );
+    Response::Ok
+}
+
+/// Install a client-supplied routing matrix.
+///
+/// The in-graph filter has a fixed `channels` ports in and out, so only a square
+/// remap at the live channel count can be applied. Validate before reaching the
+/// RT thread so a mismatched matrix never misframes a buffer (up/downmix to a
+/// different width is a daemon-path feature).
+fn handle_set_channel_routing(state: &SharedState, matrix: &RoutingMatrix) -> Response {
+    let channels = state.0.lock().unwrap().chain.channels;
+    match matrix.to_dsp() {
+        Some(m) if m.in_ch() == channels && m.out_ch() == channels => {
             state.send(
                 AudioCommand::SetRouting {
                     matrix: Some(m.clone()),
@@ -470,103 +540,137 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
             );
             Response::Ok
         }
+        Some(_) => Response::Error(format!(
+            "routing matrix must be square at the current channel count ({channels}×{channels})"
+        )),
+        None => Response::Error("invalid routing matrix dimensions".to_string()),
+    }
+}
 
-        Command::ClearRouting => {
-            state.send(AudioCommand::SetRouting { matrix: None }, |chain| {
-                chain.routing = None;
-            });
-            Response::Ok
-        }
+/// Swap two processing channels (square remap at the current channel count).
+/// Replaces any existing routing.
+fn handle_swap_channels(state: &SharedState, a: usize, b: usize) -> Response {
+    let channels = state.0.lock().unwrap().chain.channels;
+    if !channel_indices_in_range(channels, a, b) {
+        return Response::Error(format!(
+            "channel index out of range (chain has {channels} channels)"
+        ));
+    }
+    let m = ChannelMatrix::swap(channels, a, b);
+    state.send(
+        AudioCommand::SetRouting {
+            matrix: Some(m.clone()),
+        },
+        move |chain| chain.routing = Some(m),
+    );
+    Response::Ok
+}
 
-        Command::SetOutputTarget { node_name } => {
-            // Windows: switch the system default playback device (the APO follows
-            // the engine's endpoint). Other platforms: route via the PW node.
-            #[cfg(target_os = "windows")]
-            {
-                crate::audio::win_devices::set_default_render_endpoint(&node_name);
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                let route_tx = state.0.lock().unwrap().route_tx.clone();
-                let _ = route_tx.send(node_name.clone());
-            }
-            state.0.lock().unwrap().preferred_output = Some(node_name);
-            Response::Ok
-        }
+/// Clear any installed routing matrix (identity passthrough).
+fn handle_clear_routing(state: &SharedState) -> Response {
+    state.send(AudioCommand::SetRouting { matrix: None }, |chain| {
+        chain.routing = None;
+    });
+    Response::Ok
+}
 
-        Command::FollowSystemOutput => {
-            // Clear the pin and follow the OS default. On non-Windows an empty
-            // route name signals the audio backend to track the default device;
-            // on Windows the APO already sits on whatever endpoint is in use.
-            #[cfg(not(target_os = "windows"))]
-            {
-                let route_tx = state.0.lock().unwrap().route_tx.clone();
-                let _ = route_tx.send(String::new());
-            }
-            state.0.lock().unwrap().preferred_output = None;
-            Response::Ok
-        }
+/// Pin the output to a specific device.
+///
+/// On Windows this switches the system default playback device (the APO follows
+/// the engine's endpoint); elsewhere it routes via the `PipeWire` node.
+fn handle_set_output_target(state: &SharedState, node_name: String) -> Response {
+    #[cfg(target_os = "windows")]
+    {
+        crate::audio::win_devices::set_default_render_endpoint(&node_name);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let route_tx = state.0.lock().unwrap().route_tx.clone();
+        let _ = route_tx.send(node_name.clone());
+    }
+    state.0.lock().unwrap().preferred_output = Some(node_name);
+    Response::Ok
+}
 
-        Command::ApplyState {
-            preamp_db,
-            enabled,
-            bands,
-            effects,
-        } => {
-            let profile = Profile {
-                preamp_db,
-                enabled,
-                effects,
-                bands,
-            };
+/// Clear the output pin and follow the OS default device.
+///
+/// On non-Windows an empty route name signals the backend to track the default
+/// device; on Windows the APO already sits on whatever endpoint is in use.
+fn handle_follow_system_output(state: &SharedState) -> Response {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let route_tx = state.0.lock().unwrap().route_tx.clone();
+        let _ = route_tx.send(String::new());
+    }
+    state.0.lock().unwrap().preferred_output = None;
+    Response::Ok
+}
+
+/// Replace the whole chain from an explicit (preamp, bands, effects) state.
+fn handle_apply_state(
+    state: &SharedState,
+    preamp_db: f64,
+    enabled: bool,
+    bands: Vec<BandState>,
+    effects: EffectsState,
+) -> Response {
+    let profile = Profile {
+        preamp_db,
+        enabled,
+        effects,
+        bands,
+    };
+    state.rebuild_chain(|ch, sr| profile.clone().into_chain(ch, sr));
+    Response::Ok
+}
+
+/// Reset to a flat chain (no EQ, 0 dB preamp, all effects off) and clear the
+/// current-preset marker.
+fn handle_reset(state: &SharedState) -> Response {
+    state.rebuild_chain(flat_chain);
+    state.0.lock().unwrap().current_preset = None;
+    Response::Ok
+}
+
+/// Write the current preamp + bands to an `EqualizerAPO` `.txt` file.
+fn handle_export_apo(state: &SharedState, path: &str) -> Response {
+    let snap = state.snapshot();
+    let text = export_apo_text(&snap);
+    match std::fs::write(path, text) {
+        Ok(()) => Response::Ok,
+        Err(e) => Response::Error(format!("write '{path}': {e}")),
+    }
+}
+
+/// Export the current live chain state as a profile file.
+fn handle_export_profile(state: &SharedState, path: &str) -> Response {
+    let profile = Profile::from_state(&state.snapshot());
+    result_to_response(config::export_profile_file(path, &profile))
+}
+
+/// Capture the current state into an A/B comparison slot.
+fn handle_store_slot(state: &SharedState, slot: AbSlot) -> Response {
+    let profile = Profile::from_state(&state.snapshot());
+    state.0.lock().unwrap().ab_slots[slot_index(slot)] = Some(profile);
+    Response::Ok
+}
+
+/// Recall a stored A/B slot, rebuilding the chain from it.
+fn handle_recall_slot(state: &SharedState, slot: AbSlot) -> Response {
+    let stored = state.0.lock().unwrap().ab_slots[slot_index(slot)].clone();
+    match stored {
+        Some(profile) => {
             state.rebuild_chain(|ch, sr| profile.clone().into_chain(ch, sr));
             Response::Ok
         }
-
-        Command::Reset => {
-            state.rebuild_chain(flat_chain);
-            state.0.lock().unwrap().current_preset = None;
-            Response::Ok
-        }
-
-        Command::ExportApo { path } => {
-            let snap = state.snapshot();
-            let text = export_apo_text(&snap);
-            match std::fs::write(&path, text) {
-                Ok(()) => Response::Ok,
-                Err(e) => Response::Error(format!("write '{path}': {e}")),
-            }
-        }
-
-        Command::ExportProfile { path } => {
-            let profile = Profile::from_state(&state.snapshot());
-            match config::export_profile_file(&path, &profile) {
-                Ok(()) => Response::Ok,
-                Err(e) => Response::Error(e),
-            }
-        }
-
-        Command::StoreSlot { slot } => {
-            let profile = Profile::from_state(&state.snapshot());
-            state.0.lock().unwrap().ab_slots[slot_index(slot)] = Some(profile);
-            Response::Ok
-        }
-
-        Command::RecallSlot { slot } => {
-            let stored = state.0.lock().unwrap().ab_slots[slot_index(slot)].clone();
-            match stored {
-                Some(profile) => {
-                    state.rebuild_chain(|ch, sr| profile.clone().into_chain(ch, sr));
-                    Response::Ok
-                }
-                None => Response::Error("slot is empty — store it first".to_string()),
-            }
-        }
-
-        // The actual cleanup + exit happens in `handle_client` after this Ok is
-        // flushed to the client (see the `is_shutdown` branch there).
-        Command::Shutdown => Response::Ok,
+        None => Response::Error("slot is empty — store it first".to_string()),
     }
+}
+
+/// Whether both channel indices are valid for a chain of `channels` channels.
+/// Pure bounds check extracted so the swap range rule is unit-testable.
+fn channel_indices_in_range(channels: usize, a: usize, b: usize) -> bool {
+    a < channels && b < channels
 }
 
 /// Build an `ApoFilter` matching the chain's sample rate / channel count, with an
@@ -778,4 +882,69 @@ where
     writer.write_all(&bytes).await?;
     writer.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn result_to_response_maps_ok_and_err() {
+        assert!(matches!(result_to_response(Ok(())), Response::Ok));
+        match result_to_response(Err("boom".to_string())) {
+            Response::Error(e) => assert_eq!(e, "boom"),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slot_index_maps_a_to_0_and_b_to_1() {
+        assert_eq!(slot_index(AbSlot::A), 0);
+        assert_eq!(slot_index(AbSlot::B), 1);
+    }
+
+    #[test]
+    fn band_type_to_apo_is_a_total_one_to_one_mapping() {
+        // Spot-check the non-obvious mappings (the LP/HP knobs use the Q'd APO
+        // variants) and confirm every BandType variant is handled.
+        assert_eq!(band_type_to_apo(BandType::Peaking), ApoFilterType::Peaking);
+        assert_eq!(
+            band_type_to_apo(BandType::LowShelf),
+            ApoFilterType::LowShelf
+        );
+        assert_eq!(
+            band_type_to_apo(BandType::HighShelf),
+            ApoFilterType::HighShelf
+        );
+        assert_eq!(band_type_to_apo(BandType::LowPass), ApoFilterType::LowPassQ);
+        assert_eq!(
+            band_type_to_apo(BandType::HighPass),
+            ApoFilterType::HighPassQ
+        );
+        assert_eq!(
+            band_type_to_apo(BandType::BandPass),
+            ApoFilterType::BandPass
+        );
+        assert_eq!(band_type_to_apo(BandType::Notch), ApoFilterType::Notch);
+        assert_eq!(band_type_to_apo(BandType::AllPass), ApoFilterType::AllPass);
+    }
+
+    #[test]
+    fn file_stem_name_uses_stem_and_falls_back() {
+        assert_eq!(file_stem_name("/presets/Rock.fac"), "Rock");
+        assert_eq!(file_stem_name("Bass Boost.txt"), "Bass Boost");
+        // No stem (e.g. a bare dotfile) falls back to a default name.
+        assert_eq!(file_stem_name(""), "imported");
+    }
+
+    #[test]
+    fn channel_indices_in_range_rejects_out_of_bounds() {
+        // Valid stereo swap.
+        assert!(channel_indices_in_range(2, 0, 1));
+        // Either index at or beyond the channel count is rejected.
+        assert!(!channel_indices_in_range(2, 0, 2));
+        assert!(!channel_indices_in_range(2, 2, 0));
+        // Zero channels rejects everything.
+        assert!(!channel_indices_in_range(0, 0, 0));
+    }
 }

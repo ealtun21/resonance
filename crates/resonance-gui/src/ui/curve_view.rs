@@ -18,6 +18,66 @@ const SPECTRUM_DECAY_TAU: f32 = 0.20;
 /// A per-channel result curve: (legend label, colour, points).
 type ChCurve = (String, egui::Color32, Vec<(f64, f64)>);
 
+/// A legend row descriptor: `(label, colour, dashed)`. The label doubles as the
+/// key into the hidden-curves set, so each row's eye toggle is independent.
+type LegendEntry = (String, egui::Color32, bool);
+
+/// Pixel/value coordinate transforms for the plot, bundled so every drawing
+/// phase shares one consistent mapping. Built once per frame from the live
+/// view-window (`vlo`..`vhi` in log-Hz) and dB axis half-range (`db`).
+///
+/// `y_of` and `db_of` are exact inverses (`y_of(db_of(y)) == y`), which is what
+/// keeps a dragged node pinned under the cursor while the axis auto-scales.
+#[derive(Clone, Copy)]
+struct PlotAxes {
+    plot: egui::Rect,
+    vlo: f64,
+    vhi: f64,
+    db: f64,
+}
+
+impl PlotAxes {
+    /// Log-frequency → x pixel within the plot rect.
+    fn x_of(&self, logf: f64) -> f32 {
+        self.plot.left() + ((logf - self.vlo) / (self.vhi - self.vlo)) as f32 * self.plot.width()
+    }
+
+    /// Gain (dB) → y pixel within the plot rect (top is +db, bottom is −db).
+    fn y_of(&self, gain: f64) -> f32 {
+        self.plot.top() + (1.0 - ((gain + self.db) / (2.0 * self.db)) as f32) * self.plot.height()
+    }
+
+    /// x pixel → log-frequency (inverse of [`PlotAxes::x_of`]).
+    fn logf_of(&self, x: f32) -> f64 {
+        self.vlo + f64::from((x - self.plot.left()) / self.plot.width()) * (self.vhi - self.vlo)
+    }
+
+    /// y pixel → gain (dB) (inverse of [`PlotAxes::y_of`]).
+    fn db_of(&self, y: f32) -> f64 {
+        f64::from(1.0 - (y - self.plot.top()) / self.plot.height()) * 2.0 * self.db - self.db
+    }
+}
+
+/// The largest absolute deviation (dB) the axis must keep on-screen: the loudest
+/// of the response curve, any band gain (including the live dragged one folded
+/// into `bands`), and any overlay series — so big boosts/cuts never clip.
+fn peak_deviation(pts: &[(f64, f64)], bands: &[resonance_ipc::BandState], ref_peak: f64) -> f64 {
+    pts.iter()
+        .map(|&(_, g)| g.abs())
+        .chain(bands.iter().map(|b| b.gain_db.abs()))
+        .fold(0.0_f64, f64::max)
+        .max(ref_peak)
+}
+
+/// Whether the chosen dB stop should change, given the needed half-range and the
+/// stop currently in use. Hysteresis (grow past 98 %, shrink below 65 %) stops
+/// the axis chattering when `needed` sits on a stop boundary, and breaks the
+/// gain↔axis feedback loop so dragging a node to mid-graph settles instead of
+/// running away.
+fn should_restop(needed: f64, current_target: f64) -> bool {
+    needed > current_target * 0.98 || needed < current_target * 0.65
+}
+
 impl GuiApp {
     // ── EQ response curve (draggable nodes) ─────────────────────────────────
 
@@ -85,115 +145,114 @@ impl GuiApp {
         ui.horizontal(|ui| {
             ui.set_min_height(25.0);
             ui.add_space(kit::CARD_PAD_X);
-            let font = egui::FontId::monospace(kit::T_VALUE);
-            let sep = "  ·  ";
-            if let Some(b) = state.bands.get(self.selected_band) {
-                let freq = if b.freq >= 1000.0 {
-                    format!("{:.2}k Hz", b.freq / 1000.0)
-                } else {
-                    format!("{:.0} Hz", b.freq)
-                };
-                let ch = crate::ui::bands::channel_tag(
-                    b.channels,
-                    &state.channel_layout,
-                    state.channels,
-                );
-                let mut job = egui::text::LayoutJob::default();
-                let mut push = |s: &str, col: egui::Color32| {
-                    job.append(
-                        s,
-                        0.0,
-                        egui::TextFormat {
-                            font_id: font.clone(),
-                            color: col,
-                            ..Default::default()
-                        },
-                    );
-                };
-                push(
-                    &format!("Band {}", self.selected_band + 1),
-                    self.palette.highlight,
-                );
-                push(sep, t.faint);
-                push(b.band_type.abbrev(), t.text);
-                push(sep, t.faint);
-                push(&freq, t.text);
-                push(sep, t.faint);
-                push(
-                    &format!("{:+.1} dB", b.gain_db),
-                    gain_color(b.gain_db, &self.palette),
-                );
-                push(sep, t.faint);
-                push(&format!("Q {:.2}", b.q), t.text);
-                if state.channels >= 2 {
-                    push(sep, t.faint);
-                    push(&ch, t.dim);
-                }
-                if !b.enabled {
-                    push(sep, t.faint);
-                    push("bypassed", t.faint);
-                }
-                let galley = ui.painter().layout_job(job);
-                let (r, _) = ui.allocate_exact_size(
-                    egui::vec2(galley.size().x, 22.0),
-                    egui::Sense::hover(),
-                );
-                ui.painter().galley(
-                    egui::pos2(r.left(), r.center().y - galley.size().y / 2.0),
-                    galley,
-                    t.text,
-                );
-                // Right-aligned: the active lock state when a node is locked,
-                // otherwise the gesture legend (the card has no head bar now,
-                // so this is the one place the gestures are spelled out).
-                let (hint, col) = if self.vlock == Some(self.selected_band) {
-                    ("vertical-locked · gain only", self.palette.highlight)
-                } else if self.hlock == Some(self.selected_band) {
-                    ("gain-locked · freq only", self.palette.highlight)
-                } else {
-                    (
-                        "drag = move · right-drag = Q · scroll = zoom · double-right-click = lock axis",
-                        t.faint,
-                    )
-                };
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_space(kit::CARD_PAD_X);
-                    let w = kit::text_width(ui, kit::T_CAPTION, hint);
-                    let (hr, _) =
-                        ui.allocate_exact_size(egui::vec2(w, 22.0), egui::Sense::hover());
-                    ui.painter().text(
-                        egui::pos2(hr.right(), hr.center().y),
-                        egui::Align2::RIGHT_CENTER,
-                        hint,
-                        egui::FontId::proportional(kit::T_CAPTION),
-                        col,
-                    );
-                });
-            } else {
-                let (r, _) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), 22.0),
-                    egui::Sense::hover(),
-                );
-                ui.painter().text(
-                    egui::pos2(r.left(), r.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    "double-click the graph to add a band",
-                    egui::FontId::proportional(kit::T_CAPTION),
-                    t.faint,
-                );
+            match state.bands.get(self.selected_band) {
+                Some(b) => self.readout_band(ui, state, b, &t),
+                None => Self::readout_empty(ui, &t),
             }
         });
     }
 
+    /// Render the selected band's parameter row plus the right-aligned gesture or
+    /// active-lock hint.
+    fn readout_band(
+        &self,
+        ui: &mut egui::Ui,
+        state: &DaemonState,
+        b: &resonance_ipc::BandState,
+        t: &kit::Tokens,
+    ) {
+        let font = egui::FontId::monospace(kit::T_VALUE);
+        let sep = "  ·  ";
+        let freq = if b.freq >= 1000.0 {
+            format!("{:.2}k Hz", b.freq / 1000.0)
+        } else {
+            format!("{:.0} Hz", b.freq)
+        };
+        let ch = crate::ui::bands::channel_tag(b.channels, &state.channel_layout, state.channels);
+        let mut job = egui::text::LayoutJob::default();
+        let mut push = |s: &str, col: egui::Color32| {
+            job.append(
+                s,
+                0.0,
+                egui::TextFormat {
+                    font_id: font.clone(),
+                    color: col,
+                    ..Default::default()
+                },
+            );
+        };
+        push(
+            &format!("Band {}", self.selected_band + 1),
+            self.palette.highlight,
+        );
+        push(sep, t.faint);
+        push(b.band_type.abbrev(), t.text);
+        push(sep, t.faint);
+        push(&freq, t.text);
+        push(sep, t.faint);
+        push(
+            &format!("{:+.1} dB", b.gain_db),
+            gain_color(b.gain_db, &self.palette),
+        );
+        push(sep, t.faint);
+        push(&format!("Q {:.2}", b.q), t.text);
+        if state.channels >= 2 {
+            push(sep, t.faint);
+            push(&ch, t.dim);
+        }
+        if !b.enabled {
+            push(sep, t.faint);
+            push("bypassed", t.faint);
+        }
+        let galley = ui.painter().layout_job(job);
+        let (r, _) =
+            ui.allocate_exact_size(egui::vec2(galley.size().x, 22.0), egui::Sense::hover());
+        ui.painter().galley(
+            egui::pos2(r.left(), r.center().y - galley.size().y / 2.0),
+            galley,
+            t.text,
+        );
+        // Right-aligned: the active lock state when a node is locked, otherwise
+        // the gesture legend (the card has no head bar, so this is the one place
+        // the gestures are spelled out).
+        let (hint, col) = if self.vlock == Some(self.selected_band) {
+            ("vertical-locked · gain only", self.palette.highlight)
+        } else if self.hlock == Some(self.selected_band) {
+            ("gain-locked · freq only", self.palette.highlight)
+        } else {
+            (
+                "drag = move · right-drag = Q · scroll = zoom · double-right-click = lock axis",
+                t.faint,
+            )
+        };
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_space(kit::CARD_PAD_X);
+            let w = kit::text_width(ui, kit::T_CAPTION, hint);
+            let (hr, _) = ui.allocate_exact_size(egui::vec2(w, 22.0), egui::Sense::hover());
+            ui.painter().text(
+                egui::pos2(hr.right(), hr.center().y),
+                egui::Align2::RIGHT_CENTER,
+                hint,
+                egui::FontId::proportional(kit::T_CAPTION),
+                col,
+            );
+        });
+    }
+
+    /// Render the empty-state hint when no band is selected (e.g. a flat EQ).
+    fn readout_empty(ui: &mut egui::Ui, t: &kit::Tokens) {
+        let (r, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), egui::Sense::hover());
+        ui.painter().text(
+            egui::pos2(r.left(), r.center().y),
+            egui::Align2::LEFT_CENTER,
+            "double-click the graph to add a band",
+            egui::FontId::proportional(kit::T_CAPTION),
+            t.faint,
+        );
+    }
+
     pub(crate) fn eq_curve(&mut self, ui: &mut egui::Ui, state: &DaemonState) {
-        use egui::PointerButton::{Primary, Secondary};
-        // Spectrum-bar tuning (used in the analyzer fill below). A small minimum
-        // body + floor alpha keep a faint analyzer band visible even in silence,
-        // so the spectrum never looks "gone" — it just lights up with audio.
-        const MIN_BODY: f32 = 0.016;
-        // Small inter-bar gap so the analyzer reads as discrete columns rather
-        // than one opaque slab — keeps the response curve the focus.
-        const GAP: f32 = 1.0;
         // Fill the FR panel so dragging its bottom edge resizes the graph.
         let height = ui.available_height().max(50.0);
         let (rect, response) = ui.allocate_exact_size(
@@ -209,11 +268,9 @@ impl GuiApp {
         // the panel edge — a few px of breathing room on every side.
         let plot = rect.shrink2(egui::vec2(8.0, 8.0));
 
-        // Response curve + auto-scaled dB axis: the axis grows to fit the
-        // loudest point (curve peak or any band's gain) plus 5 dB headroom, so
-        // big boosts/cuts stay on-screen with margin instead of clipping.
         let (vlo, vhi) = self.view_log;
         let zoomed = vlo > curve::LOG_MIN + 1e-6 || vhi < curve::LOG_MAX - 1e-6;
+
         // Draw the curve from an optimistic copy: while dragging, the daemon's
         // echoed `state` only refreshes at the worker's ~30 Hz poll, so the line
         // would visibly lag the node (which uses the immediate `drag_value`).
@@ -227,15 +284,14 @@ impl GuiApp {
             }
         }
         let pts = curve::curve_points_range(&bands, state.sample_rate, 240, vlo, vhi);
+
         // Per-channel view: when per-channel EQ is in play, each output channel
         // sees only the bands that target it, so the channels can have different
         // responses. Draw one curve per channel (coloured by channel) instead of
         // the single gain-coloured response, so L/R divergence is visible.
         let channels = state.channels;
         let per_channel = channels > 2 || (self.per_channel_eq && channels >= 2);
-        // Reference / measurement overlays (target, result, gap…). Empty when the
-        // reference system is off or has nothing to show; when present they
-        // replace the bare EQ curve (the EQ is folded into the "result" series).
+
         // Animate the normalise toggle: `na` eases 0↔1 so the target line visibly
         // flattens to the 0-line and the result/measurement stretch into deviation,
         // instead of snapping. Fed into `series` (the geometry) and the draw below.
@@ -251,39 +307,144 @@ impl GuiApp {
             Vec::new()
         };
         let show_ref = !ref_series.is_empty();
-        // Per-channel result curves in reference mode: each channel's measurement
-        // shaped by *its* EQ, so per-channel divergence shows even with a
-        // target/measurement overlay (the single all-bands "Result" is replaced).
-        let per_channel_results: Vec<ChCurve> = if show_ref && per_channel {
-            use resonance_reference::reference::SeriesRole;
-            (0..channels)
-                .map(|c| {
-                    let cbands: Vec<_> = bands
-                        .iter()
-                        .filter(|b| b.channels.contains(c))
-                        .cloned()
-                        .collect();
-                    let pts = self
-                        .reference
-                        .series(&cbands, state.sample_rate, 240, vlo, vhi, na)
-                        .into_iter()
-                        .find(|s| s.role == SeriesRole::Result)
-                        .map(|s| s.pts)
-                        .unwrap_or_default();
-                    let label = state.channel_layout.get(c).map_or("?", String::as_str);
-                    (format!("Result {label}"), channel_color(c), pts)
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        // Unified legend entries `(label, colour, dashed)` — each gets an eye
-        // toggle. In the normalised view the target IS the flat 0-line, so it's
-        // not keyed separately.
-        let legend_entries: Vec<(String, egui::Color32, bool)> = if show_ref {
-            let mut v: Vec<(String, egui::Color32, bool)> = Vec::new();
+        let per_channel_results =
+            self.per_channel_results(state, &bands, vlo, vhi, na, show_ref, per_channel);
+        let legend_entries =
+            self.legend_entries(state, &per_channel_results, show_ref, per_channel);
+        let legend_rect = legend_box_rect(plot, &painter, &legend_entries);
+
+        // Advance the dB axis toward the stop that fits the loudest on-screen
+        // point, easing so the curve + markers glide instead of snapping.
+        let ref_peak = ref_series
+            .iter()
+            .flat_map(|s| s.pts.iter())
+            .map(|&(_, y)| y.abs())
+            .fold(0.0_f64, f64::max);
+        let (db, axis_animating) = self.advance_db_axis(&pts, &bands, &ref_series, ref_peak);
+
+        let axes = PlotAxes { plot, vlo, vhi, db };
+
+        // ── Static background: region shading, grids, then the spectrum fill ──
+        self.draw_region_bands(&painter, &axes);
+        self.draw_db_grid(&painter, &axes);
+        self.draw_freq_grid(&painter, &axes);
+        self.draw_spectrum_fill(&painter, state, &axes);
+
+        // ── Response curve(s) / reference overlay ────────────────────────────
+        self.draw_response(
+            &painter,
+            state,
+            &bands,
+            &pts,
+            &ref_series,
+            &per_channel_results,
+            &axes,
+            na,
+            show_ref,
+            per_channel,
+        );
+
+        // The legend (with its eye toggles) sits inside the graph; a click there
+        // must toggle a curve, not grab/create a node. Skip node interactions
+        // whose pointer is over the legend box.
+        let over_legend = response
+            .interact_pointer_pos()
+            .is_some_and(|p| legend_rect.contains(p));
+
+        // ── Interaction: zoom, then drag/lock/add ────────────────────────────
+        self.handle_zoom(ui, &response, &painter, &axes, zoomed);
+        self.handle_drag_and_locks(ui, state, &response, &axes, over_legend);
+
+        // Drive continuous frames (not just on input events) while dragging a
+        // node or while the dB axis is still easing, so motion is smooth at the
+        // display's refresh rate rather than the OS pointer-event cadence.
+        if self.drag_band.is_some() || axis_animating {
+            ui.ctx().request_repaint();
+        }
+
+        // ── Foreground: band nodes, target tag, interactive legend ───────────
+        self.draw_band_nodes(&painter, state, &axes);
+
+        // As the view normalises, the 0-line becomes the target — fade the tag in
+        // with the morph (`na`), tracking the dashed target line that's flattening
+        // onto it.
+        if show_ref && self.reference.target.is_some() && na > 0.02 {
+            painter.text(
+                egui::pos2(plot.right() - 4.0, axes.y_of(0.0) - 3.0),
+                egui::Align2::RIGHT_BOTTOM,
+                "target",
+                egui::FontId::monospace(9.0),
+                pal.accent.gamma_multiply(na as f32),
+            );
+        }
+
+        // Interactive legend (bottom-right): an eye toggle per series to
+        // show/hide it — making it easy to isolate one channel/curve while
+        // editing. Empty in the plain single-curve view.
+        legend_with_eyes(
+            &mut self.hidden_curves,
+            ui,
+            &painter,
+            legend_rect,
+            &pal,
+            &legend_entries,
+        );
+    }
+
+    /// Per-channel result curves in reference mode: each channel's measurement
+    /// shaped by *its* EQ, so per-channel divergence shows even with a
+    /// target/measurement overlay (the single all-bands "Result" is replaced).
+    /// Empty unless both a reference overlay and per-channel EQ are active.
+    #[allow(clippy::too_many_arguments)]
+    fn per_channel_results(
+        &self,
+        state: &DaemonState,
+        bands: &[resonance_ipc::BandState],
+        vlo: f64,
+        vhi: f64,
+        na: f64,
+        show_ref: bool,
+        per_channel: bool,
+    ) -> Vec<ChCurve> {
+        use resonance_reference::reference::SeriesRole;
+        if !(show_ref && per_channel) {
+            return Vec::new();
+        }
+        (0..state.channels)
+            .map(|c| {
+                let cbands: Vec<_> = bands
+                    .iter()
+                    .filter(|b| b.channels.contains(c))
+                    .cloned()
+                    .collect();
+                let pts = self
+                    .reference
+                    .series(&cbands, state.sample_rate, 240, vlo, vhi, na)
+                    .into_iter()
+                    .find(|s| s.role == SeriesRole::Result)
+                    .map(|s| s.pts)
+                    .unwrap_or_default();
+                let label = state.channel_layout.get(c).map_or("?", String::as_str);
+                (format!("Result {label}"), channel_color(c), pts)
+            })
+            .collect()
+    }
+
+    /// Build the unified legend entries `(label, colour, dashed)` — one per
+    /// visible series, each gaining an eye toggle. In the normalised view the
+    /// target IS the flat 0-line, so it is not keyed separately.
+    fn legend_entries(
+        &self,
+        state: &DaemonState,
+        per_channel_results: &[ChCurve],
+        show_ref: bool,
+        per_channel: bool,
+    ) -> Vec<LegendEntry> {
+        let pal = self.palette;
+        if show_ref {
+            let mut v: Vec<LegendEntry> = Vec::new();
             if per_channel {
-                for (key, col, _) in &per_channel_results {
+                for (key, col, _) in per_channel_results {
                     v.push((key.clone(), *col, false));
                 }
             } else {
@@ -300,7 +461,7 @@ impl GuiApp {
             }
             v
         } else if per_channel {
-            (0..channels)
+            (0..state.channels)
                 .map(|c| {
                     let name = state
                         .channel_layout
@@ -312,77 +473,61 @@ impl GuiApp {
                 .collect()
         } else {
             Vec::new()
-        };
-        let legend_rect = legend_box_rect(plot, &painter, &legend_entries);
-        // Loudest point the axis must show (any band gain, curve peak, or overlay
-        // extent) + 5 dB headroom. Includes the dragged band, so the axis expands
-        // live as you drag a node up and contracts as you bring it down.
-        let ref_peak = ref_series
-            .iter()
-            .flat_map(|s| s.pts.iter())
-            .map(|&(_, y)| y.abs())
-            .fold(0.0_f64, f64::max);
-        let peak = pts
-            .iter()
-            .map(|&(_, g)| g.abs())
-            .chain(bands.iter().map(|b| b.gain_db.abs()))
-            .fold(0.0_f64, f64::max)
-            .max(ref_peak);
+        }
+    }
+
+    /// Settle the dB half-range toward the stop that fits the loudest on-screen
+    /// point + 5 dB headroom, with hysteresis on the stop choice and easing on
+    /// the live value. Returns the current (eased) half-range and whether it is
+    /// still animating toward its target.
+    fn advance_db_axis(
+        &mut self,
+        pts: &[(f64, f64)],
+        bands: &[resonance_ipc::BandState],
+        ref_series: &[resonance_reference::reference::RefSeries],
+        ref_peak: f64,
+    ) -> (f64, bool) {
+        let mut peak = peak_deviation(pts, bands, ref_peak);
         // The preference band widens past the target at the extremes — grow the
         // axis to keep the whole band on-screen when it's shown.
-        let peak = if self.reference.show_bounds {
-            ref_series
+        if self.reference.show_bounds {
+            if let Some(t) = ref_series
                 .iter()
                 .find(|s| s.role == resonance_reference::reference::SeriesRole::Target)
-                .map_or(peak, |t| {
-                    t.pts.iter().fold(peak, |acc, &(lf, y)| {
-                        let (below, above) =
-                            resonance_reference::reference::preference_bounds(10f64.powf(lf));
-                        acc.max(y.abs() + below.max(above))
-                    })
-                })
-        } else {
-            peak
-        };
+            {
+                peak = t.pts.iter().fold(peak, |acc, &(lf, y)| {
+                    let (below, above) =
+                        resonance_reference::reference::preference_bounds(10f64.powf(lf));
+                    acc.max(y.abs() + below.max(above))
+                });
+            }
+        }
         let needed = peak + 5.0;
-        // Pick the ± dB stop with HYSTERESIS so it doesn't chatter (jiggle) when
-        // `needed` sits right on a stop boundary: grow once it exceeds 98% of the
-        // current stop, shrink only once it drops below 65%. The wide deadband
-        // also breaks the gain↔axis feedback — dragging the node up to ~mid-graph
-        // settles on a stop instead of running away (only slamming the node to
-        // the very top edge takes it to the max stop, which is what you'd want).
-        if needed > self.db_target * 0.98 || needed < self.db_target * 0.65 {
+        if should_restop(needed, self.db_target) {
             let (t, s) = curve::display_range(needed);
             self.db_target = t;
             self.db_step = s;
         }
-        let target_db = self.db_target;
-        let db_step = self.db_step;
         // Ease the axis toward the chosen stop so the curve + markers glide
         // instead of snapping. Same easing whether or not a drag is active, so
         // expand and contract feel identical.
-        self.db_axis += (target_db - self.db_axis) * 0.20;
-        if (self.db_axis - target_db).abs() < 0.05 {
-            self.db_axis = target_db;
+        self.db_axis += (self.db_target - self.db_axis) * 0.20;
+        if (self.db_axis - self.db_target).abs() < 0.05 {
+            self.db_axis = self.db_target;
         }
-        let db = self.db_axis;
-        let axis_animating = (self.db_axis - target_db).abs() > 1e-3;
-        let x_of =
-            |logf: f64| -> f32 { plot.left() + ((logf - vlo) / (vhi - vlo)) as f32 * plot.width() };
-        let y_of = |gain: f64| -> f32 {
-            plot.top() + (1.0 - ((gain + db) / (2.0 * db)) as f32) * plot.height()
-        };
-        let logf_of =
-            |x: f32| -> f64 { vlo + f64::from((x - plot.left()) / plot.width()) * (vhi - vlo) };
-        let db_of =
-            |y: f32| -> f64 { f64::from(1.0 - (y - plot.top()) / plot.height()) * 2.0 * db - db };
+        let animating = (self.db_axis - self.db_target).abs() > 1e-3;
+        (self.db_axis, animating)
+    }
 
-        // Frequency-region background bands (sub/bass/lo-mid/hi-mid/treble/air).
-        // Alternating faint fills make each tonal region lightly noticeable
-        // without competing with the curve; a dim label sits along the top.
+    /// Alternating faint tonal-region fills (sub/bass/lo-mid/…/air) with a dim
+    /// label, so each region is lightly noticeable without competing with the
+    /// curve.
+    fn draw_region_bands(&self, painter: &egui::Painter, axes: &PlotAxes) {
+        let pal = self.palette;
+        let plot = axes.plot;
         for (i, (lo, hi, label)) in curve::freq_bands().into_iter().enumerate() {
-            let xl = x_of(lo.log10()).max(plot.left());
-            let xr = x_of(hi.log10()).min(plot.right());
+            let xl = axes.x_of(lo.log10()).max(plot.left());
+            let xr = axes.x_of(hi.log10()).min(plot.right());
             if xr <= xl {
                 continue;
             }
@@ -407,16 +552,20 @@ impl GuiApp {
                 );
             }
         }
+    }
 
-        // Horizontal dB grid lines at multiples of the step within ±range.
+    /// Horizontal dB grid lines at multiples of the step within ±range, with the
+    /// 0 dB reference line emphasised and each line labelled at the left edge.
+    fn draw_db_grid(&self, painter: &egui::Painter, axes: &PlotAxes) {
+        let pal = self.palette;
+        let plot = axes.plot;
         let label_col = pal.neutral;
         let grid = egui::Stroke::new(1.0, pal.grid.gamma_multiply(0.6));
-        let n_lines = (db / db_step) as i32;
+        let n_lines = (axes.db / self.db_step) as i32;
         for k in -n_lines..=n_lines {
-            let g = f64::from(k) * db_step;
-            let y = y_of(g);
+            let g = f64::from(k) * self.db_step;
+            let y = axes.y_of(g);
             let stroke = if g == 0.0 {
-                // Emphasised 0 dB reference line.
                 egui::Stroke::new(1.6, pal.neutral)
             } else {
                 grid
@@ -433,12 +582,19 @@ impl GuiApp {
                 label_col,
             );
         }
-        // Vertical frequency grid + labels. Always draw the gridline, but skip a
-        // label when it would crowd the previous one (keeps "80 100 150 200"
-        // from merging on a narrow graph).
+    }
+
+    /// Vertical frequency grid lines + labels. The gridline is always drawn, but
+    /// a label is skipped when it would crowd the previous one (keeps "80 100 150
+    /// 200" from merging on a narrow graph).
+    fn draw_freq_grid(&self, painter: &egui::Painter, axes: &PlotAxes) {
+        let pal = self.palette;
+        let plot = axes.plot;
+        let label_col = pal.neutral;
+        let grid = egui::Stroke::new(1.0, pal.grid.gamma_multiply(0.6));
         let mut last_label_x = f32::NEG_INFINITY;
-        for (logf, label) in curve::x_axis_ticks_range(vlo, vhi) {
-            let x = x_of(logf);
+        for (logf, label) in curve::x_axis_ticks_range(axes.vlo, axes.vhi) {
+            let x = axes.x_of(logf);
             painter.line_segment(
                 [egui::pos2(x, plot.top()), egui::pos2(x, plot.bottom())],
                 grid,
@@ -454,68 +610,97 @@ impl GuiApp {
                 );
             }
         }
+    }
 
-        // Live spectrum as a translucent fill BEHIND the response curve (the
-        // FabFilter/LSP idiom): ambient context on its own magnitude axis off the
-        // bottom edge, so it never competes with the curve — and silence simply
-        // shows no fill instead of a separate black panel.
-        {
-            let bins = &state.spectrum;
-            let n = bins.len();
-            if self.spectrum_display.len() != n {
-                self.spectrum_display = vec![0.0; n];
-            }
-            let dt = self.last_anim.elapsed().as_secs_f32().min(0.1);
-            self.last_anim = Instant::now();
-            for (disp, &raw) in self.spectrum_display.iter_mut().zip(bins.iter()) {
-                let target = raw.clamp(0.0, 1.0);
-                let tau = if target > *disp {
-                    SPECTRUM_ATTACK_TAU
-                } else {
-                    SPECTRUM_DECAY_TAU
-                };
-                *disp += (target - *disp) * (1.0 - (-dt / tau).exp());
-            }
-            let n = self.spectrum_display.len();
-            if n > 0 {
-                let range = curve::LOG_MAX - curve::LOG_MIN;
-                let base = plot.bottom();
-                // Bins are log-spaced over 20 Hz–20 kHz; map each bin's edges
-                // through x_of so the fill aligns with the log axis (and clips
-                // correctly when the view is zoomed). Per bin: a filled column
-                // (brighter toward the peak) so it always reads as a spectrum
-                // analyzer. A small minimum body + floor alpha keep a faint
-                // analyzer band visible even in silence, so the spectrum never
-                // looks "gone" — it just lights up with audio.
-                for (i, &v) in self.spectrum_display.iter().enumerate() {
-                    let v = v.clamp(0.0, 1.0);
-                    let lo = curve::LOG_MIN + i as f64 / n as f64 * range;
-                    let hi = curve::LOG_MIN + (i + 1) as f64 / n as f64 * range;
-                    let x0 = x_of(lo).max(plot.left()) + GAP;
-                    let x1 = x_of(hi).min(plot.right()) - GAP;
-                    if x1 <= x0 {
-                        continue;
-                    }
-                    let body = (v * 0.90 + MIN_BODY).min(1.0);
-                    let top_y = base - body * plot.height();
-                    // Gentle hue shift toward the highlight + low alpha ceiling so
-                    // the fill stays ambient context behind the curve.
-                    let col = lerp_color(pal.accent, pal.highlight, v * 0.5);
-                    let [r, g, b, _] = col.to_array();
-                    let a = (16.0 + 66.0 * v).min(96.0) as u8;
-                    painter.rect_filled(
-                        egui::Rect::from_min_max(egui::pos2(x0, top_y), egui::pos2(x1, base)),
-                        1.0,
-                        egui::Color32::from_rgba_unmultiplied(r, g, b, a),
-                    );
-                }
-            }
+    /// Live spectrum as a translucent fill BEHIND the response curve (the
+    /// FabFilter/LSP idiom): ambient context on its own magnitude axis off the
+    /// bottom edge so it never competes with the curve, and silence simply shows
+    /// no fill instead of a separate black panel. Advances the display envelope
+    /// (attack/decay) before drawing the per-bin columns.
+    fn draw_spectrum_fill(
+        &mut self,
+        painter: &egui::Painter,
+        state: &DaemonState,
+        axes: &PlotAxes,
+    ) {
+        // A small minimum body + floor alpha keep a faint analyzer band visible
+        // even in silence, so the spectrum never looks "gone".
+        const MIN_BODY: f32 = 0.016;
+        // Small inter-bar gap so the analyzer reads as discrete columns rather
+        // than one opaque slab — keeps the response curve the focus.
+        const GAP: f32 = 1.0;
+
+        let pal = self.palette;
+        let plot = axes.plot;
+        let bins = &state.spectrum;
+        let n = bins.len();
+        if self.spectrum_display.len() != n {
+            self.spectrum_display = vec![0.0; n];
         }
+        let dt = self.last_anim.elapsed().as_secs_f32().min(0.1);
+        self.last_anim = Instant::now();
+        for (disp, &raw) in self.spectrum_display.iter_mut().zip(bins.iter()) {
+            let target = raw.clamp(0.0, 1.0);
+            let tau = if target > *disp {
+                SPECTRUM_ATTACK_TAU
+            } else {
+                SPECTRUM_DECAY_TAU
+            };
+            *disp += (target - *disp) * (1.0 - (-dt / tau).exp());
+        }
+        let n = self.spectrum_display.len();
+        if n == 0 {
+            return;
+        }
+        let range = curve::LOG_MAX - curve::LOG_MIN;
+        let base = plot.bottom();
+        // Bins are log-spaced over 20 Hz–20 kHz; map each bin's edges through
+        // x_of so the fill aligns with the log axis (and clips correctly when the
+        // view is zoomed). Per bin: a filled column (brighter toward the peak).
+        for (i, &v) in self.spectrum_display.iter().enumerate() {
+            let v = v.clamp(0.0, 1.0);
+            let lo = curve::LOG_MIN + i as f64 / n as f64 * range;
+            let hi = curve::LOG_MIN + (i + 1) as f64 / n as f64 * range;
+            let x0 = axes.x_of(lo).max(plot.left()) + GAP;
+            let x1 = axes.x_of(hi).min(plot.right()) - GAP;
+            if x1 <= x0 {
+                continue;
+            }
+            let body = (v * 0.90 + MIN_BODY).min(1.0);
+            let top_y = base - body * plot.height();
+            // Gentle hue shift toward the highlight + low alpha ceiling so the
+            // fill stays ambient context behind the curve.
+            let col = lerp_color(pal.accent, pal.highlight, v * 0.5);
+            let [r, g, b, _] = col.to_array();
+            let a = (16.0 + 66.0 * v).min(96.0) as u8;
+            painter.rect_filled(
+                egui::Rect::from_min_max(egui::pos2(x0, top_y), egui::pos2(x1, base)),
+                1.0,
+                egui::Color32::from_rgba_unmultiplied(r, g, b, a),
+            );
+        }
+    }
 
-        // Response curve. With reference overlays active the EQ response is folded
-        // into the "result" series, so we draw the overlays instead of the bare
-        // curve; otherwise draw the colour-coded EQ response (boost green / cut
-        // red, neutral near 0 dB) as usual.
+    /// Draw the response curve(s). With reference overlays active the EQ response
+    /// is folded into the "result" series, so the overlays are drawn instead of
+    /// the bare curve; in per-channel mode one response per channel (channel
+    /// coloured) is drawn from only that channel's bands; otherwise the single
+    /// colour-coded EQ response (boost green / cut red, neutral near 0 dB).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_response(
+        &self,
+        painter: &egui::Painter,
+        state: &DaemonState,
+        bands: &[resonance_ipc::BandState],
+        pts: &[(f64, f64)],
+        ref_series: &[resonance_reference::reference::RefSeries],
+        per_channel_results: &[ChCurve],
+        axes: &PlotAxes,
+        na: f64,
+        show_ref: bool,
+        per_channel: bool,
+    ) {
+        let pal = self.palette;
         let hidden = &self.hidden_curves;
         if show_ref {
             use resonance_reference::reference::SeriesRole;
@@ -538,25 +723,17 @@ impl GuiApp {
                 })
                 .collect();
             let show_bounds = self.reference.show_bounds && !hidden.contains("Bounds");
-            draw_reference(
-                &painter,
-                &filtered,
-                na as f32,
-                show_bounds,
-                &x_of,
-                &y_of,
-                &pal,
-            );
+            draw_reference(painter, &filtered, na as f32, show_bounds, axes, &pal);
             // Per-channel result curves (channel-coloured), each eye-toggleable.
-            for (key, col, cpts) in &per_channel_results {
+            for (key, col, cpts) in per_channel_results {
                 if hidden.contains(key) {
                     continue;
                 }
                 for w in cpts.windows(2) {
                     painter.line_segment(
                         [
-                            egui::pos2(x_of(w[0].0), y_of(w[0].1)),
-                            egui::pos2(x_of(w[1].0), y_of(w[1].1)),
+                            egui::pos2(axes.x_of(w[0].0), axes.y_of(w[0].1)),
+                            egui::pos2(axes.x_of(w[1].0), axes.y_of(w[1].1)),
                         ],
                         egui::Stroke::new(2.0, *col),
                     );
@@ -564,7 +741,7 @@ impl GuiApp {
             }
         } else if per_channel {
             // One response per channel, from only the bands targeting it.
-            for c in 0..channels {
+            for c in 0..state.channels {
                 let label = state.channel_layout.get(c).map_or("?", String::as_str);
                 if hidden.contains(label) {
                     continue;
@@ -574,11 +751,12 @@ impl GuiApp {
                     .filter(|b| b.channels.contains(c))
                     .cloned()
                     .collect();
-                let cpts = curve::curve_points_range(&cbands, state.sample_rate, 240, vlo, vhi);
+                let cpts =
+                    curve::curve_points_range(&cbands, state.sample_rate, 240, axes.vlo, axes.vhi);
                 let col = channel_color(c);
                 for w in cpts.windows(2) {
-                    let a = egui::pos2(x_of(w[0].0), y_of(w[0].1));
-                    let b = egui::pos2(x_of(w[1].0), y_of(w[1].1));
+                    let a = egui::pos2(axes.x_of(w[0].0), axes.y_of(w[0].1));
+                    let b = egui::pos2(axes.x_of(w[1].0), axes.y_of(w[1].1));
                     painter.line_segment([a, b], egui::Stroke::new(2.0, col));
                 }
             }
@@ -586,31 +764,37 @@ impl GuiApp {
             for w in pts.windows(2) {
                 let (lf0, g0) = w[0];
                 let (lf1, g1) = w[1];
-                let a = egui::pos2(x_of(lf0), y_of(g0));
-                let b = egui::pos2(x_of(lf1), y_of(g1));
+                let a = egui::pos2(axes.x_of(lf0), axes.y_of(g0));
+                let b = egui::pos2(axes.x_of(lf1), axes.y_of(g1));
                 let color = gain_color((g0 + g1) * 0.5, &pal);
                 painter.line_segment([a, b], egui::Stroke::new(2.0, color));
             }
         }
+    }
 
-        // The legend (with its eye toggles) sits inside the graph; a click there
-        // must toggle a curve, not grab/create a node. Skip node interactions
-        // whose pointer is over the legend box.
-        let over_legend = response
-            .interact_pointer_pos()
-            .is_some_and(|p| legend_rect.contains(p));
-
-        // ── Zoom ────────────────────────────────────────────────────────────
-        // Scroll wheel over the graph zooms the x-axis around the pointer;
-        // Shift+left-drag box-selects a frequency range to zoom into. The
-        // span is the daemon-wide LOG_MIN..LOG_MAX; we never zoom out past it.
-        let shift = ui.input(|i| i.modifiers.shift);
+    /// Scroll-wheel zoom around the pointer + Shift+left-drag box-select, plus the
+    /// "reset zoom" affordance. The span is the daemon-wide `LOG_MIN..LOG_MAX`; we
+    /// never zoom out past it.
+    fn handle_zoom(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        painter: &egui::Painter,
+        axes: &PlotAxes,
+        zoomed: bool,
+    ) {
+        use egui::PointerButton::Primary;
+        let pal = self.palette;
+        let plot = axes.plot;
+        let (vlo, vhi) = (axes.vlo, axes.vhi);
         let full = (curve::LOG_MIN, curve::LOG_MAX);
+        let shift = ui.input(|i| i.modifiers.shift);
+
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll != 0.0 {
                 if let Some(p) = response.hover_pos() {
-                    let center = logf_of(p.x).clamp(vlo, vhi);
+                    let center = axes.logf_of(p.x).clamp(vlo, vhi);
                     // Positive scroll = zoom in; shrink the span toward center.
                     let factor = (f64::from(-scroll) * 0.0015).exp();
                     let new_span =
@@ -634,12 +818,12 @@ impl GuiApp {
         // Shift+left-drag: select an x-range, zoom to it on release.
         if shift && response.drag_started_by(Primary) {
             if let Some(p) = response.interact_pointer_pos() {
-                self.zoom_sel = Some(logf_of(p.x));
+                self.zoom_sel = Some(axes.logf_of(p.x));
             }
         }
         if let Some(start) = self.zoom_sel {
             if let Some(p) = response.interact_pointer_pos() {
-                let (a, b) = (x_of(start).min(p.x), x_of(start).max(p.x));
+                let (a, b) = (axes.x_of(start).min(p.x), axes.x_of(start).max(p.x));
                 let band = egui::Rect::from_min_max(
                     egui::pos2(a.max(plot.left()), plot.top()),
                     egui::pos2(b.min(plot.right()), plot.bottom()),
@@ -659,7 +843,7 @@ impl GuiApp {
             }
             if response.drag_stopped() {
                 if let Some(p) = response.interact_pointer_pos() {
-                    let (lo, hi) = (start.min(logf_of(p.x)), start.max(logf_of(p.x)));
+                    let (lo, hi) = (start.min(axes.logf_of(p.x)), start.max(axes.logf_of(p.x)));
                     // Ignore a stray click; require a meaningful selection width.
                     if hi - lo > 0.05 {
                         self.view_log = (lo.max(full.0), hi.min(full.1));
@@ -689,13 +873,28 @@ impl GuiApp {
                 }
             }
         }
+    }
+
+    /// Node interaction: double-right-click toggles a per-node axis lock,
+    /// left/right drag moves the node / tunes its Q, and double-left-click on
+    /// empty space adds a peaking band. `over_legend` suppresses node grabs that
+    /// land on the legend box.
+    fn handle_drag_and_locks(
+        &mut self,
+        ui: &egui::Ui,
+        state: &DaemonState,
+        response: &egui::Response,
+        axes: &PlotAxes,
+        over_legend: bool,
+    ) {
+        use egui::PointerButton::{Primary, Secondary};
 
         // Double-right-click a node → toggle vertical-lock (gain-only) movement.
         // Shift+double-right-click → toggle gain-lock (freq+Q only, gain pinned).
         // The two locks are mutually exclusive.
         if response.double_clicked_by(Secondary) && !over_legend {
             if let Some(p) = response.interact_pointer_pos() {
-                if let Some(i) = nearest_band(state, p, &x_of, &y_of) {
+                if let Some(i) = nearest_band(state, p, axes) {
                     if ui.input(|inp| inp.modifiers.shift) {
                         self.hlock = if self.hlock == Some(i) { None } else { Some(i) };
                         self.vlock = None;
@@ -708,14 +907,14 @@ impl GuiApp {
             }
         }
 
-        // Drag handling: left button moves a node (freq+gain), right button
-        // tunes its Q (drag up = narrower). A vertical-locked node moves on the
-        // gain axis only. Pick the nearest node on press.
+        // Drag handling: left button moves a node (freq+gain), right button tunes
+        // its Q (drag up = narrower). A vertical-locked node moves on the gain
+        // axis only. Pick the nearest node on press.
         let started_primary = response.drag_started_by(Primary);
         let started_secondary = response.drag_started_by(Secondary);
         if (started_primary || started_secondary) && self.zoom_sel.is_none() && !over_legend {
             if let Some(p) = response.interact_pointer_pos() {
-                if let Some(i) = nearest_band(state, p, &x_of, &y_of) {
+                if let Some(i) = nearest_band(state, p, axes) {
                     self.drag_band = Some(i);
                     self.selected_band = i;
                     // Right button always tunes Q — the vertical lock pins only
@@ -749,7 +948,7 @@ impl GuiApp {
                         let freq = if locked {
                             b.freq
                         } else {
-                            10f64.powf(logf_of(p.x)).clamp(20.0, 20000.0)
+                            10f64.powf(axes.logf_of(p.x)).clamp(20.0, 20000.0)
                         };
                         let gain = if gain_locked {
                             b.gain_db
@@ -759,7 +958,7 @@ impl GuiApp {
                             // identity), it stays exactly under the cursor; the
                             // axis growth is decoupled (see the peak calc above),
                             // so there's no feedback wobble.
-                            db_of(p.y).clamp(-GAIN_LIMIT, GAIN_LIMIT)
+                            axes.db_of(p.y).clamp(-GAIN_LIMIT, GAIN_LIMIT)
                         };
                         // Remember the cursor-derived value so the node renders
                         // there immediately (not at the IPC-lagged echo).
@@ -780,17 +979,11 @@ impl GuiApp {
             self.drag_value = None;
         }
 
-        // Drive continuous frames (not just on input events) while dragging a
-        // node or while the dB axis is still easing, so motion is smooth at the
-        // display's refresh rate rather than the OS pointer-event cadence.
-        if self.drag_band.is_some() || axis_animating {
-            ui.ctx().request_repaint();
-        }
         // Double-left-click empty area → add a peaking band there.
         if response.double_clicked_by(Primary) && !over_legend {
             if let Some(p) = response.interact_pointer_pos() {
-                let freq = 10f64.powf(logf_of(p.x)).clamp(20.0, 20000.0);
-                let gain = db_of(p.y).clamp(-GAIN_LIMIT, GAIN_LIMIT);
+                let freq = 10f64.powf(axes.logf_of(p.x)).clamp(20.0, 20000.0);
+                let gain = axes.db_of(p.y).clamp(-GAIN_LIMIT, GAIN_LIMIT);
                 self.queue_edit(Command::AddBand {
                     band_type: BandType::Peaking,
                     freq,
@@ -799,8 +992,14 @@ impl GuiApp {
                 });
             }
         }
+    }
 
-        // Band node markers.
+    /// Draw the draggable band node markers: a dot per enabled band (the dragged
+    /// one tracked to the cursor), the selected node highlighted with a contrast
+    /// ring, plus the vertical/horizontal lock guide lines when a lock is active.
+    fn draw_band_nodes(&self, painter: &egui::Painter, state: &DaemonState, axes: &PlotAxes) {
+        let pal = self.palette;
+        let plot = axes.plot;
         for (i, b) in state.bands.iter().enumerate() {
             if !b.enabled {
                 continue;
@@ -811,11 +1010,12 @@ impl GuiApp {
                 Some(v) if self.drag_band == Some(i) => v,
                 _ => (b.freq, b.gain_db),
             };
-            // Clamp the node inside the plot so it can never draw off-screen
-            // even if the response momentarily exceeds the axis.
+            // Clamp the node inside the plot so it can never draw off-screen even
+            // if the response momentarily exceeds the axis.
             let center = egui::pos2(
-                x_of(curve::clampf_log(bf)).clamp(plot.left(), plot.right()),
-                y_of(bg).clamp(plot.top(), plot.bottom()),
+                axes.x_of(curve::clampf_log(bf))
+                    .clamp(plot.left(), plot.right()),
+                axes.y_of(bg).clamp(plot.top(), plot.bottom()),
             );
             let selected = i == self.selected_band;
             let locked = self.vlock == Some(i);
@@ -885,31 +1085,6 @@ impl GuiApp {
             };
             painter.circle_stroke(center, r, ring);
         }
-
-        // As the view normalises, the 0-line becomes the target — fade the tag in
-        // with the morph (`na`), tracking the dashed target line that's flattening
-        // onto it.
-        if show_ref && self.reference.target.is_some() && na > 0.02 {
-            painter.text(
-                egui::pos2(plot.right() - 4.0, y_of(0.0) - 3.0),
-                egui::Align2::RIGHT_BOTTOM,
-                "target",
-                egui::FontId::monospace(9.0),
-                pal.accent.gamma_multiply(na as f32),
-            );
-        }
-
-        // Interactive legend (bottom-right): an eye toggle per series to
-        // show/hide it — making it easy to isolate one channel/curve while
-        // editing. Empty in the plain single-curve view.
-        legend_with_eyes(
-            &mut self.hidden_curves,
-            ui,
-            &painter,
-            legend_rect,
-            &pal,
-            &legend_entries,
-        );
     }
 }
 
@@ -938,8 +1113,7 @@ fn draw_reference(
     series: &[resonance_reference::reference::RefSeries],
     na: f32,
     show_bounds: bool,
-    x_of: &dyn Fn(f64) -> f32,
-    y_of: &dyn Fn(f64) -> f32,
+    axes: &PlotAxes,
     pal: &crate::theme::Palette,
 ) {
     use resonance_reference::reference::SeriesRole;
@@ -958,8 +1132,8 @@ fn draw_reference(
             for &(lf, y) in &t.pts {
                 let (below, above) =
                     resonance_reference::reference::preference_bounds(10f64.powf(lf));
-                up.push(egui::pos2(x_of(lf), y_of(y + above)));
-                lo.push(egui::pos2(x_of(lf), y_of(y - below)));
+                up.push(egui::pos2(axes.x_of(lf), axes.y_of(y + above)));
+                lo.push(egui::pos2(axes.x_of(lf), axes.y_of(y - below)));
             }
             for i in 0..up.len().saturating_sub(1) {
                 painter.add(egui::Shape::convex_polygon(
@@ -976,8 +1150,8 @@ fn draw_reference(
         for w in pts.windows(2) {
             painter.line_segment(
                 [
-                    egui::pos2(x_of(w[0].0), y_of(w[0].1)),
-                    egui::pos2(x_of(w[1].0), y_of(w[1].1)),
+                    egui::pos2(axes.x_of(w[0].0), axes.y_of(w[0].1)),
+                    egui::pos2(axes.x_of(w[1].0), axes.y_of(w[1].1)),
                 ],
                 stroke,
             );
@@ -986,7 +1160,7 @@ fn draw_reference(
     let dashed = |pts: &[(f64, f64)], stroke: egui::Stroke, dash: f32, gap: f32| {
         let path: Vec<egui::Pos2> = pts
             .iter()
-            .map(|&(l, y)| egui::pos2(x_of(l), y_of(y)))
+            .map(|&(l, y)| egui::pos2(axes.x_of(l), axes.y_of(y)))
             .collect();
         painter.add(egui::Shape::dashed_line(&path, stroke, dash, gap));
     };
@@ -1021,8 +1195,8 @@ fn draw_reference(
                     let color = lerp_color(pal.highlight, gain_color((y0 + y1) * 0.5, pal), na);
                     painter.line_segment(
                         [
-                            egui::pos2(x_of(l0), y_of(y0)),
-                            egui::pos2(x_of(l1), y_of(y1)),
+                            egui::pos2(axes.x_of(l0), axes.y_of(y0)),
+                            egui::pos2(axes.x_of(l1), axes.y_of(y1)),
                         ],
                         egui::Stroke::new(2.5, color),
                     );
@@ -1040,7 +1214,7 @@ const LG: (f32, f32, f32, f32, f32) = (6.0, 15.0, 12.0, 16.0, 6.0);
 fn legend_box_rect(
     plot: egui::Rect,
     painter: &egui::Painter,
-    entries: &[(String, egui::Color32, bool)],
+    entries: &[LegendEntry],
 ) -> egui::Rect {
     if entries.is_empty() {
         return egui::Rect::NOTHING;
@@ -1076,7 +1250,7 @@ fn legend_with_eyes(
     painter: &egui::Painter,
     rect: egui::Rect,
     pal: &crate::theme::Palette,
-    entries: &[(String, egui::Color32, bool)],
+    entries: &[LegendEntry],
 ) {
     if entries.is_empty() {
         return;
@@ -1151,24 +1325,104 @@ fn legend_with_eyes(
     }
 }
 
-fn nearest_band(
-    state: &DaemonState,
-    p: egui::Pos2,
-    x_of: &dyn Fn(f64) -> f32,
-    y_of: &dyn Fn(f64) -> f32,
-) -> Option<usize> {
+/// The index of the nearest grabbable band node to pointer `p` (within a 14 px
+/// pick radius), or `None`. Disabled bands aren't drawn, so they aren't
+/// grabbable either — otherwise a drag/double-click would land on an invisible
+/// node.
+fn nearest_band(state: &DaemonState, p: egui::Pos2, axes: &PlotAxes) -> Option<usize> {
     let mut best: Option<(usize, f32)> = None;
     for (i, b) in state.bands.iter().enumerate() {
-        // Disabled bands aren't drawn, so they must not be grabbable either —
-        // otherwise a drag/double-click lands on an invisible node.
         if !b.enabled {
             continue;
         }
-        let node = egui::pos2(x_of(curve::clampf_log(b.freq)), y_of(b.gain_db));
+        let node = egui::pos2(axes.x_of(curve::clampf_log(b.freq)), axes.y_of(b.gain_db));
         let d = node.distance(p);
         if d < 14.0 && best.is_none_or(|(_, bd)| d < bd) {
             best = Some((i, d));
         }
     }
     best.map(|(i, _)| i)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use resonance_ipc::{BandState, ChannelMask};
+
+    /// A `PlotAxes` over a known rect for transform round-trip tests.
+    fn test_axes() -> PlotAxes {
+        PlotAxes {
+            plot: egui::Rect::from_min_max(egui::pos2(10.0, 20.0), egui::pos2(210.0, 120.0)),
+            vlo: curve::LOG_MIN,
+            vhi: curve::LOG_MAX,
+            db: 18.0,
+        }
+    }
+
+    #[test]
+    fn x_of_maps_endpoints_to_plot_edges() {
+        let a = test_axes();
+        assert!((a.x_of(a.vlo) - a.plot.left()).abs() < 1e-3);
+        assert!((a.x_of(a.vhi) - a.plot.right()).abs() < 1e-3);
+    }
+
+    #[test]
+    fn x_of_and_logf_of_are_inverse() {
+        let a = test_axes();
+        for &logf in &[a.vlo, (a.vlo + a.vhi) * 0.5, a.vhi] {
+            let round = a.logf_of(a.x_of(logf));
+            assert!((round - logf).abs() < 1e-6, "logf {logf} -> {round}");
+        }
+    }
+
+    #[test]
+    fn y_of_and_db_of_are_inverse() {
+        // This inverse is load-bearing: it keeps a dragged node pinned exactly
+        // under the cursor while the dB axis auto-scales.
+        let a = test_axes();
+        for &gain in &[-18.0, -6.0, 0.0, 7.5, 18.0] {
+            let round = a.db_of(a.y_of(gain));
+            assert!((round - gain).abs() < 1e-4, "gain {gain} -> {round}");
+        }
+    }
+
+    #[test]
+    fn y_of_zero_is_plot_vertical_centre() {
+        let a = test_axes();
+        assert!((a.y_of(0.0) - a.plot.center().y).abs() < 1e-3);
+    }
+
+    fn band(freq: f64, gain: f64) -> BandState {
+        BandState {
+            band_type: BandType::Peaking,
+            freq,
+            gain_db: gain,
+            q: 1.0,
+            enabled: true,
+            channels: ChannelMask::ALL,
+        }
+    }
+
+    #[test]
+    fn peak_deviation_uses_loudest_of_all_sources() {
+        let pts = [(2.0, 3.0), (3.0, -4.0)];
+        let bands = [band(1000.0, 9.0), band(2000.0, -2.0)];
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        // Band gain 9 dominates the curve points and the (zero) ref peak.
+        assert!(near(peak_deviation(&pts, &bands, 0.0), 9.0));
+        // A larger ref peak wins.
+        assert!(near(peak_deviation(&pts, &bands, 12.5), 12.5));
+        // With no inputs at all the peak is 0.
+        assert!(near(peak_deviation(&[], &[], 0.0), 0.0));
+    }
+
+    #[test]
+    fn should_restop_has_hysteresis_deadband() {
+        // Inside the deadband (between 65% and 98% of the current stop): no change.
+        assert!(!should_restop(18.0 * 0.80, 18.0));
+        // Exceeds 98% of the current stop: grow.
+        assert!(should_restop(18.0 * 0.99, 18.0));
+        // Drops below 65% of the current stop: shrink.
+        assert!(should_restop(18.0 * 0.50, 18.0));
+    }
 }

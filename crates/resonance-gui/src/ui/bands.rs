@@ -19,6 +19,59 @@ const GAIN_W: f32 = 54.0;
 const Q_W: f32 = 50.0;
 const CH_W: f32 = 64.0;
 const X_W: f32 = 24.0;
+/// Width of the abbreviated coloured Type badge (PK/LS/HS…). Compact + scannable;
+/// the full names live in its dropdown menu.
+const TYPE_W: f32 = 50.0;
+/// Cells get an 8px gutter of their own (mockup table `td` padding) while the
+/// row tint/rule still span the full card width.
+const GUTTER: f32 = 8.0;
+
+/// Resolved column layout for the bands table at a given available width and
+/// channel state. Computed once per frame so the header captions and every row
+/// agree on which columns show and how wide each is. Columns collapse as the
+/// table narrows (the gain graph drops first, then the Type combo).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BandColumns {
+    /// Per-band channel-target column (multichannel / per-channel-EQ only).
+    show_ch: bool,
+    /// Flexible gain-graph column (the first to drop when tight).
+    show_graph: bool,
+    /// Coloured Type-badge dropdown column.
+    show_type: bool,
+    /// Inter-column spacing.
+    gap: f32,
+    /// Width of the flexible Graph column (only meaningful when `show_graph`).
+    graph_w: f32,
+}
+
+impl BandColumns {
+    /// Derive the column layout from the table's available width (full pane width
+    /// minus the two side gutters), the inter-column `gap`, and whether the
+    /// channel column should appear. `avail` is already clamped to a sane minimum.
+    fn resolve(avail: f32, gap: f32, show_ch: bool) -> Self {
+        // Collapse columns as the table narrows: drop the gain graph first, then
+        // the Type combo.
+        let show_graph = avail >= 480.0;
+        let show_type = avail >= 360.0;
+        let n_cols = 6 + usize::from(show_type) + usize::from(show_graph) + usize::from(show_ch);
+        let fixed = IDX_W
+            + ON_W
+            + if show_type { TYPE_W } else { 0.0 }
+            + FREQ_W
+            + GAIN_W
+            + Q_W
+            + if show_ch { CH_W } else { 0.0 }
+            + X_W;
+        let graph_w = (avail - fixed - gap * (n_cols as f32 - 1.0)).max(60.0);
+        Self {
+            show_ch,
+            show_graph,
+            show_type,
+            gap,
+            graph_w,
+        }
+    }
+}
 
 /// Short label for a band's channel target, e.g. `all` / `FL` / `FL FR` /
 /// `FL +2` / `none`. Used in the per-band channel column (multichannel only).
@@ -110,11 +163,11 @@ impl GuiApp {
             });
     }
 
+    /// The scrolling EQ-bands table: a header caption row followed by one ruled
+    /// row per band. The card body is full-bleed (no horizontal padding) so row
+    /// rules and the selection wash run to the card edge, while cell content is
+    /// inset by [`GUTTER`].
     pub(crate) fn bands_section(&mut self, ui: &mut egui::Ui, state: &DaemonState) {
-        // The card body is full-bleed (no horizontal padding) so row rules and the
-        // selection wash run to the card edge; cells get an 8px gutter of their own
-        // (mockup table td padding) while the tint spans the full width.
-        const GUTTER: f32 = 8.0;
         let full_w = ui.available_width();
         let avail = (full_w - GUTTER * 2.0).max(60.0);
         // Per-channel EQ: the channel-target column appears on >2-channel
@@ -122,276 +175,263 @@ impl GuiApp {
         // opts in via the Channels section's "Per-channel EQ" toggle (lets a
         // stereo user do L/R-specific EQ).
         let show_ch = state.channels > 2 || (self.per_channel_eq && state.channels >= 2);
-        // Collapse columns as the table narrows: drop the gain graph first, then
-        // the Type combo (abbreviated when tight).
-        let show_graph = avail >= 480.0;
-        let show_type = avail >= 360.0;
-        // Always the short coloured type badge (PK/LS/HS…) — compact + scannable;
-        // the full name lives in its dropdown menu.
-        let type_w = 50.0;
-        let gap = kit::SP_S;
-        let n_cols = 6 + usize::from(show_type) + usize::from(show_graph) + usize::from(show_ch);
-        let fixed = IDX_W
-            + ON_W
-            + if show_type { type_w } else { 0.0 }
-            + FREQ_W
-            + GAIN_W
-            + Q_W
-            + if show_ch { CH_W } else { 0.0 }
-            + X_W;
-        let graph_w = (avail - fixed - gap * (n_cols as f32 - 1.0)).max(60.0);
+        let cols = BandColumns::resolve(avail, kit::SP_S, show_ch);
 
-        // Header captions, aligned to the same column widths as the rows.
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = gap;
-            ui.add_space(GUTTER);
-            let dim = kit::tokens(ui).dim;
-            let cap = |ui: &mut egui::Ui, w: f32, s: &str| {
-                let (r, _) = ui.allocate_exact_size(egui::vec2(w, 16.0), egui::Sense::hover());
-                ui.painter().text(
-                    egui::pos2(r.left(), r.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    s,
-                    egui::FontId::proportional(kit::T_CAPTION),
-                    dim,
-                );
-            };
-            cap(ui, IDX_W, "#");
-            cap(ui, ON_W, "On");
-            if show_type {
-                cap(ui, type_w, "Type");
-            }
-            cap(ui, FREQ_W, "Freq");
-            cap(ui, GAIN_W, "Gain");
-            cap(ui, Q_W, "Q");
-            if show_ch {
-                cap(ui, CH_W, "Ch");
-            }
-            if show_graph {
-                cap(ui, graph_w, "Graph");
-            }
-        });
+        bands_header(ui, &cols);
 
         let nbands = state.bands.len();
-        for (i, b) in state.bands.iter().enumerate() {
-            // Selected row: a faint accent wash + a 2px accent bar down its left
-            // edge (mockup `tr.sel`); every row but the last gets a hairline rule
-            // under it so the table reads as ruled rows, not floating text.
-            let row_selected = i == self.selected_band;
-            let tint = if row_selected {
-                kit::tokens(ui).accent.gamma_multiply(0.10)
-            } else {
-                egui::Color32::TRANSPARENT
-            };
-            // Each row gets a stable id namespace keyed by band index. Without it,
-            // adding/removing the per-channel "Ch" column reflows the row and egui's
-            // positional auto-ids momentarily collide → it flags the shifted widgets
-            // (the ✕ buttons) with a red ID-clash border for a frame.
-            let row = ui
-                .push_id(i, |ui| {
-                    egui::Frame::default()
-                        .fill(tint)
-                        .inner_margin(egui::Margin {
-                            left: 0,
-                            right: 0,
-                            top: 2,
-                            bottom: 2,
-                        })
-                        .show(ui, |ui| {
-                            // Span the full card width so the wash/rule reach both edges;
-                            // the cell content is inset by the gutter.
-                            ui.set_min_width(full_w);
-                            ui.horizontal(|ui| {
-                                ui.set_min_height(26.0);
-                                ui.spacing_mut().item_spacing.x = gap;
-                                ui.add_space(GUTTER);
-                                let t = kit::tokens(ui);
-
-                                // Index chip doubles as the row selector.
-                                let selected = i == self.selected_band;
-                                let (r, rr) = ui.allocate_exact_size(
-                                    egui::vec2(IDX_W, 22.0),
-                                    egui::Sense::click(),
-                                );
-                                if selected {
-                                    ui.painter().rect_filled(r, 4.0, t.accent);
-                                }
-                                ui.painter().text(
-                                    r.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    format!("{}", i + 1),
-                                    egui::FontId::monospace(kit::T_VALUE),
-                                    if selected {
-                                        egui::Color32::WHITE
-                                    } else {
-                                        t.dim
-                                    },
-                                );
-                                if rr.clicked() {
-                                    self.selected_band = i;
-                                }
-
-                                let mut on = b.enabled;
-                                if kit::toggle(ui, &mut on) {
-                                    self.queue_edit(Command::SetBandEnabled {
-                                        index: i,
-                                        enabled: on,
-                                    });
-                                }
-
-                                if show_type {
-                                    // Coloured abbreviated badge (PK/LS/…); the menu lists full names.
-                                    let labels: Vec<&str> =
-                                        BAND_TYPES.iter().map(|bt| bt.full()).collect();
-                                    if let Some(sel) = kit::tag_dropdown(
-                                        ui,
-                                        type_w,
-                                        22.0,
-                                        egui::Id::new(("bt", i)),
-                                        b.band_type.abbrev(),
-                                        t.accent,
-                                        &labels,
-                                    ) {
-                                        self.queue_edit(Command::SetBandType {
-                                            index: i,
-                                            band_type: BAND_TYPES[sel],
-                                        });
-                                    }
-                                }
-
-                                let mut freq = b.freq;
-                                let mut gain = b.gain_db;
-                                let mut q = b.q;
-                                // Tint the freq value across the visible-light spectrum so
-                                // low/high bands read at a glance (red bass → violet treble).
-                                let fcol = freq_color(freq);
-                                let fc = kit::num_field_colored(
-                                    ui,
-                                    FREQ_W,
-                                    egui::Id::new(("f", i)),
-                                    &mut freq,
-                                    20.0..=20000.0,
-                                    0,
-                                    2.0,
-                                    fcol,
-                                );
-                                let gcol = gain_color(gain, &self.palette);
-                                let gc = kit::num_field_colored(
-                                    ui,
-                                    GAIN_W,
-                                    egui::Id::new(("g", i)),
-                                    &mut gain,
-                                    -GAIN_LIMIT..=GAIN_LIMIT,
-                                    1,
-                                    0.1,
-                                    gcol,
-                                );
-                                let qc = kit::num_field(
-                                    ui,
-                                    Q_W,
-                                    egui::Id::new(("q", i)),
-                                    &mut q,
-                                    0.1..=Q_LIMIT,
-                                    2,
-                                    0.02,
-                                );
-                                if fc || gc || qc {
-                                    self.queue_edit(Command::SetBand {
-                                        index: i,
-                                        freq,
-                                        gain_db: gain,
-                                        q,
-                                    });
-                                }
-
-                                if show_ch {
-                                    // Channel-target chip: coloured by its target (neutral "all",
-                                    // else the first targeted channel's curve colour) + a checkbox
-                                    // popup. Edits collected after the closure so it never borrows
-                                    // `self`.
-                                    let mut new_mask: Option<ChannelMask> = None;
-                                    let tag = channel_tag(
-                                        b.channels,
-                                        &state.channel_layout,
-                                        state.channels,
-                                    );
-                                    let col = if b.channels.is_global(state.channels) {
-                                        t.dim
-                                    } else {
-                                        (0..state.channels)
-                                            .find(|&c| b.channels.contains(c))
-                                            .map_or(t.dim, channel_color)
-                                    };
-                                    let resp = kit::tag_chip(ui, CH_W, 22.0, &tag, col);
-                                    egui::Popup::menu(&resp)
-                                        .id(egui::Id::new(("ch", i)))
-                                        .close_behavior(
-                                            egui::PopupCloseBehavior::CloseOnClickOutside,
-                                        )
-                                        .show(|ui| {
-                                            let mut mask = b.channels;
-                                            for c in 0..state.channels {
-                                                let label = state
-                                                    .channel_layout
-                                                    .get(c)
-                                                    .cloned()
-                                                    .unwrap_or_else(|| format!("ch{c}"));
-                                                let mut on = mask.contains(c);
-                                                if kit::checkbox(ui, &mut on, &label) {
-                                                    mask = if on {
-                                                        mask.with(c)
-                                                    } else {
-                                                        mask.without(c)
-                                                    };
-                                                    new_mask = Some(mask);
-                                                }
-                                            }
-                                        });
-                                    if let Some(m) = new_mask {
-                                        // Collapse "every channel" back to the canonical ALL.
-                                        let m = if m.is_global(state.channels) {
-                                            ChannelMask::ALL
-                                        } else {
-                                            m
-                                        };
-                                        self.queue_edit(Command::SetBandChannels {
-                                            index: i,
-                                            channels: m,
-                                        });
-                                    }
-                                }
-
-                                if show_graph {
-                                    gain_bar(ui, graph_w, b.gain_db, &self.palette);
-                                }
-
-                                if kit::icon_btn(ui, Icon::Close, 24.0, "Remove this band") {
-                                    self.queue_edit(Command::RemoveBand { index: i });
-                                    // Keep the lock pins on the same band after the list shifts.
-                                    remap_pin_on_remove(&mut self.vlock, i);
-                                    remap_pin_on_remove(&mut self.hlock, i);
-                                }
-                            });
-                        })
-                })
-                .inner;
-            let rr = row.response.rect;
-            let tk = kit::tokens(ui);
-            if i + 1 < nbands {
-                ui.painter()
-                    .hline(rr.x_range(), rr.bottom(), egui::Stroke::new(1.0, tk.line));
-            }
-            if row_selected {
-                let bar = egui::Rect::from_min_max(
-                    egui::pos2(rr.left(), rr.top() + 1.0),
-                    egui::pos2(rr.left() + 2.0, rr.bottom() - 1.0),
-                );
-                ui.painter().rect_filled(bar, 0.0, tk.accent);
-            }
+        for i in 0..nbands {
+            self.band_row(ui, state, &cols, i, nbands);
         }
 
         if self.selected_band >= state.bands.len() {
             self.selected_band = state.bands.len().saturating_sub(1);
+        }
+    }
+
+    /// Render one band row at index `i` and paint its under-rule / selection bar.
+    /// `nbands` is the total count (so the last row skips its bottom rule).
+    fn band_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &DaemonState,
+        cols: &BandColumns,
+        i: usize,
+        nbands: usize,
+    ) {
+        let full_w = ui.available_width();
+        // Selected row: a faint accent wash + a 2px accent bar down its left
+        // edge (mockup `tr.sel`); every row but the last gets a hairline rule
+        // under it so the table reads as ruled rows, not floating text.
+        let row_selected = i == self.selected_band;
+        let tint = if row_selected {
+            kit::tokens(ui).accent.gamma_multiply(0.10)
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        // Each row gets a stable id namespace keyed by band index. Without it,
+        // adding/removing the per-channel "Ch" column reflows the row and egui's
+        // positional auto-ids momentarily collide → it flags the shifted widgets
+        // (the ✕ buttons) with a red ID-clash border for a frame.
+        let row = ui
+            .push_id(i, |ui| {
+                egui::Frame::default()
+                    .fill(tint)
+                    .inner_margin(egui::Margin {
+                        left: 0,
+                        right: 0,
+                        top: 2,
+                        bottom: 2,
+                    })
+                    .show(ui, |ui| {
+                        // Span the full card width so the wash/rule reach both edges;
+                        // the cell content is inset by the gutter.
+                        ui.set_min_width(full_w);
+                        ui.horizontal(|ui| {
+                            ui.set_min_height(26.0);
+                            ui.spacing_mut().item_spacing.x = cols.gap;
+                            ui.add_space(GUTTER);
+                            self.band_row_cells(ui, state, cols, i);
+                        });
+                    })
+            })
+            .inner;
+        let rr = row.response.rect;
+        let tk = kit::tokens(ui);
+        if i + 1 < nbands {
+            ui.painter()
+                .hline(rr.x_range(), rr.bottom(), egui::Stroke::new(1.0, tk.line));
+        }
+        if row_selected {
+            let bar = egui::Rect::from_min_max(
+                egui::pos2(rr.left(), rr.top() + 1.0),
+                egui::pos2(rr.left() + 2.0, rr.bottom() - 1.0),
+            );
+            ui.painter().rect_filled(bar, 0.0, tk.accent);
+        }
+    }
+
+    /// Lay out one band row's cells left-to-right (index chip, On toggle, optional
+    /// Type badge, Freq/Gain/Q number fields, optional channel chip + gain graph,
+    /// remove button), queueing the matching command when the user edits a cell.
+    /// Runs inside the row's `horizontal` so it shares its spacing + id scope.
+    fn band_row_cells(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &DaemonState,
+        cols: &BandColumns,
+        i: usize,
+    ) {
+        let b = &state.bands[i];
+        let t = kit::tokens(ui);
+
+        // Index chip doubles as the row selector.
+        if self.band_index_chip(ui, i, &t) {
+            self.selected_band = i;
+        }
+
+        let mut on = b.enabled;
+        if kit::toggle(ui, &mut on) {
+            self.queue_edit(Command::SetBandEnabled {
+                index: i,
+                enabled: on,
+            });
+        }
+
+        if cols.show_type {
+            // Coloured abbreviated badge (PK/LS/…); the menu lists full names.
+            let labels: Vec<&str> = BAND_TYPES.iter().map(|bt| bt.full()).collect();
+            if let Some(sel) = kit::tag_dropdown(
+                ui,
+                TYPE_W,
+                22.0,
+                egui::Id::new(("bt", i)),
+                b.band_type.abbrev(),
+                t.accent,
+                &labels,
+            ) {
+                self.queue_edit(Command::SetBandType {
+                    index: i,
+                    band_type: BAND_TYPES[sel],
+                });
+            }
+        }
+
+        let mut freq = b.freq;
+        let mut gain = b.gain_db;
+        let mut q = b.q;
+        // Tint the freq value across the visible-light spectrum so low/high bands
+        // read at a glance (red bass → violet treble).
+        let fcol = freq_color(freq);
+        let fc = kit::num_field_colored(
+            ui,
+            FREQ_W,
+            egui::Id::new(("f", i)),
+            &mut freq,
+            20.0..=20000.0,
+            0,
+            2.0,
+            fcol,
+        );
+        let gcol = gain_color(gain, &self.palette);
+        let gc = kit::num_field_colored(
+            ui,
+            GAIN_W,
+            egui::Id::new(("g", i)),
+            &mut gain,
+            -GAIN_LIMIT..=GAIN_LIMIT,
+            1,
+            0.1,
+            gcol,
+        );
+        let qc = kit::num_field(
+            ui,
+            Q_W,
+            egui::Id::new(("q", i)),
+            &mut q,
+            0.1..=Q_LIMIT,
+            2,
+            0.02,
+        );
+        if fc || gc || qc {
+            self.queue_edit(Command::SetBand {
+                index: i,
+                freq,
+                gain_db: gain,
+                q,
+            });
+        }
+
+        if cols.show_ch {
+            self.band_channel_chip(ui, state, i, &t);
+        }
+
+        if cols.show_graph {
+            gain_bar(ui, cols.graph_w, b.gain_db, &self.palette);
+        }
+
+        if kit::icon_btn(ui, Icon::Close, 24.0, "Remove this band") {
+            self.queue_edit(Command::RemoveBand { index: i });
+            // Keep the lock pins on the same band after the list shifts.
+            remap_pin_on_remove(&mut self.vlock, i);
+            remap_pin_on_remove(&mut self.hlock, i);
+        }
+    }
+
+    /// The leading index chip (1-based) that doubles as the row selector: filled
+    /// with the accent when selected. Returns true when clicked so the caller can
+    /// own the `&mut self` selection write.
+    fn band_index_chip(&self, ui: &mut egui::Ui, i: usize, t: &kit::Tokens) -> bool {
+        let selected = i == self.selected_band;
+        let (r, rr) = ui.allocate_exact_size(egui::vec2(IDX_W, 22.0), egui::Sense::click());
+        if selected {
+            ui.painter().rect_filled(r, 4.0, t.accent);
+        }
+        ui.painter().text(
+            r.center(),
+            egui::Align2::CENTER_CENTER,
+            format!("{}", i + 1),
+            egui::FontId::monospace(kit::T_VALUE),
+            if selected {
+                egui::Color32::WHITE
+            } else {
+                t.dim
+            },
+        );
+        rr.clicked()
+    }
+
+    /// The per-band channel-target chip + checkbox popup. The chip is coloured by
+    /// its target (neutral "all", else the first targeted channel's curve colour).
+    /// The new mask is collected out of the popup closure so it never borrows
+    /// `self`, then a single edit is queued.
+    fn band_channel_chip(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &DaemonState,
+        i: usize,
+        t: &kit::Tokens,
+    ) {
+        let b = &state.bands[i];
+        let tag = channel_tag(b.channels, &state.channel_layout, state.channels);
+        let col = if b.channels.is_global(state.channels) {
+            t.dim
+        } else {
+            (0..state.channels)
+                .find(|&c| b.channels.contains(c))
+                .map_or(t.dim, channel_color)
+        };
+        let resp = kit::tag_chip(ui, CH_W, 22.0, &tag, col);
+        let mut new_mask: Option<ChannelMask> = None;
+        egui::Popup::menu(&resp)
+            .id(egui::Id::new(("ch", i)))
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                let mut mask = b.channels;
+                for c in 0..state.channels {
+                    let label = state
+                        .channel_layout
+                        .get(c)
+                        .cloned()
+                        .unwrap_or_else(|| format!("ch{c}"));
+                    let mut on = mask.contains(c);
+                    if kit::checkbox(ui, &mut on, &label) {
+                        mask = if on { mask.with(c) } else { mask.without(c) };
+                        new_mask = Some(mask);
+                    }
+                }
+            });
+        if let Some(m) = new_mask {
+            // Collapse "every channel" back to the canonical ALL.
+            let m = if m.is_global(state.channels) {
+                ChannelMask::ALL
+            } else {
+                m
+            };
+            self.queue_edit(Command::SetBandChannels {
+                index: i,
+                channels: m,
+            });
         }
     }
 
@@ -445,6 +485,42 @@ impl GuiApp {
     }
 }
 
+/// The table header caption row, aligned to the same column widths as the data
+/// rows (optional columns appear only when `cols` enables them).
+fn bands_header(ui: &mut egui::Ui, cols: &BandColumns) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = cols.gap;
+        ui.add_space(GUTTER);
+        let dim = kit::tokens(ui).dim;
+        // One left-aligned caption sized to a column's width, so headings sit
+        // over their cells.
+        let cap = |ui: &mut egui::Ui, w: f32, s: &str| {
+            let (r, _) = ui.allocate_exact_size(egui::vec2(w, 16.0), egui::Sense::hover());
+            ui.painter().text(
+                egui::pos2(r.left(), r.center().y),
+                egui::Align2::LEFT_CENTER,
+                s,
+                egui::FontId::proportional(kit::T_CAPTION),
+                dim,
+            );
+        };
+        cap(ui, IDX_W, "#");
+        cap(ui, ON_W, "On");
+        if cols.show_type {
+            cap(ui, TYPE_W, "Type");
+        }
+        cap(ui, FREQ_W, "Freq");
+        cap(ui, GAIN_W, "Gain");
+        cap(ui, Q_W, "Q");
+        if cols.show_ch {
+            cap(ui, CH_W, "Ch");
+        }
+        if cols.show_graph {
+            cap(ui, cols.graph_w, "Graph");
+        }
+    });
+}
+
 /// Adjust a band-index lock pin after the band at `removed` is deleted: drop the
 /// pin if it was that band, decrement it if it sat above the removed index.
 pub(crate) fn remap_pin_on_remove(pin: &mut Option<usize>, removed: usize) {
@@ -452,5 +528,93 @@ pub(crate) fn remap_pin_on_remove(pin: &mut Option<usize>, removed: usize) {
         Some(i) if i == removed => *pin = None,
         Some(i) if i > removed => *pin = Some(i - 1),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn channel_tag_all_and_none() {
+        let layout = vec!["FL".into(), "FR".into(), "FC".into()];
+        assert_eq!(channel_tag(ChannelMask::ALL, &layout, 3), "all");
+        // A mask covering every channel is also "all" (global), not a name list.
+        assert_eq!(
+            channel_tag(ChannelMask::from_indices(0..3), &layout, 3),
+            "all"
+        );
+        assert_eq!(channel_tag(ChannelMask::NONE, &layout, 3), "none");
+    }
+
+    #[test]
+    fn channel_tag_one_two_and_overflow() {
+        let layout = vec!["FL".into(), "FR".into(), "FC".into(), "LFE".into()];
+        assert_eq!(channel_tag(ChannelMask::single(0), &layout, 4), "FL");
+        assert_eq!(
+            channel_tag(ChannelMask::from_indices([0, 1]), &layout, 4),
+            "FL FR"
+        );
+        // Three-plus collapse to "first +N".
+        assert_eq!(
+            channel_tag(ChannelMask::from_indices([0, 2, 3]), &layout, 4),
+            "FL +2"
+        );
+    }
+
+    #[test]
+    fn channel_tag_missing_layout_name_falls_back() {
+        // A channel index past the supplied layout names renders "?".
+        assert_eq!(
+            channel_tag(ChannelMask::single(1), &["FL".to_string()], 2),
+            "?"
+        );
+    }
+
+    #[test]
+    fn columns_collapse_as_width_shrinks() {
+        let gap = 6.0;
+        // Wide: every optional column shows.
+        let wide = BandColumns::resolve(700.0, gap, true);
+        assert!(wide.show_graph && wide.show_type);
+        // The graph drops first below 480.
+        let mid = BandColumns::resolve(400.0, gap, true);
+        assert!(!mid.show_graph && mid.show_type);
+        // The Type combo drops below 360.
+        let narrow = BandColumns::resolve(300.0, gap, true);
+        assert!(!narrow.show_graph && !narrow.show_type);
+    }
+
+    #[test]
+    fn graph_width_clamps_to_minimum() {
+        // Even at an absurd width the flexible graph never collapses past 60px.
+        let cols = BandColumns::resolve(480.0, 6.0, true);
+        assert!(cols.graph_w >= 60.0);
+    }
+
+    #[test]
+    fn show_ch_passes_through_to_layout() {
+        assert!(!BandColumns::resolve(700.0, 6.0, false).show_ch);
+        assert!(BandColumns::resolve(700.0, 6.0, true).show_ch);
+    }
+
+    #[test]
+    fn remap_pin_on_remove_cases() {
+        // Removing the pinned band drops the pin.
+        let mut pin = Some(2);
+        remap_pin_on_remove(&mut pin, 2);
+        assert_eq!(pin, None);
+        // Removing below the pin shifts it down by one.
+        let mut pin = Some(3);
+        remap_pin_on_remove(&mut pin, 1);
+        assert_eq!(pin, Some(2));
+        // Removing above the pin leaves it unchanged.
+        let mut pin = Some(1);
+        remap_pin_on_remove(&mut pin, 3);
+        assert_eq!(pin, Some(1));
+        // No pin stays no pin.
+        let mut pin = None;
+        remap_pin_on_remove(&mut pin, 0);
+        assert_eq!(pin, None);
     }
 }
