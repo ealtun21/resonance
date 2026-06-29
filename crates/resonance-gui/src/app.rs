@@ -126,7 +126,7 @@ mod native_titlebar {
 
     /// 0x00BBGGRR COLORREF from an egui colour.
     fn colorref(c: egui::Color32) -> u32 {
-        (c.r() as u32) | ((c.g() as u32) << 8) | ((c.b() as u32) << 16)
+        u32::from(c.r()) | (u32::from(c.g()) << 8) | (u32::from(c.b()) << 16)
     }
 
     fn hwnd() -> isize {
@@ -142,20 +142,20 @@ mod native_titlebar {
         if h == 0 {
             return false;
         }
-        let dark_i: i32 = dark as i32;
-        let cap = colorref(caption);
-        let txt = colorref(text);
+        let dark_i: i32 = i32::from(dark);
+        let caption_rgb = colorref(caption);
+        let text_rgb = colorref(text);
         // SAFETY: each call passes a pointer to a 4-byte value of the stated
         // size; unsupported attributes (Win10) just return an error we ignore.
         unsafe {
             DwmSetWindowAttribute(
                 h,
                 DWMWA_USE_IMMERSIVE_DARK_MODE,
-                (&dark_i as *const i32).cast(),
+                (&raw const dark_i).cast(),
                 4,
             );
-            DwmSetWindowAttribute(h, DWMWA_CAPTION_COLOR, (&cap as *const u32).cast(), 4);
-            DwmSetWindowAttribute(h, DWMWA_TEXT_COLOR, (&txt as *const u32).cast(), 4);
+            DwmSetWindowAttribute(h, DWMWA_CAPTION_COLOR, (&raw const caption_rgb).cast(), 4);
+            DwmSetWindowAttribute(h, DWMWA_TEXT_COLOR, (&raw const text_rgb).cast(), 4);
         }
         true
     }

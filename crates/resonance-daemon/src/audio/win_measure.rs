@@ -24,9 +24,9 @@ fn device_name(d: &Device) -> String {
 }
 
 /// Enumerate render endpoints as `(cpal Device, friendly name)`, aligned by
-/// index. The friendly name comes from the Windows MMDevice API (unique, e.g.
+/// index. The friendly name comes from the Windows `MMDevice` API (unique, e.g.
 /// "Speakers (VB-Audio Virtual Cable)"); cpal's own description is ambiguous, so
-/// it's only a fallback when the MMDevice lookup is unavailable/short.
+/// it's only a fallback when the `MMDevice` lookup is unavailable/short.
 fn enumerate_outputs(host: &Host) -> (Vec<Device>, Vec<String>) {
     let outputs: Vec<Device> = host
         .output_devices()
@@ -100,7 +100,7 @@ pub fn measure_loopback(dev_substr: &str, out_path: &str, secs: u64) -> Result<(
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
                     let mut w = f.lock().unwrap();
                     for s in data {
-                        let _ = w.write_all(&(*s as f32 / 32768.0).to_le_bytes());
+                        let _ = w.write_all(&(f32::from(*s) / 32768.0).to_le_bytes());
                     }
                 },
                 err,

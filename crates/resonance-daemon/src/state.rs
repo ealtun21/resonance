@@ -140,8 +140,7 @@ impl SharedState {
         let inner = &mut *guard;
         let watching = inner
             .last_poll
-            .map(|t| t.elapsed() < std::time::Duration::from_millis(1500))
-            .unwrap_or(false);
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(1500));
         let Some(w) = inner.apo_writer.as_ref() else {
             return;
         };
@@ -168,8 +167,8 @@ impl SharedState {
                 // the real rate (e.g. 96 kHz) instead of the mirror chain's
                 // construction default. 0 until the APO has locked a format.
                 if t.sample_rate > 0.0 {
-                    inner.meters.set_sample_rate(t.sample_rate as f64);
-                    inner.meters.set_capture_rate(t.sample_rate as f64);
+                    inner.meters.set_sample_rate(f64::from(t.sample_rate));
+                    inner.meters.set_capture_rate(f64::from(t.sample_rate));
                 }
             }
         } else {
