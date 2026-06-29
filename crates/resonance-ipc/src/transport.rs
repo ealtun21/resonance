@@ -140,8 +140,8 @@ pub fn is_reachable() -> bool {
 /// length-prefixed `postcard` command, one response, over the platform stream.
 ///
 /// Centralizes the connect + buffered reader/writer + response classification
-/// the three clients each used to open-code (and which had drifted — e.g. the
-/// TUI set only a read timeout, never a write timeout).
+/// shared by the CLI, TUI and GUI clients, so timeout and framing behaviour
+/// stays consistent across all three.
 pub struct SyncClient {
     reader: BufReader<ClientStream>,
     writer: BufWriter<ClientStream>,
@@ -165,8 +165,7 @@ impl SyncClient {
     }
 
     /// Connect with a read+write timeout, so a stalled daemon can't wedge an
-    /// interactive client. Both directions are bounded (the TUI previously
-    /// bounded only reads).
+    /// interactive client. Both directions are bounded.
     ///
     /// # Errors
     /// Returns an error if the daemon cannot be reached, the timeouts cannot be

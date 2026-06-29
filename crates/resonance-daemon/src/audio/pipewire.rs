@@ -254,15 +254,70 @@ fn build_and_run(fd_ptr: *mut FilterData, gs: &Arc<Mutex<GraphState>>) -> Result
     let context = pw::context::ContextBox::new(mainloop.loop_(), None)?;
     let core = context.connect(None)?;
 
-    // ── pw_filter (raw FFI) ───────────────────────────────────────────────
     let raw_core = core.as_raw_ptr();
     gs.lock().unwrap().raw_core = raw_core as usize;
 
-    // Quit the main loop on a fatal core error (server gone / disconnect) so
-    // the reconnect loop can take over.
     let quit_ptr = mainloop.as_raw_ptr() as usize;
-    let _core_listener = core
-        .add_listener_local()
+    let _core_listener = register_core_error_listener(&core, quit_ptr);
+
+    // ── pw_filter (raw FFI) + its DSP ports ───────────────────────────────
+    let filter = create_filter(raw_core, fd_ptr)?;
+
+    // Channel count + layout for this connection — fixed at the FilterData's port
+    // count (set in `spawn` from `target_channels()`). Reused for the sink's
+    // `audio.position` and the ready log below.
+    //
+    // SAFETY: take one `&mut` to the FilterData for port setup. Nothing else
+    // aliases it here — the RT process callback is not invoked until the filter is
+    // connected (below) and the main loop runs. The borrow is dropped before then.
+    let fd = unsafe { &mut *fd_ptr };
+    let channels = fd.in_ports.len();
+    gs.lock().unwrap().active_channels = channels;
+    let names = pw_channel_names(channels);
+    let position = names.join(",");
+
+    add_filter_ports(filter, fd, &names);
+    connect_filter(filter)?;
+
+    create_null_sink(&core, &position)?;
+
+    // ── Registry listener (high-level, 'static closure via Arc) ──────────
+    let registry = core.get_registry()?;
+    // SAFETY: `core` and `registry` outlive the listener (same scope, dropped after mainloop).
+    // The transmute extends the RegistryBox lifetime to 'static for the closure — safe because
+    // the listener is dropped before registry (Rust drops in reverse declaration order).
+    let registry_static: &'static pw::registry::Registry = unsafe {
+        std::mem::transmute::<&pw::registry::Registry, &'static pw::registry::Registry>(&*registry)
+    };
+    let _listener = register_graph_listener(registry_static, gs);
+
+    // ── Poll filter node-id, then run main loop ───────────────────────────
+    let quit_timer = mainloop.as_raw_ptr() as usize;
+    let timer = spawn_graph_timer(&mainloop, gs, filter, quit_timer)?;
+
+    info!(
+        "PipeWire ready — 'Resonance EQ' is now the default output ({}ch [{}], requested {} Hz; \
+         actual graph rate logged once negotiated)",
+        channels, position, SAMPLE_RATE
+    );
+
+    // Blocks until the connection drops (core error → pw_main_loop_quit).
+    mainloop.run();
+
+    // Detach the RT callback from `fd` before this attempt's objects are dropped
+    // and `fd` is reused by the next attempt.
+    unsafe {
+        pw_sys::pw_filter_destroy(filter);
+    }
+    drop(timer);
+    Ok(())
+}
+
+/// Wire a listener that quits the main loop on a fatal core error (server gone /
+/// disconnect) so the reconnect loop can take over. `quit_ptr` is the
+/// `pw_main_loop` raw pointer as `usize` (to keep the closure `Send`).
+fn register_core_error_listener(core: &pw::core::Core, quit_ptr: usize) -> pw::core::Listener {
+    core.add_listener_local()
         .error(move |id, _seq, res, message| {
             // id 0 == the core proxy itself; an error there means the connection
             // is broken.
@@ -273,8 +328,17 @@ fn build_and_run(fd_ptr: *mut FilterData, gs: &Arc<Mutex<GraphState>>) -> Result
                 }
             }
         })
-        .register();
+        .register()
+}
 
+/// Create the `pw_filter` node and attach the RT process callback, pointing it at
+/// `fd_ptr`. The events struct and hook are intentionally leaked: they must
+/// outlive the filter, which is destroyed (not dropped) at the end of the
+/// connection attempt. Returns the raw filter pointer.
+fn create_filter(
+    raw_core: *mut pw_sys::pw_core,
+    fd_ptr: *mut FilterData,
+) -> Result<*mut pw_sys::pw_filter> {
     let fev: &'static _ = Box::leak(Box::new(unsafe {
         let mut e: pw_sys::pw_filter_events = std::mem::zeroed();
         e.version = pw_sys::PW_VERSION_FILTER_EVENTS;
@@ -298,20 +362,13 @@ fn build_and_run(fd_ptr: *mut FilterData, gs: &Arc<Mutex<GraphState>>) -> Result
         pw_sys::pw_filter_add_listener(f, hook, fev, fd_ptr.cast::<c_void>());
         f
     };
+    Ok(filter)
+}
 
-    // Channel count + layout for this connection — fixed at the FilterData's port
-    // count (set in `spawn` from `target_channels()`). Reused for the sink's
-    // `audio.position` and the ready log below.
-    //
-    // SAFETY: take one `&mut` to the FilterData for port setup. Nothing else
-    // aliases it here — the RT process callback is not invoked until the filter is
-    // connected (below) and the main loop runs. The borrow is dropped before then.
-    let fd = unsafe { &mut *fd_ptr };
-    let channels = fd.in_ports.len();
-    gs.lock().unwrap().active_channels = channels;
-    let names = pw_channel_names(channels);
-    let position = names.join(",");
-
+/// Add one mono-float input + output DSP port per channel to `filter`, storing
+/// the port handles in `fd.in_ports`/`fd.out_ports`. Ports carry the channel's
+/// SPA position label (FL/FR/…) so the link layer can pair them positionally.
+fn add_filter_ports(filter: *mut pw_sys::pw_filter, fd: &mut FilterData, names: &[String]) {
     for (ch, chname) in names.iter().enumerate() {
         let chname = chname.as_str();
         let inname = format!("input_{chname}");
@@ -347,7 +404,10 @@ fn build_and_run(fd_ptr: *mut FilterData, gs: &Arc<Mutex<GraphState>>) -> Result
             )
         };
     }
+}
 
+/// Connect the filter into the graph as an RT-process node.
+fn connect_filter(filter: *mut pw_sys::pw_filter) -> Result<()> {
     anyhow::ensure!(
         unsafe {
             pw_sys::pw_filter_connect(
@@ -359,8 +419,12 @@ fn build_and_run(fd_ptr: *mut FilterData, gs: &Arc<Mutex<GraphState>>) -> Result
         } >= 0,
         "pw_filter_connect"
     );
+    Ok(())
+}
 
-    // ── null-audio-sink (high-level) ──────────────────────────────────────
+/// Create the routable "Resonance EQ" null-audio-sink that apps play into.
+/// `position` is the comma-joined SPA channel layout (e.g. `FL,FR`).
+fn create_null_sink(core: &pw::core::Core, position: &str) -> Result<()> {
     let _sink: pw::node::Node = core.create_object(
         "adapter",
         &properties! {
@@ -368,27 +432,25 @@ fn build_and_run(fd_ptr: *mut FilterData, gs: &Arc<Mutex<GraphState>>) -> Result
             "node.name"              => "resonance",
             "node.description"       => "Resonance EQ",
             "media.class"            => "Audio/Sink",
-            "audio.position"         => position.as_str(),
+            "audio.position"         => position,
             "monitor.channel-volumes" => "false",
             "monitor.passthrough"    => "true",
             "node.virtual"           => "true",
         },
     )?;
+    Ok(())
+}
 
-    // ── Registry listener (high-level, 'static closure via Arc) ──────────
-    let registry = core.get_registry()?;
-
-    // SAFETY: `core` and `registry` outlive the listener (same scope, dropped after mainloop).
-    // The transmute extends the RegistryBox lifetime to 'static for the closure — safe because
-    // the listener is dropped before registry (Rust drops in reverse declaration order).
-    let registry_static: &'static pw::registry::Registry = unsafe {
-        std::mem::transmute::<&pw::registry::Registry, &'static pw::registry::Registry>(&*registry)
-    };
-
+/// Register the registry global / global-remove listener that drives node + port
+/// discovery and rerouting. The `'static` registry reference must outlive the
+/// returned listener (the caller drops the listener before the registry).
+fn register_graph_listener(
+    registry_static: &'static pw::registry::Registry,
+    gs: &Arc<Mutex<GraphState>>,
+) -> pw::registry::Listener {
     let gs_global = Arc::clone(gs);
     let gs_remove = Arc::clone(gs);
-
-    let _listener = registry_static
+    registry_static
         .add_listener_local()
         .global(move |obj| {
             let mut g = gs_global.lock().unwrap();
@@ -398,73 +460,26 @@ fn build_and_run(fd_ptr: *mut FilterData, gs: &Arc<Mutex<GraphState>>) -> Result
             let mut g = gs_remove.lock().unwrap();
             on_global_remove(&mut g, id);
         })
-        .register();
+        .register()
+}
 
-    // ── Poll filter node-id, then run main loop ───────────────────────────
-    // Use a timer on the loop to poll pw_filter_get_node_id.
+/// Add the 50 ms loop timer that polls the filter node-id, applies pending
+/// route/default changes, and follows the output device's channel count.
+/// `quit_ptr` is the `pw_main_loop` raw pointer as `usize`. The returned
+/// `TimerSource` borrows `mainloop` and must be dropped before it.
+fn spawn_graph_timer<'l>(
+    mainloop: &'l pw::main_loop::MainLoopBox,
+    gs: &Arc<Mutex<GraphState>>,
+    filter: *mut pw_sys::pw_filter,
+    quit_ptr: usize,
+) -> Result<pw::loop_::TimerSource<'l>> {
     let gs_timer = Arc::clone(gs);
-    let quit_timer = mainloop.as_raw_ptr() as usize;
+    let filter_ptr = filter as usize;
     let timer = mainloop.loop_().add_timer(move |_| {
-        let node_id = unsafe { pw_sys::pw_filter_get_node_id(filter) };
+        let node_id =
+            unsafe { pw_sys::pw_filter_get_node_id(filter_ptr as *mut pw_sys::pw_filter) };
         let mut g = gs_timer.lock().unwrap();
-        if node_id != u32::MAX && g.filter_node_id == u32::MAX {
-            g.filter_node_id = node_id;
-            reroute(&mut g);
-        }
-        // Apply any pending preferred-output changes from the IPC thread.
-        let mut reroute_needed = false;
-        while let Ok(name) = g.route_rx.try_recv() {
-            // Empty = follow the OS default sink (clear the pin).
-            g.preferred_output = if name.is_empty() { None } else { Some(name) };
-            reroute_needed = true;
-        }
-        // The system default sink changed (user picked an output in the system
-        // switcher, or a device hot-plugged). When unpinned, `find_target_sink`
-        // now follows it; either way re-claim the default for "resonance" so apps
-        // keep playing into the EQ instead of moving to the device the user picked.
-        let default_changed = g.default_dirty.swap(false, Ordering::Relaxed);
-        if default_changed {
-            reroute_needed = true;
-        }
-        if reroute_needed {
-            reroute(&mut g);
-        }
-        if default_changed {
-            g.default_set = false;
-            try_set_default(&mut g);
-        }
-        // Live channel-count following: when the output device's channel count
-        // differs from the filter's, record it and quit the loop so the reconnect
-        // path rebuilds the filter + chain at the new width.
-        let dev = device_channels(&g);
-        // Debounce: only act once the count has held steady (~200 ms), so ports
-        // appearing one-by-one during enumeration don't trigger a rebuild at an
-        // intermediate count.
-        if dev == g.device_seen_count {
-            g.device_seen_ticks = g.device_seen_ticks.saturating_add(1);
-        } else {
-            g.device_seen_count = dev;
-            g.device_seen_ticks = 1;
-        }
-        // Only trigger for a count the rebuild path can actually act on — the
-        // same `1..=MAX_CH` range. Otherwise an out-of-range device count (a
-        // >64-channel sink) would quit-and-not-rebuild forever (active_channels
-        // never converges), livelocking the reconnect loop. The `is_none` guard
-        // stops it re-firing every tick before the quit lands.
-        if (1..=MAX_CH).contains(&dev)
-            && dev != g.active_channels
-            && g.device_seen_ticks >= 4
-            && g.pending_channels.is_none()
-        {
-            tracing::info!(
-                "output device is {dev}ch (filter is {}ch) — rebuilding the filter",
-                g.active_channels
-            );
-            g.pending_channels = Some(dev);
-            unsafe {
-                pw_sys::pw_main_loop_quit(quit_timer as *mut pw_sys::pw_main_loop);
-            }
-        }
+        on_graph_timer_tick(&mut g, node_id, quit_ptr);
     });
     timer
         .update_timer(
@@ -472,23 +487,114 @@ fn build_and_run(fd_ptr: *mut FilterData, gs: &Arc<Mutex<GraphState>>) -> Result
             Some(std::time::Duration::from_millis(50)),
         )
         .into_result()?;
+    Ok(timer)
+}
 
-    info!(
-        "PipeWire ready — 'Resonance EQ' is now the default output ({}ch [{}], requested {} Hz; \
-         actual graph rate logged once negotiated)",
-        channels, position, SAMPLE_RATE
-    );
-
-    // Blocks until the connection drops (core error → pw_main_loop_quit).
-    mainloop.run();
-
-    // Detach the RT callback from `fd` before this attempt's objects are dropped
-    // and `fd` is reused by the next attempt.
-    unsafe {
-        pw_sys::pw_filter_destroy(filter);
+/// One tick of the graph timer: latch the filter node-id, drain pending
+/// preferred-output changes, react to a system-default change, and follow the
+/// output device's channel count (quitting the loop on a stable change so the
+/// reconnect path rebuilds at the new width). `quit_ptr` is the `pw_main_loop`
+/// raw pointer as `usize`.
+fn on_graph_timer_tick(g: &mut GraphState, node_id: u32, quit_ptr: usize) {
+    if node_id != u32::MAX && g.filter_node_id == u32::MAX {
+        g.filter_node_id = node_id;
+        reroute(g);
     }
-    drop(timer);
-    Ok(())
+    // Apply any pending preferred-output changes from the IPC thread.
+    let mut reroute_needed = false;
+    while let Ok(name) = g.route_rx.try_recv() {
+        // Empty = follow the OS default sink (clear the pin).
+        g.preferred_output = if name.is_empty() { None } else { Some(name) };
+        reroute_needed = true;
+    }
+    // The system default sink changed (user picked an output in the system
+    // switcher, or a device hot-plugged). When unpinned, `find_target_sink`
+    // now follows it; either way re-claim the default for "resonance" so apps
+    // keep playing into the EQ instead of moving to the device the user picked.
+    let default_changed = g.default_dirty.swap(false, Ordering::Relaxed);
+    if default_changed {
+        reroute_needed = true;
+    }
+    if reroute_needed {
+        reroute(g);
+    }
+    if default_changed {
+        g.default_set = false;
+        try_set_default(g);
+    }
+
+    // Live channel-count following: when the output device's channel count
+    // differs from the filter's, record it and quit the loop so the reconnect
+    // path rebuilds the filter + chain at the new width.
+    let dev = device_channels(g);
+    let action = channel_follow_step(
+        dev,
+        g.device_seen_count,
+        g.device_seen_ticks,
+        g.active_channels,
+        g.pending_channels.is_some(),
+    );
+    g.device_seen_count = action.seen_count;
+    g.device_seen_ticks = action.seen_ticks;
+    if action.rebuild {
+        tracing::info!(
+            "output device is {dev}ch (filter is {}ch) — rebuilding the filter",
+            g.active_channels
+        );
+        g.pending_channels = Some(dev);
+        unsafe {
+            pw_sys::pw_main_loop_quit(quit_ptr as *mut pw_sys::pw_main_loop);
+        }
+    }
+}
+
+/// Number of consecutive stable ticks the device channel count must hold (~200 ms
+/// at the 50 ms timer) before a rebuild fires, so transient counts during device
+/// enumeration (ports appearing one-by-one) don't cause a spurious rebuild.
+const CHANNEL_FOLLOW_STABLE_TICKS: u8 = 4;
+
+/// Outcome of one channel-follow debounce step: the updated debounce state and
+/// whether a rebuild should be triggered this tick.
+#[derive(Debug, PartialEq, Eq)]
+struct ChannelFollowAction {
+    seen_count: usize,
+    seen_ticks: u8,
+    rebuild: bool,
+}
+
+/// Pure debounce decision for live channel-count following.
+///
+/// Given the device's current input-port count (`dev`), the previously-seen
+/// count + how many consecutive ticks it has held, the filter's active channel
+/// count, and whether a rebuild is already pending, return the new debounce state
+/// and whether to trigger a rebuild now.
+///
+/// A rebuild only fires once `dev` has held steady for [`CHANNEL_FOLLOW_STABLE_TICKS`]
+/// ticks, differs from the active count, lies in the actionable `1..=MAX_CH` range
+/// (an out-of-range count the rebuild path can't act on would otherwise livelock
+/// the reconnect loop), and no rebuild is already pending (so it can't re-fire
+/// every tick before the quit lands).
+fn channel_follow_step(
+    dev: usize,
+    seen_count: usize,
+    seen_ticks: u8,
+    active_channels: usize,
+    rebuild_pending: bool,
+) -> ChannelFollowAction {
+    let (seen_count, seen_ticks) = if dev == seen_count {
+        (seen_count, seen_ticks.saturating_add(1))
+    } else {
+        (dev, 1)
+    };
+    let rebuild = (1..=MAX_CH).contains(&dev)
+        && dev != active_channels
+        && seen_ticks >= CHANNEL_FOLLOW_STABLE_TICKS
+        && !rebuild_pending;
+    ChannelFollowAction {
+        seen_count,
+        seen_ticks,
+        rebuild,
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -739,14 +845,10 @@ fn parse_metadata_name(value: &str) -> Option<String> {
     Some(rest[start..end].to_string())
 }
 
-/// Link every source port to a destination port. Each source prefers a
-/// destination carrying the *same* `audio.channel` label (FL→FL, FC→FC, …); a
-/// source whose label has no match (or unlabeled ports) falls back to the next
-/// free destination by port-id order. Generalises the old hardcoded FL/FR pair
-/// to any channel layout, while still correctly pairing mismatched layouts.
-/// Pair source ports to destination ports as `(src_id, dst_id)`: each source
-/// (in port-id order) prefers a free destination carrying the same
-/// `audio.channel` label, else the next free destination by position. Stops when
+/// Pair source ports to destination ports as `(src_id, dst_id)`: each source (in
+/// port-id order) prefers a free destination carrying the *same* `audio.channel`
+/// label (FL→FL, FC→FC, …), else falls back to the next free destination by
+/// position (handles unlabeled ports and mismatched layouts). Stops when
 /// destinations run out. Pure (no `PipeWire` calls) so the pairing is unit-testable.
 fn pair_ports(srcs: &[PortMeta], dsts: &[PortMeta]) -> Vec<(u32, u32)> {
     let mut srcs_sorted = srcs.to_vec();
@@ -1114,6 +1216,63 @@ mod tests {
             let d_label = &dsts.iter().find(|d| d.id == did).unwrap().channel;
             assert_eq!(s_label, d_label, "src {sid} → dst {did} same label");
         }
+    }
+
+    #[test]
+    fn channel_follow_no_rebuild_until_stable() {
+        // A fresh count seen for the first time: ticks reset to 1, no rebuild yet.
+        let a = channel_follow_step(6, 2, 9, 2, false);
+        assert_eq!(
+            a,
+            ChannelFollowAction {
+                seen_count: 6,
+                seen_ticks: 1,
+                rebuild: false
+            }
+        );
+        // Same count held but not yet stable (3 < 4 ticks): still no rebuild.
+        let a = channel_follow_step(6, 6, 2, 2, false);
+        assert_eq!(
+            a,
+            ChannelFollowAction {
+                seen_count: 6,
+                seen_ticks: 3,
+                rebuild: false
+            }
+        );
+    }
+
+    #[test]
+    fn channel_follow_rebuilds_once_stable() {
+        // Held to the stable threshold and differs from active → rebuild.
+        let a = channel_follow_step(6, 6, CHANNEL_FOLLOW_STABLE_TICKS - 1, 2, false);
+        assert_eq!(
+            a,
+            ChannelFollowAction {
+                seen_count: 6,
+                seen_ticks: CHANNEL_FOLLOW_STABLE_TICKS,
+                rebuild: true
+            }
+        );
+    }
+
+    #[test]
+    fn channel_follow_no_rebuild_when_matching_or_pending_or_out_of_range() {
+        // Equals the active count → no rebuild even when stable.
+        assert!(!channel_follow_step(2, 2, 99, 2, false).rebuild);
+        // A rebuild is already pending → don't re-fire.
+        assert!(!channel_follow_step(6, 6, 99, 2, true).rebuild);
+        // Out-of-range device count (> MAX_CH) the rebuild path can't act on.
+        assert!(!channel_follow_step(MAX_CH + 1, MAX_CH + 1, 99, 2, false).rebuild);
+        // Zero (no target sink known yet) is also out of the actionable range.
+        assert!(!channel_follow_step(0, 0, 99, 2, false).rebuild);
+    }
+
+    #[test]
+    fn channel_follow_ticks_saturate() {
+        // seen_ticks must not wrap when the count holds for a very long time.
+        let a = channel_follow_step(6, 6, u8::MAX, 6, false);
+        assert_eq!(a.seen_ticks, u8::MAX);
     }
 
     #[test]

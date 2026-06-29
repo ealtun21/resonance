@@ -161,6 +161,80 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
 
 // ── Status bar ────────────────────────────────────────────────────────────
 
+/// Sample-rate readout: a single rate when capture and DSP rates match, or
+/// `capture→DSP` when a resampler is engaged (rates differ by >1 Hz).
+fn sample_rate_label(capture_rate: f64, sample_rate: f64) -> String {
+    if (capture_rate - sample_rate).abs() > 1.0 {
+        format!("{capture_rate:.0}→{sample_rate:.0} Hz")
+    } else {
+        format!("{sample_rate:.0} Hz")
+    }
+}
+
+/// Preamp readout and colour: "preamp 0 dB" (dim) within the ±0.05 dB dead
+/// zone, otherwise the signed value in cyan.
+fn preamp_label(preamp_db: f64) -> (String, Color) {
+    if preamp_db.abs() < 0.05 {
+        ("preamp 0 dB".to_string(), Color::DarkGray)
+    } else {
+        (format!("preamp {preamp_db:+.1} dB"), Color::Cyan)
+    }
+}
+
+/// Fixed-width (4-char) dBFS readout for a linear peak level: `-inf` below the
+/// noise floor, otherwise the signed dB value. Right-padded so the value
+/// changes in place without shifting the spans after it.
+fn meter_db(lin: f32) -> String {
+    let v = if lin <= 1e-6 {
+        "-inf".to_string()
+    } else {
+        format!("{:+.0}", 20.0 * lin.log10())
+    };
+    format!("{v:>4}")
+}
+
+/// DSP-load colour: red when over 80% (risking dropouts), yellow over 50%, dim
+/// otherwise.
+fn dsp_load_color(load: f32) -> Color {
+    if load > 0.8 {
+        Color::Red
+    } else if load > 0.5 {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    }
+}
+
+/// Channel / routing summary, surfaced only when the path isn't plain stereo
+/// passthrough (progressive disclosure — stereo users see nothing here).
+///
+/// Returns e.g. `6ch`, `2→6ch` (up/down-mix), with a `L⇄R` tag for a pure swap
+/// or `routed` for any other routing matrix. `None` when it's uninteresting
+/// stereo passthrough.
+fn channel_summary(
+    channels: usize,
+    out_channels: usize,
+    routing: Option<&RoutingMatrix>,
+) -> Option<String> {
+    let routed = routing.is_some();
+    let swapped = channels >= 2 && routing == Some(&RoutingMatrix::swap(channels, 0, 1));
+    let interesting = channels != 2 || out_channels != channels || routed;
+    if !interesting {
+        return None;
+    }
+    let mut t = if out_channels != 0 && out_channels != channels {
+        format!("{channels}→{out_channels}ch")
+    } else {
+        format!("{channels}ch")
+    };
+    if swapped {
+        t.push_str(" L⇄R");
+    } else if routed {
+        t.push_str(" routed");
+    }
+    Some(t)
+}
+
 fn render_status(app: &App, frame: &mut Frame, area: Rect) {
     let power_span = if app.state.as_ref().is_some_and(|s| s.enabled) {
         Span::styled("● ON ", Style::default().fg(Color::Green).bold())
@@ -177,27 +251,11 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
     let sr = app
         .state
         .as_ref()
-        .map(|s| {
-            if (s.capture_rate - s.sample_rate).abs() > 1.0 {
-                // Resampling: show capture→DSP rate.
-                format!("{:.0}→{:.0} Hz", s.capture_rate, s.sample_rate)
-            } else {
-                format!("{:.0} Hz", s.sample_rate)
-            }
-        })
+        .map(|s| sample_rate_label(s.capture_rate, s.sample_rate))
         .unwrap_or_default();
 
     let preamp_db = app.state.as_ref().map_or(0.0, |s| s.preamp_db);
-    let preamp = if preamp_db.abs() < 0.05 {
-        "preamp 0 dB".to_string()
-    } else {
-        format!("preamp {preamp_db:+.1} dB")
-    };
-    let preamp_color = if preamp_db.abs() < 0.05 {
-        Color::DarkGray
-    } else {
-        Color::Cyan
-    };
+    let (preamp, preamp_color) = preamp_label(preamp_db);
 
     let output_str = app
         .state
@@ -220,15 +278,6 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
 
     // Live meters.
     let meters = app.state.as_ref().map(|s| s.meters).unwrap_or_default();
-    // Fixed-width dB readout so the value changes without shifting later spans.
-    let db = |lin: f32| {
-        if lin <= 1e-6 {
-            "-inf".to_string()
-        } else {
-            format!("{:+.0}", 20.0 * lin.log10())
-        }
-    };
-    let db = |lin: f32| format!("{:>4}", db(lin));
     let clip_active = app
         .clip_until
         .is_some_and(|t| std::time::Instant::now() < t);
@@ -237,39 +286,15 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         Color::Green
     };
-    let in_str = format!("I {} dB", db(meters.in_peak));
-    let out_str = format!("O {} dB", db(meters.out_peak));
+    let in_str = format!("I {} dB", meter_db(meters.in_peak));
+    let out_str = format!("O {} dB", meter_db(meters.out_peak));
     let dsp_str = format!("DSP {:>3.0}%", meters.dsp_load * 100.0);
-    let dsp_color = if meters.dsp_load > 0.8 {
-        Color::Red
-    } else if meters.dsp_load > 0.5 {
-        Color::Yellow
-    } else {
-        Color::DarkGray
-    };
+    let dsp_color = dsp_load_color(meters.dsp_load);
 
-    // Channel / routing summary — surfaced only when it's not plain stereo
-    // passthrough (progressive disclosure: stereo users see nothing here).
-    let ch_str = app.state.as_ref().and_then(|s| {
-        let routed = s.routing.is_some();
-        let swapped =
-            s.channels >= 2 && s.routing.as_ref() == Some(&RoutingMatrix::swap(s.channels, 0, 1));
-        let interesting = s.channels != 2 || s.out_channels != s.channels || routed;
-        if !interesting {
-            return None;
-        }
-        let mut t = if s.out_channels != 0 && s.out_channels != s.channels {
-            format!("{}→{}ch", s.channels, s.out_channels)
-        } else {
-            format!("{}ch", s.channels)
-        };
-        if swapped {
-            t.push_str(" L⇄R");
-        } else if routed {
-            t.push_str(" routed");
-        }
-        Some(t)
-    });
+    let ch_str = app
+        .state
+        .as_ref()
+        .and_then(|s| channel_summary(s.channels, s.out_channels, s.routing.as_ref()));
 
     let sep = || Span::styled(" │ ", Style::default().fg(Color::DarkGray));
 
@@ -2789,5 +2814,74 @@ mod tests {
         assert_eq!(labels.len(), 3);
         assert_eq!(labels[0].content, "-18");
         assert_eq!(labels[2].content, "+18");
+    }
+
+    // ── Status-bar pure helpers ─────────────────────────────────────────────
+
+    #[test]
+    fn sample_rate_label_collapses_matching_rates() {
+        // Within the 1 Hz dead zone → a single rate, no arrow.
+        assert_eq!(sample_rate_label(48000.0, 48000.0), "48000 Hz");
+        assert_eq!(sample_rate_label(48000.5, 48000.0), "48000 Hz");
+        // Resampling → capture→DSP.
+        assert_eq!(sample_rate_label(44100.0, 48000.0), "44100→48000 Hz");
+    }
+
+    #[test]
+    fn preamp_label_dead_zone_is_dim_zero() {
+        let (text, color) = preamp_label(0.0);
+        assert_eq!(text, "preamp 0 dB");
+        assert_eq!(color, Color::DarkGray);
+        // Just inside the ±0.05 dead zone still reads as 0.
+        assert_eq!(preamp_label(0.04).0, "preamp 0 dB");
+        // Outside → signed value, cyan.
+        let (text, color) = preamp_label(-3.5);
+        assert_eq!(text, "preamp -3.5 dB");
+        assert_eq!(color, Color::Cyan);
+        assert_eq!(preamp_label(3.5).0, "preamp +3.5 dB");
+    }
+
+    #[test]
+    fn meter_db_is_inf_below_floor_and_fixed_width() {
+        assert_eq!(meter_db(0.0), "-inf");
+        assert_eq!(meter_db(1e-9), "-inf");
+        // 0 dBFS (peak 1.0) and a fixed 4-char width.
+        assert_eq!(meter_db(1.0), "  +0");
+        // -6 dBFS ≈ 0.5.
+        assert_eq!(meter_db(0.5), "  -6");
+    }
+
+    #[test]
+    fn dsp_load_color_thresholds() {
+        assert_eq!(dsp_load_color(0.0), Color::DarkGray);
+        assert_eq!(dsp_load_color(0.5), Color::DarkGray);
+        assert_eq!(dsp_load_color(0.6), Color::Yellow);
+        assert_eq!(dsp_load_color(0.9), Color::Red);
+    }
+
+    #[test]
+    fn channel_summary_hidden_for_plain_stereo() {
+        // Plain 2→2 passthrough, no routing → nothing shown.
+        assert_eq!(channel_summary(2, 2, None), None);
+    }
+
+    #[test]
+    fn channel_summary_shows_count_and_routing() {
+        // Multichannel passthrough → bare count.
+        assert_eq!(channel_summary(6, 6, None).as_deref(), Some("6ch"));
+        // Up/down-mix → in→out count.
+        assert_eq!(channel_summary(2, 6, None).as_deref(), Some("2→6ch"));
+        // A pure L/R swap is tagged distinctly from a general routing matrix.
+        let swap = RoutingMatrix::swap(2, 0, 1);
+        assert_eq!(
+            channel_summary(2, 2, Some(&swap)).as_deref(),
+            Some("2ch L⇄R")
+        );
+        // Any other routing reads as "routed".
+        let id = RoutingMatrix::identity(2);
+        assert_eq!(
+            channel_summary(2, 2, Some(&id)).as_deref(),
+            Some("2ch routed")
+        );
     }
 }
