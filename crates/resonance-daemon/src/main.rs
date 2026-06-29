@@ -1,6 +1,12 @@
 // On Windows, run as a GUI-subsystem process so launching the daemon never
 // flashes a console window (it's a background service driving the APO).
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+// On Windows the daemon is control-plane only: it drives the in-graph APO and
+// does no audio itself, so the RT audio path (chain application, meters,
+// routing) and assorted PipeWire-only / virtual-cable helpers are compiled but
+// never run. Allow the resulting dead code on Windows instead of cfg-gating
+// every audio-path item individually.
+#![cfg_attr(windows, allow(dead_code))]
 
 mod audio;
 mod config;

@@ -11,6 +11,10 @@
 //! This mirrors how FxSound's `audiopassthru` identifies endpoints (by ID /
 //! friendly name, never the ambiguous description).
 
+// The COM interfaces below (IPolicyConfig / IPolicyConfigVista) must mirror their
+// vtable method names exactly, which are PascalCase — keep them as-is.
+#![allow(non_snake_case)]
+
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Media::Audio::{
     DEVICE_STATE_ACTIVE, IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX,
@@ -31,14 +35,19 @@ use windows::core::{GUID, HRESULT, PCWSTR};
 ///
 /// SAFETY: caller passes a PROPVARIANT obtained from `IPropertyStore::GetValue`.
 unsafe fn propvariant_str(prop: &PROPVARIANT) -> String {
-    let v = &prop.Anonymous.Anonymous;
-    if v.vt == VT_LPWSTR {
-        let p = v.Anonymous.pwszVal;
-        if !p.is_null() {
-            return p.to_string().unwrap_or_default();
+    // SAFETY (edition 2024 requires explicit unsafe blocks inside `unsafe fn`):
+    // reading the PROPVARIANT union fields and PWSTR::to_string are guarded by
+    // the VT_LPWSTR check + null check above, per this fn's contract.
+    unsafe {
+        let v = &prop.Anonymous.Anonymous;
+        if v.vt == VT_LPWSTR {
+            let p = v.Anonymous.pwszVal;
+            if !p.is_null() {
+                return p.to_string().unwrap_or_default();
+            }
         }
+        String::new()
     }
-    String::new()
 }
 
 /// Friendly names of all active render endpoints, in `IMMDeviceEnumerator`
@@ -271,7 +280,7 @@ pub fn is_cable_name(n: &str) -> bool {
 /// can report a different supported rate (e.g. 48000 when the mix is 44100),
 /// which silently resamples and rolls off the highs.
 pub fn endpoint_rate_by_name(name: &str) -> Option<u32> {
-    unsafe { rate_by_name(name) }.ok().flatten()
+    rate_by_name(name).ok().flatten()
 }
 
 fn rate_by_name(name: &str) -> windows::core::Result<Option<u32>> {
