@@ -150,7 +150,11 @@ pub struct Telemetry {
     pub out_peak: f32,
     pub in_rms: f32,
     pub out_rms: f32,
-    pub _pad: f32,
+    /// The APO's live locked sample rate in Hz (0 until `LockForProcess`). Lets
+    /// the Windows control-plane daemon report the real endpoint rate in
+    /// `status` — it has no audio backend of its own, so the APO is the only one
+    /// that knows the rate. Repurposes a former padding `f32` (no layout change).
+    pub sample_rate: f32,
     pub spectrum: [f32; TELEMETRY_BINS],
 }
 
@@ -161,6 +165,7 @@ pub struct TelemetrySnapshot {
     pub out_peak: f32,
     pub in_rms: f32,
     pub out_rms: f32,
+    pub sample_rate: f32,
     pub spectrum: [f32; TELEMETRY_BINS],
 }
 
@@ -494,6 +499,7 @@ impl SharedFile {
         out_peak: f32,
         in_rms: f32,
         out_rms: f32,
+        sample_rate: f32,
         spectrum: &[f32; TELEMETRY_BINS],
     ) {
         let t = &mut self.state_mut().telemetry;
@@ -503,6 +509,7 @@ impl SharedFile {
         t.out_peak = out_peak;
         t.in_rms = in_rms;
         t.out_rms = out_rms;
+        t.sample_rate = sample_rate;
         t.spectrum = *spectrum;
         t.generation.store(g.wrapping_add(2), Ordering::Release); // even
     }
@@ -520,6 +527,7 @@ impl SharedFile {
                 out_peak: t.out_peak,
                 in_rms: t.in_rms,
                 out_rms: t.out_rms,
+                sample_rate: t.sample_rate,
                 spectrum: t.spectrum,
             };
             let g2 = t.generation.load(Ordering::Acquire);
@@ -623,6 +631,7 @@ pub fn read_telemetry_fresh(path: &Path) -> Option<TelemetrySnapshot> {
             out_peak: read_f32(&b, tel_off + std::mem::offset_of!(Telemetry, out_peak))?,
             in_rms: read_f32(&b, tel_off + std::mem::offset_of!(Telemetry, in_rms))?,
             out_rms: read_f32(&b, tel_off + std::mem::offset_of!(Telemetry, out_rms))?,
+            sample_rate: read_f32(&b, tel_off + std::mem::offset_of!(Telemetry, sample_rate))?,
             spectrum,
         };
         let g2 = read_u64(&std::fs::read(path).ok()?, gen_off)?;
@@ -1016,14 +1025,16 @@ mod tests {
         for (i, s) in spectrum.iter_mut().enumerate() {
             *s = i as f32 / TELEMETRY_BINS as f32;
         }
-        w.write_telemetry(0.8, 0.6, 0.3, 0.25, &spectrum);
+        w.write_telemetry(0.8, 0.6, 0.3, 0.25, 96000.0, &spectrum);
 
         let via_map = w.read_telemetry().expect("mapped read");
         assert!((via_map.in_peak - 0.8).abs() < 1e-6 && (via_map.out_rms - 0.25).abs() < 1e-6);
+        assert!((via_map.sample_rate - 96000.0).abs() < 1e-3);
         assert_eq!(via_map.spectrum, spectrum);
 
         let via_fresh = read_telemetry_fresh(&path).expect("fresh read");
         assert!((via_fresh.out_peak - 0.6).abs() < 1e-6);
+        assert!((via_fresh.sample_rate - 96000.0).abs() < 1e-3);
         assert_eq!(via_fresh.spectrum, spectrum);
         std::fs::remove_file(&path).ok();
     }

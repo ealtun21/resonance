@@ -210,6 +210,7 @@ fn worker_loop(weak: Weak<Shared>) {
             f32::from_bits(shared.out_peak.load(Ordering::Relaxed)),
             f32::from_bits(shared.in_rms.load(Ordering::Relaxed)),
             f32::from_bits(shared.out_rms.load(Ordering::Relaxed)),
+            f64::from_bits(shared.sample_rate_bits.load(Ordering::Relaxed)) as f32,
             &bins,
         );
     }
