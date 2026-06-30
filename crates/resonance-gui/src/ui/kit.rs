@@ -202,17 +202,28 @@ fn card_impl(
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
             let p = ui.painter();
-            // Disclosure chevron (collapsible cards only); the title sits after it.
+            // Disclosure triangle (collapsible cards only), painter-drawn so it
+            // never depends on a font glyph; the title sits after it. Points down
+            // when expanded, right when collapsed.
             let title_x = if collapsible {
-                let arrow = if collapsed { "▸" } else { "▾" };
-                p.text(
-                    egui::pos2(head.left() + CARD_PAD_X, head.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    arrow,
-                    egui::FontId::proportional(T_CAPTION),
-                    if head_resp.hovered() { t.text } else { t.dim },
-                );
-                head.left() + CARD_PAD_X + 14.0
+                let col = if head_resp.hovered() { t.text } else { t.dim };
+                let cx = head.left() + CARD_PAD_X + 4.0;
+                let cy = head.center().y;
+                let tri = if collapsed {
+                    vec![
+                        egui::pos2(cx - 3.0, cy - 4.0),
+                        egui::pos2(cx - 3.0, cy + 4.0),
+                        egui::pos2(cx + 4.0, cy),
+                    ]
+                } else {
+                    vec![
+                        egui::pos2(cx - 4.0, cy - 3.0),
+                        egui::pos2(cx + 4.0, cy - 3.0),
+                        egui::pos2(cx, cy + 4.0),
+                    ]
+                };
+                p.add(egui::Shape::convex_polygon(tri, col, egui::Stroke::NONE));
+                head.left() + CARD_PAD_X + 16.0
             } else {
                 head.left() + CARD_PAD_X
             };
