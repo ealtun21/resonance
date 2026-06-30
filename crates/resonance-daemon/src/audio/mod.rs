@@ -65,7 +65,7 @@ mod coreaudio;
 #[cfg(target_os = "macos")]
 mod hal_input;
 #[cfg(target_os = "macos")]
-mod mac_apps;
+pub(crate) mod mac_apps;
 #[cfg(target_os = "macos")]
 mod system_tap;
 #[cfg(target_os = "macos")]

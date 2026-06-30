@@ -82,6 +82,36 @@ fn handle_measure_loopback() -> Result<bool> {
     Ok(true)
 }
 
+/// Debug helper: `resonanced --list-apps` prints the per-application stream list
+/// and exits, without starting the audio backend — on macOS this enumerates
+/// Core Audio process objects with no Process Tap (so no TCC prompt and no audio
+/// reroute). Linux enumerates in-graph, so use `resonance apps` against a live
+/// daemon there. Returns `true` when the mode ran (caller should exit).
+fn handle_list_apps() -> bool {
+    if !std::env::args().any(|a| a == "--list-apps") {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    let apps = audio::mac_apps::enumerate();
+    #[cfg(target_os = "windows")]
+    let apps = audio::win_apps::enumerate();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let apps: Vec<resonance_ipc::AppStream> = {
+        eprintln!(
+            "--list-apps: Linux enumerates in-graph; use `resonance apps` on a running daemon"
+        );
+        Vec::new()
+    };
+    for a in &apps {
+        println!(
+            "{} | {} | pid={:?} | vol={:.2} | muted={} | active={}",
+            a.key, a.display_name, a.pid, a.volume, a.muted, a.active
+        );
+    }
+    println!("({} apps)", apps.len());
+    true
+}
+
 /// Acquire the single-instance lock. Returns `Ok(true)` when this process owns
 /// it (continue startup), `Ok(false)` when another live daemon already holds it.
 ///
@@ -267,6 +297,11 @@ async fn main() -> Result<()> {
     // alongside a live daemon.
     #[cfg(target_os = "windows")]
     if handle_measure_loopback()? {
+        return Ok(());
+    }
+
+    // Debug: print the per-app list without starting the backend (no tap/TCC).
+    if handle_list_apps() {
         return Ok(());
     }
 
