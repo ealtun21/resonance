@@ -17,7 +17,7 @@ use super::app_streams::{app_key, exe_basename_from_session_id};
 use crate::state::AppControl;
 use resonance_ipc::AppStream;
 use std::time::Duration;
-use windows::Win32::Foundation::S_OK;
+use windows::Win32::Foundation::{CloseHandle, S_OK};
 use windows::Win32::Media::Audio::{
     AudioSessionStateActive, IAudioSessionControl2, IAudioSessionEnumerator, IAudioSessionManager2,
     IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator, eConsole, eRender,
@@ -25,7 +25,10 @@ use windows::Win32::Media::Audio::{
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
 };
-use windows::core::Interface;
+use windows::Win32::System::Threading::{
+    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
+use windows::core::{Interface, PWSTR};
 
 /// Run `f` with the default render endpoint's session enumerator. Initialises
 /// COM on the calling thread (re-init is harmless: returns `S_FALSE`).
@@ -43,10 +46,36 @@ fn with_sessions<T>(
     }
 }
 
-/// Stable key + display name for a session, parsed from its instance identifier
-/// (which embeds the exe path) with the pid as the serial. Frees the COM string.
+/// The process executable basename for `pid` (e.g. `firefox.exe`), or `None` if
+/// the process can't be opened (access denied / gone).
+unsafe fn process_name(pid: u32) -> Option<String> {
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 260];
+        let mut len = buf.len() as u32;
+        let res = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &raw mut len,
+        );
+        let _ = CloseHandle(handle);
+        res.ok()?;
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        let base = path.rsplit(['\\', '/']).next().unwrap_or(&path);
+        if base.is_empty() {
+            None
+        } else {
+            Some(base.to_owned())
+        }
+    }
+}
+
+/// Stable, space-free key + human display name for a session. Prefers the real
+/// process image name (`firefox.exe`), falling back to the session instance
+/// identifier's embedded path, then to the pid. Frees the COM string.
 unsafe fn session_identity(ctrl: &IAudioSessionControl2, pid: u32) -> (String, String) {
-    let exe = unsafe {
+    let exe = unsafe { process_name(pid) }.or_else(|| unsafe {
         match ctrl.GetSessionInstanceIdentifier() {
             Ok(pw) if !pw.is_null() => {
                 let s = pw.to_string().unwrap_or_default();
@@ -55,9 +84,11 @@ unsafe fn session_identity(ctrl: &IAudioSessionControl2, pid: u32) -> (String, S
             }
             _ => None,
         }
-    };
+    });
     let display = exe.clone().unwrap_or_else(|| format!("PID {pid}"));
-    let key = app_key(exe.as_deref(), &display, pid);
+    // `app_key` fallback "app" keeps the key space-free when no exe is known
+    // (the pid serial keeps distinct unknown apps unique).
+    let key = app_key(exe.as_deref(), "app", pid);
     (key, display)
 }
 
