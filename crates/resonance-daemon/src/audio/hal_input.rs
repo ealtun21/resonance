@@ -31,9 +31,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{info, warn};
 
-/// Number of stereo frames per `IOProc` callback we pre-allocate scratch for.
+/// Number of frames per `IOProc` callback we pre-allocate scratch for.
 /// Apple's tap typically delivers 512–1024 frames; we size generously.
 const MAX_FRAMES_PER_CYCLE: usize = 8192;
+
+/// Maximum channels the `IOProc` assembles (matches `ChannelMask`'s 64-bit
+/// width). Sizes a stack array of channel planes so the planar path stays
+/// allocation-free on the RT thread.
+const MAX_CHANNELS: usize = 64;
 
 /// Owns an active `AudioDeviceIOProc` on the aggregate device. Drop
 /// stops the device and unregisters the `IOProc` so the HAL forgets us.
@@ -52,6 +57,9 @@ pub struct HalInputStream {
     /// The tap's capture sample rate (Hz). Surfaced so the supervisor can report
     /// it for `status` (and tell whether the `IOProc` is resampling).
     pub capture_rate: f64,
+    /// The tap's capture channel count — the bound device stream's width. The
+    /// DSP chain and the output device run at this width.
+    pub capture_channels: usize,
 }
 
 struct IoState {
@@ -64,12 +72,12 @@ struct IoState {
     /// `IOProc` to decode the buffer layout.
     format: AudioStreamBasicDescription,
     /// Converts the tap capture rate (`format.mSampleRate`) to the output
-    /// device rate. Bypasses when the two already match. Stereo (the `IOProc`
-    /// always emits L/R pairs). Without this, a tap clocked differently from
-    /// the output device plays back at the wrong pitch.
+    /// device rate, at the tap's channel count. Bypasses when the rates already
+    /// match. Without this, a tap clocked differently from the output device
+    /// plays back at the wrong pitch.
     resampler: StreamResampler<f32>,
-    /// Interleaved stereo f32 scratch the `IOProc` assembles before resampling —
-    /// pre-allocated so the audio thread never allocates.
+    /// Interleaved f32 scratch (capture-channel-wide) the `IOProc` assembles
+    /// before resampling — pre-allocated so the audio thread never allocates.
     in_scratch: Vec<f32>,
     callback_count: Arc<AtomicU64>,
     nonzero_blocks: Arc<AtomicU64>,
@@ -88,12 +96,15 @@ impl HalInputStream {
         output_rate: f64,
     ) -> Result<Self> {
         let format = query_input_format(device_id)?;
+        // The device-bound tap inherits the output device's stream width, so the
+        // IOProc emits that many interleaved channels into the ring.
+        let channels = (format.mChannelsPerFrame as usize).clamp(1, MAX_CHANNELS);
 
-        // Stereo resampler: the IOProc always emits L/R pairs into the ring. It
-        // is a bypass (zero cost) when the tap already runs at the output rate —
-        // the common case, since CoreAudio drives the system mixer at the
-        // default output device's rate. Resampling only engages when they differ.
-        let resampler = StreamResampler::<f32>::new(format.mSampleRate, output_rate, 2);
+        // Resampler at the tap's channel count. It is a bypass (zero cost) when
+        // the tap already runs at the output rate — the common case once the tap
+        // is bound to the output device's stream. Resampling only engages when
+        // the capture and output rates differ.
+        let resampler = StreamResampler::<f32>::new(format.mSampleRate, output_rate, channels);
         info!(
             "tap aggregate input format: {} Hz, {} ch, {} bytes/frame, flags=0x{:x}; {}",
             format.mSampleRate,
@@ -113,7 +124,7 @@ impl HalInputStream {
             ring_tx,
             format,
             resampler,
-            in_scratch: Vec::with_capacity(MAX_FRAMES_PER_CYCLE * 2),
+            in_scratch: Vec::with_capacity(MAX_FRAMES_PER_CYCLE * channels),
             callback_count: Arc::clone(&callback_count),
             nonzero_blocks: Arc::clone(&nonzero_blocks),
         });
@@ -163,6 +174,7 @@ impl HalInputStream {
             callback_count,
             nonzero_blocks,
             capture_rate: format.mSampleRate,
+            capture_channels: channels,
         })
     }
 }
@@ -228,84 +240,68 @@ unsafe extern "C-unwind" fn io_proc(
         return 0;
     }
 
-    let channels = state.format.mChannelsPerFrame as usize;
+    let channels = (state.format.mChannelsPerFrame as usize).clamp(1, MAX_CHANNELS);
     let is_planar = (state.format.mFormatFlags & kLinearPCMFormatFlagIsNonInterleaved) != 0;
 
     // Walk the flexible array of AudioBuffer (mBuffers is declared as
     // [AudioBuffer; 1] but truly has mNumberBuffers entries).
     let mbuf_ptr = bufs.mBuffers.as_ptr();
-    let mut any_nonzero = false;
 
-    // Assemble this block as interleaved stereo into the reusable scratch, then
-    // resample (capture rate → output rate) and push the result into the ring.
+    // Assemble this block as interleaved `channels`-wide f32 into the reusable
+    // scratch, then resample (capture rate → output rate) and push to the ring.
     let scratch = &mut state.in_scratch;
-    scratch.clear();
 
     if is_planar {
-        // Planar: one AudioBuffer per channel, each carrying nframes
-        // mono f32 samples.
-        if bufs.mNumberBuffers < 2 {
-            // Mono input — duplicate to both channels.
-            let b0 = unsafe { &*mbuf_ptr };
-            if b0.mData.is_null() {
-                return 0;
-            }
-            let frames = (b0.mDataByteSize as usize) / std::mem::size_of::<f32>();
-            // SAFETY: HAL hands us at least mDataByteSize bytes of f32 data.
-            let s0 = unsafe { std::slice::from_raw_parts(b0.mData as *const f32, frames) };
-            for &v in s0 {
-                if v != 0.0 {
-                    any_nonzero = true;
-                }
-                scratch.push(v);
-                scratch.push(v);
-            }
-        } else {
-            // Stereo planar: buffers[0]=L, buffers[1]=R.
-            let bl = unsafe { &*mbuf_ptr };
-            let br = unsafe { &*mbuf_ptr.add(1) };
-            if bl.mData.is_null() || br.mData.is_null() {
-                return 0;
-            }
-            let frames = (bl.mDataByteSize as usize) / std::mem::size_of::<f32>();
-            let sl = unsafe { std::slice::from_raw_parts(bl.mData as *const f32, frames) };
-            let sr = unsafe { std::slice::from_raw_parts(br.mData as *const f32, frames) };
-            for i in 0..frames {
-                let l = sl[i];
-                let r = sr[i];
-                if l != 0.0 || r != 0.0 {
-                    any_nonzero = true;
-                }
-                scratch.push(l);
-                scratch.push(r);
+        // Planar: one AudioBuffer per channel, each carrying `frames` mono f32.
+        let b0 = unsafe { &*mbuf_ptr };
+        if b0.mData.is_null() {
+            return 0;
+        }
+        let frames = (b0.mDataByteSize as usize) / std::mem::size_of::<f32>();
+        let nbuf = (bufs.mNumberBuffers as usize).min(MAX_CHANNELS);
+        // Build the channel planes on the stack — no heap alloc on the RT thread.
+        let mut planes: [&[f32]; MAX_CHANNELS] = [&[]; MAX_CHANNELS];
+        for (c, plane) in planes.iter_mut().enumerate().take(nbuf) {
+            let b = unsafe { &*mbuf_ptr.add(c) };
+            if !b.mData.is_null() {
+                let fc = (b.mDataByteSize as usize) / std::mem::size_of::<f32>();
+                // SAFETY: HAL hands us at least mDataByteSize bytes of f32 data.
+                *plane = unsafe { std::slice::from_raw_parts(b.mData.cast::<f32>(), fc) };
             }
         }
+        scratch.clear();
+        scratch.resize(frames * channels, 0.0);
+        if nbuf == 1 && channels > 1 {
+            // Mono device feeding a wider chain: duplicate the single plane
+            // across every channel so channels 1.. aren't silent.
+            for f in 0..frames {
+                let v = planes[0].get(f).copied().unwrap_or(0.0);
+                for c in 0..channels {
+                    scratch[f * channels + c] = v;
+                }
+            }
+        } else {
+            interleave_planes(&planes[..channels], frames, channels, scratch);
+        }
     } else {
-        // Interleaved: a single AudioBuffer with channels*frames samples.
+        // Interleaved: a single AudioBuffer with `channels * frames` samples.
         let b0 = unsafe { &*mbuf_ptr };
-        if b0.mData.is_null() || channels == 0 {
+        if b0.mData.is_null() {
             return 0;
         }
         let total = (b0.mDataByteSize as usize) / std::mem::size_of::<f32>();
         let frames = total / channels;
-        let data = unsafe { std::slice::from_raw_parts(b0.mData as *const f32, frames * channels) };
-        for i in 0..frames {
-            let (l, r) = match channels {
-                1 => {
-                    let s = data[i];
-                    (s, s)
-                }
-                _ => (data[i * channels], data[i * channels + 1]),
-            };
-            if l != 0.0 || r != 0.0 {
-                any_nonzero = true;
-            }
-            scratch.push(l);
-            scratch.push(r);
-        }
+        // SAFETY: HAL hands us at least mDataByteSize bytes of f32 data.
+        let src = unsafe { std::slice::from_raw_parts(b0.mData.cast::<f32>(), frames * channels) };
+        scratch.clear();
+        scratch.resize(frames * channels, 0.0);
+        reinterleave(src, channels, channels, frames, scratch);
     }
 
-    if any_nonzero {
+    // "With audio" = any non-zero sample this block (the zero comparison is
+    // exempt from clippy::float_cmp). Distinguishes a silent tap from a stalled
+    // one in the supervisor's diagnostics.
+    if scratch.iter().any(|&v| v != 0.0) {
         state.nonzero_blocks.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -323,6 +319,39 @@ unsafe extern "C-unwind" fn io_proc(
     }
 
     0
+}
+
+/// Interleave `channels` planar f32 planes into `out` (len = `frames*channels`).
+/// `planes[c]` holds channel c's samples; a missing or short plane reads as
+/// silence. Pure over the given slices, so it is both unit-testable and callable
+/// from the RT `IOProc` with a stack-built plane array (no allocation).
+fn interleave_planes(planes: &[&[f32]], frames: usize, channels: usize, out: &mut [f32]) {
+    for f in 0..frames {
+        for c in 0..channels {
+            out[f * channels + c] = planes.get(c).and_then(|p| p.get(f)).copied().unwrap_or(0.0);
+        }
+    }
+}
+
+/// Re-interleave an interleaved `src_channels`-wide buffer into a
+/// `dst_channels`-wide `out`: per frame copy the first `min(src,dst)` channels,
+/// zero-pad extra destination channels, drop extra source channels.
+fn reinterleave(
+    src: &[f32],
+    src_channels: usize,
+    dst_channels: usize,
+    frames: usize,
+    out: &mut [f32],
+) {
+    for f in 0..frames {
+        for c in 0..dst_channels {
+            out[f * dst_channels + c] = if c < src_channels {
+                src.get(f * src_channels + c).copied().unwrap_or(0.0)
+            } else {
+                0.0
+            };
+        }
+    }
 }
 
 /// Read the aggregate device's INPUT-scope `StreamFormat` so the `IOProc` knows
@@ -362,4 +391,49 @@ fn query_input_format(device_id: AudioObjectID) -> Result<AudioStreamBasicDescri
         ));
     }
     Ok(asbd)
+}
+
+#[cfg(test)]
+mod assembly_tests {
+    use super::{interleave_planes, reinterleave};
+
+    #[test]
+    fn interleave_planes_6ch() {
+        // 2 frames, 6 channels: plane c holds [c*10, c*10+1].
+        let planes_data: Vec<Vec<f32>> = (0..6)
+            .map(|c| vec![(c * 10) as f32, (c * 10 + 1) as f32])
+            .collect();
+        let planes: Vec<&[f32]> = planes_data.iter().map(Vec::as_slice).collect();
+        let mut out = vec![0.0f32; 2 * 6];
+        interleave_planes(&planes, 2, 6, &mut out);
+        assert_eq!(&out[0..6], &[0.0, 10.0, 20.0, 30.0, 40.0, 50.0]);
+        assert_eq!(&out[6..12], &[1.0, 11.0, 21.0, 31.0, 41.0, 51.0]);
+    }
+
+    #[test]
+    fn interleave_planes_missing_plane_is_silent() {
+        let p0 = [1.0f32, 2.0];
+        let planes: Vec<&[f32]> = vec![&p0]; // only 1 plane for a 4ch request
+        let mut out = vec![9.0f32; 2 * 4];
+        interleave_planes(&planes, 2, 4, &mut out);
+        assert_eq!(&out[0..4], &[1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(&out[4..8], &[2.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn reinterleave_equal_width_is_copy() {
+        let src = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]; // 2 frames * 3ch
+        let mut out = vec![0.0f32; 6];
+        reinterleave(&src, 3, 3, 2, &mut out);
+        assert_eq!(out, src);
+    }
+
+    #[test]
+    fn reinterleave_narrow_src_zero_pads() {
+        let src = [1.0f32, 2.0, 3.0, 4.0]; // 2 frames * 2ch
+        let mut out = vec![9.0f32; 2 * 4]; // dst 4ch
+        reinterleave(&src, 2, 4, 2, &mut out);
+        assert_eq!(&out[0..4], &[1.0, 2.0, 0.0, 0.0]);
+        assert_eq!(&out[4..8], &[3.0, 4.0, 0.0, 0.0]);
+    }
 }

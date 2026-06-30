@@ -75,10 +75,11 @@ pub struct SystemAudioTap {
 }
 
 impl SystemAudioTap {
-    /// Create the tap + aggregate device. Returns Err if we lack permission,
-    /// if the API is unavailable (pre-14.2 macOS), or if Core Audio rejects
-    /// our description.
-    pub fn create() -> Result<Self> {
+    /// Create the tap + aggregate device, bound to the output device `device_uid`
+    /// so the tap inherits that device's channel layout and sample rate. Returns
+    /// Err if we lack permission, if the API is unavailable (pre-14.2 macOS), or
+    /// if Core Audio rejects our description.
+    pub fn create(device_uid: &str) -> Result<Self> {
         // macOS gates Process Tap behind kTCCServiceAudioCapture. Apple
         // doesn't expose a public API to prompt for it — without an
         // explicit prompt the system silently returns zero-filled buffers.
@@ -110,34 +111,32 @@ impl SystemAudioTap {
         }
         let exclude_refs: Vec<&NSNumber> = excludes.iter().map(Retained::as_ref).collect();
         let exclude_arr: Retained<NSArray<NSNumber>> = NSArray::from_slice(&exclude_refs);
-        // SAFETY: CATapDescription's allocator/init pair are a normal
-        // Objective-C alloc/init sequence. With Exclusive=YES (set below)
-        // and the exclude list containing our own process, the tap covers
-        // every process EXCEPT us.
+        // Device-bound, non-mixdown tap: bind to the output device's stream so
+        // the tap inherits its full channel layout AND sample rate, instead of
+        // the stereo / 48 kHz system-mix mixdown that the global-tap initializers
+        // force. "Excluding processes" keeps the global-minus-self semantics, so
+        // the exclude list (our own process) still prevents the feedback loop.
+        // Stream index 0 — "the format of the tap matches the format of this
+        // stream" (Apple). SAFETY: a normal Objective-C alloc/init sequence;
+        // exclude_arr / uid_ns outlive the call.
+        let uid_ns = NSString::from_str(device_uid);
         let desc: Retained<CATapDescription> = unsafe {
-            CATapDescription::initStereoGlobalTapButExcludeProcesses(
+            CATapDescription::initExcludingProcesses_andDeviceUID_withStream(
                 CATapDescription::alloc(),
                 &exclude_arr,
+                &uid_ns,
+                0,
             )
         };
         unsafe {
             desc.setName(&NSString::from_str(TAP_DEVICE_NAME));
-            // private = true: the tap is invisible to other Core Audio
-            // clients (e.g. Audio MIDI Setup) so it doesn't pollute the UI.
+            // private = true: the tap is invisible to other Core Audio clients
+            // (e.g. Audio MIDI Setup) so it doesn't pollute the UI.
             desc.setPrivate(true);
-            // Muted: audio is captured by the tap and NOT routed to
-            // hardware. We replay the DSP-processed version via the
-            // cpal output stream so the user hears only the processed
-            // signal. Unmuted caused audible doubling (original + DSP
-            // both reaching the speakers).
+            // Muted: the tap captures the system audio and we re-render the
+            // DSP-processed signal via the output stream, so the original must
+            // not also reach the speakers (that caused audible doubling).
             desc.setMuteBehavior(CATapMuteBehavior::Muted);
-            // CRITICAL: Exclusive=YES means "tap every process EXCEPT
-            // those in the list". With an empty list this means "tap all
-            // processes". Exclusive=NO with empty list = "tap nothing"
-            // (silent buffers — the bug we hit). sudara's known-working
-            // CoreAudio Tap example uses Exclusive=YES with empty list
-            // for a global tap.
-            desc.setExclusive(true);
         }
 
         let mut tap_id: AudioObjectID = 0;
@@ -469,14 +468,10 @@ fn translate_pid_to_process_object(pid: i32) -> Option<u32> {
     Some(object_id)
 }
 
-/// Query the system's current default output device and return its UID
-/// (e.g. `"BuiltInSpeakerDevice"`). Used to give the tap-only aggregate a
-/// stable clock source. Currently unused: tests showed the aggregate
-/// produces silent buffers when a main sub-device is set, so we leave
-/// it out and let the tap clock itself. Kept here so we can re-enable
-/// it if the macOS behaviour changes.
-#[allow(dead_code)]
-fn default_output_uid() -> Result<CFRetained<CFString>> {
+/// The system's current default output device UID (e.g. `"BuiltInSpeakerDevice"`,
+/// `"BlackHole16ch_UID"`). The tap binds to this device so it inherits the
+/// device's channel layout and sample rate.
+pub fn default_output_uid() -> Result<String> {
     // Resolve the default output device's AudioObjectID.
     let mut addr = AudioObjectPropertyAddress {
         mSelector: kAudioHardwarePropertyDefaultOutputDevice,
@@ -533,7 +528,8 @@ fn default_output_uid() -> Result<CFRetained<CFString>> {
     }
     let nn = NonNull::new(uid_ptr.cast_mut()).unwrap();
     // SAFETY: HAL hands us a +1 retained CFString for this property.
-    Ok(unsafe { CFRetained::from_raw(nn) })
+    let cf = unsafe { CFRetained::from_raw(nn) };
+    Ok(cf.to_string())
 }
 
 /// Build the `CFDictionary` that describes the aggregate device wrapping the
