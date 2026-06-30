@@ -497,12 +497,12 @@ fn build_aggregate_dict(
         dict_set(
             &dict,
             CFRetained::as_ptr(&priv_k).as_ptr() as *const c_void,
-            (priv_true as *const _).cast::<c_void>(),
+            std::ptr::from_ref(priv_true).cast::<c_void>(),
         );
         dict_set(
             &dict,
             CFRetained::as_ptr(&stacked_k).as_ptr() as *const c_void,
-            (priv_false as *const _).cast::<c_void>(),
+            std::ptr::from_ref(priv_false).cast::<c_void>(),
         );
         dict_set(
             &dict,
@@ -516,7 +516,7 @@ fn build_aggregate_dict(
         dict_set(
             &dict,
             CFRetained::as_ptr(&autostart_k).as_ptr() as *const c_void,
-            (priv_false as *const _).cast::<c_void>(),
+            std::ptr::from_ref(priv_false).cast::<c_void>(),
         );
         if let Some(uid) = main_sub_uid {
             dict_set(
