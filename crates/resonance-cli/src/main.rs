@@ -122,6 +122,15 @@ enum Sub {
         #[command(subcommand)]
         action: Option<ChannelAction>,
     },
+    /// List per-application audio streams the daemon can control
+    Apps,
+    /// Control one application's audio, e.g. `resonance app firefox.42 volume 150`
+    App {
+        /// Application key as shown by `resonance apps`
+        key: String,
+        #[command(subcommand)]
+        action: AppAction,
+    },
     /// Send a raw shutdown signal to the daemon
     Shutdown,
     /// Manage the resonanced user service (start/stop/autostart). Backed by
@@ -150,6 +159,14 @@ enum ChannelAction {
     /// `status`); `channels` is a comma list of indices or names (e.g. `0,1`,
     /// `FL,FR`), or `all`.
     Band { index: usize, channels: String },
+}
+
+#[derive(Subcommand)]
+enum AppAction {
+    /// Set volume as a percentage, 0–400 (100 = unity; >100 boosts where supported)
+    Volume { percent: u16 },
+    /// Mute or unmute: on | off
+    Mute { state: String },
 }
 
 #[derive(Subcommand)]
@@ -230,6 +247,15 @@ fn main() -> Result<()> {
         return run_channel(action.as_ref());
     }
 
+    // `apps` reuses GetState but renders the per-app list; `app …` maps to a
+    // direct per-app control command.
+    if let Sub::Apps = sub {
+        return run_apps();
+    }
+    if let Sub::App { key, action } = &sub {
+        return run_app(key, action);
+    }
+
     let cmd = to_ipc_command(sub)?;
     let response = send(cmd)?;
     print_response(response);
@@ -301,7 +327,12 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
         Sub::Shutdown => Ok(Command::Shutdown),
         // `Channel` is handled in `run_channel` (needs a state fetch); the others
         // are handled in `main` before this point.
-        Sub::Channel { .. } | Sub::Daemon { .. } | Sub::Devices | Sub::Completions { .. } => {
+        Sub::Channel { .. }
+        | Sub::Daemon { .. }
+        | Sub::Devices
+        | Sub::Apps
+        | Sub::App { .. }
+        | Sub::Completions { .. } => {
             unreachable!()
         }
     }
@@ -347,6 +378,72 @@ fn run_channel(action: Option<&ChannelAction>) -> Result<()> {
             })?);
             Ok(())
         }
+    }
+}
+
+/// `resonance apps`: fetch state and render the per-application stream list.
+fn run_apps() -> Result<()> {
+    match send(Command::GetState)? {
+        Response::State(s) => {
+            print_apps(&Paint::auto(), &s.apps);
+            Ok(())
+        }
+        other => {
+            print_response(other);
+            Ok(())
+        }
+    }
+}
+
+/// `resonance app <key> volume|mute …`: map to a per-app control command.
+fn run_app(key: &str, action: &AppAction) -> Result<()> {
+    let cmd = match action {
+        AppAction::Volume { percent } => {
+            if *percent > 400 {
+                bail!("volume must be 0–400, got {percent}");
+            }
+            Command::SetAppVolume {
+                key: key.to_string(),
+                volume: f64::from(*percent) / 100.0,
+            }
+        }
+        AppAction::Mute { state } => Command::SetAppMute {
+            key: key.to_string(),
+            muted: parse_bool(state)?,
+        },
+    };
+    print_response(send(cmd)?);
+    Ok(())
+}
+
+fn print_apps(p: &Paint, apps: &[resonance_ipc::AppStream]) {
+    println!("{}", p.bold("application streams"));
+    if apps.is_empty() {
+        println!(
+            "  {}",
+            p.dim("(no per-app streams reported — backend may not support it yet)")
+        );
+        return;
+    }
+    for app in apps {
+        let marker = if app.active {
+            p.green("●")
+        } else {
+            p.dim("○")
+        };
+        let vol = format!("{:>4.0}%", app.volume * 100.0);
+        let vol = if app.muted {
+            p.red("muted")
+        } else {
+            p.cyan(&vol)
+        };
+        // Friendly name first; key dimmed so it's usable in `resonance app <key>`.
+        println!(
+            "  {marker} {}  {}  {}",
+            p.bold(&app.display_name),
+            vol,
+            p.dim(&app.key)
+        );
     }
 }
 
