@@ -329,9 +329,10 @@ async fn main() -> Result<()> {
             sinks_tx,
             meters,
         );
-        // Per-app control on Windows is wired in Phase 3 (WASAPI sessions);
-        // until then the live app list stays empty and control is a no-op.
-        let _ = (apps_tx, app_ctl_rx);
+        // Per-app control plane: enumerate WASAPI sessions + apply volume/mute
+        // on dedicated COM threads. The enumeration thread feeds `apps_tx` →
+        // `spawn_apps_task` → shared state, like the audio backends do.
+        audio::win_apps::spawn_app_tasks(apps_tx, app_ctl_rx);
         init_windows_control_plane(&shared);
     }
 

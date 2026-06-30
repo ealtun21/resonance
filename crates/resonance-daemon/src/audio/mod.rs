@@ -74,6 +74,8 @@ use coreaudio as backend;
 // (see `main.rs`). Only the MMDevice helpers + the loopback *measurement*
 // diagnostic live here.
 #[cfg(target_os = "windows")]
+pub(crate) mod win_apps;
+#[cfg(target_os = "windows")]
 pub(crate) mod win_devices;
 #[cfg(target_os = "windows")]
 mod win_measure;

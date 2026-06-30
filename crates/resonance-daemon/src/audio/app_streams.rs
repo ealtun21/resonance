@@ -24,6 +24,29 @@ fn basename(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
+/// Extract an executable basename from a WASAPI audio-session instance
+/// identifier, e.g.
+/// `{0.0.0.0}.{guid}|\Device\HarddiskVolume3\Program Files\app\app.exe%b{guid}`
+/// → `app.exe`. Returns `None` when no path-like component is present.
+///
+/// Used on Windows to label sessions; kept here (pure, no Win32 types) so it is
+/// unit-tested in `make check` on every platform.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[must_use]
+pub fn exe_basename_from_session_id(instance_id: &str) -> Option<String> {
+    // The device path follows the '|' separator; without one there is no path
+    // section (e.g. a bare session guid), so there's no exe to extract. The
+    // trailing "%b{guid}" after the path is metadata.
+    let (_, tail) = instance_id.rsplit_once('|')?;
+    let path = tail.split("%b").next().unwrap_or(tail);
+    let base = basename(path);
+    if base.is_empty() || !base.contains('.') {
+        None
+    } else {
+        Some(base.to_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -49,5 +72,20 @@ mod tests {
     #[test]
     fn empty_binary_falls_back_to_name() {
         assert_eq!(app_key(Some(""), "fallback", 9), "fallback.9");
+    }
+
+    #[test]
+    fn exe_basename_parses_session_instance_id() {
+        let id = r"{0.0.0.00000000}.{a-b}|\Device\HarddiskVolume3\Program Files\Mozilla Firefox\firefox.exe%b{c-d}";
+        assert_eq!(
+            exe_basename_from_session_id(id),
+            Some("firefox.exe".to_owned())
+        );
+    }
+
+    #[test]
+    fn exe_basename_rejects_non_path_ids() {
+        assert_eq!(exe_basename_from_session_id(""), None);
+        assert_eq!(exe_basename_from_session_id("{0.0.0}.{guid}"), None);
     }
 }
