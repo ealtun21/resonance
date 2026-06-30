@@ -240,8 +240,7 @@ impl SystemAudioTap {
         for (key, proc_obj) in apps {
             // Include-list mixdown tap: captures ONLY this process object.
             let include = NSNumber::new_u32(*proc_obj);
-            let include_arr: Retained<NSArray<NSNumber>> =
-                NSArray::from_slice(&[include.as_ref()]);
+            let include_arr: Retained<NSArray<NSNumber>> = NSArray::from_slice(&[include.as_ref()]);
             // SAFETY: normal ObjC alloc/init; include_arr outlives the call.
             let desc: Retained<CATapDescription> = unsafe {
                 CATapDescription::initStereoMixdownOfProcesses(

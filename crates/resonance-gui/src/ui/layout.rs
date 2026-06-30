@@ -216,7 +216,20 @@ impl GuiApp {
             .frame(egui::Frame::NONE)
             .show_separator_line(false)
             .show_inside(ui, |ui| {
-                padded_scroll(ui, "side", |ui| self.devices_profiles(ui));
+                padded_scroll(ui, "side", |ui| {
+                    // Applications (per-app volume) sits at the top of the right
+                    // column when the backend reports app streams — adjusted more
+                    // often than the device→profile mapping below it.
+                    if let Some(s) = state {
+                        if !s.apps.is_empty() {
+                            section_hint(ui, "Applications", "per-app volume", |ui| {
+                                self.apps_section(ui, s);
+                            });
+                            ui.add_space(12.0);
+                        }
+                    }
+                    self.devices_profiles(ui);
+                });
             });
         // The centre column IS the bands card: a card-styled CentralPanel (so it
         // fills the column height), with the gutter as its outer margin. Its body
@@ -248,6 +261,13 @@ impl GuiApp {
                         self.effects_section(ui, s);
                     }
                 });
+                if let Some(s) = state {
+                    if !s.apps.is_empty() {
+                        accordion(ui, "acc_apps_v1", "Applications", false, |ui| {
+                            self.apps_section(ui, s);
+                        });
+                    }
+                }
                 accordion(ui, "acc_bands_v3", "EQ bands", true, |ui| {
                     if let Some(s) = state {
                         self.bands_section(ui, s);
