@@ -116,12 +116,13 @@ fn read_cfstring(obj: AudioObjectID, selector: AudioObjectPropertySelector) -> O
     Some(cf.to_string())
 }
 
-/// Enumerate applications currently producing output audio. Skips processes
-/// with no bundle id and our own daemon. Sorted by display name for a stable
-/// UI order. (9a: running-output only; idle apps are a later refinement.)
+/// `(key, process_object_id)` for each application currently producing output
+/// audio, skipping processes with no bundle id and our own daemon. The `key` is
+/// the bundle id (stable across runs); the process object id is what the per-app
+/// mixer taps. (9a: running-output only; idle apps are a later refinement.)
 #[must_use]
-pub fn enumerate() -> Vec<AppStream> {
-    let mut apps: Vec<AppStream> = process_object_list()
+pub fn enumerate_targets() -> Vec<(String, u32)> {
+    process_object_list()
         .into_iter()
         .filter_map(|obj| {
             let bundle = read_cfstring(obj, kAudioProcessPropertyBundleID)?;
@@ -129,18 +130,27 @@ pub fn enumerate() -> Vec<AppStream> {
                 return None;
             }
             let running = read_scalar::<u32>(obj, kAudioProcessPropertyIsRunningOutput)? != 0;
-            if !running {
-                return None;
-            }
+            running.then_some((bundle, obj))
+        })
+        .collect()
+}
+
+/// Enumerate applications currently producing output audio as [`AppStream`]s.
+/// Sorted by display name for a stable UI order.
+#[must_use]
+pub fn enumerate() -> Vec<AppStream> {
+    let mut apps: Vec<AppStream> = enumerate_targets()
+        .into_iter()
+        .map(|(bundle, obj)| {
             let pid = read_scalar::<i32>(obj, kAudioProcessPropertyPID).unwrap_or(-1);
-            Some(AppStream {
-                key: bundle.clone(),
+            AppStream {
                 display_name: friendly_name_from_bundle(&bundle),
+                key: bundle,
                 pid: u32::try_from(pid).ok(),
                 volume: 1.0,
                 muted: false,
                 active: true,
-            })
+            }
         })
         .collect();
     apps.sort_by(|a, b| a.display_name.cmp(&b.display_name).then(a.key.cmp(&b.key)));

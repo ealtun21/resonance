@@ -122,7 +122,7 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
     // the gains to audio; until then it is display-only.
     let app_gains: Arc<Mutex<HashMap<String, (f64, bool)>>> = Arc::new(Mutex::new(HashMap::new()));
     spawn_app_control(app_ctl_rx, Arc::clone(&app_gains));
-    spawn_app_enumeration(apps_tx, app_gains);
+    spawn_app_enumeration(apps_tx, Arc::clone(&app_gains));
     // Shared chain + RT state lives in an Arc<Mutex<…>>. The output callback
     // locks for the duration of each block — bounded, brief, never contended
     // against another high-priority thread. Reconnect rebuilds the streams but
@@ -142,6 +142,61 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
             let mut preferred_output: Option<String> = None;
             let mut last_active_output: Option<String> = None;
             let mut backoff = Duration::from_millis(200);
+
+            // ── Per-application mixer mode (opt-in: RESONANCE_PERAPP) ─────────
+            // Tap every audio-producing app individually (muted), gain + sum to
+            // stereo, then run the chain. Opt-in so the default device-bound tap
+            // (multichannel, system-wide EQ) is never regressed.
+            if std::env::var_os("RESONANCE_PERAPP").is_some() {
+                info!("CoreAudio: per-application mixer mode (RESONANCE_PERAPP)");
+                loop {
+                    while let Ok(name) = route_rx.try_recv() {
+                        preferred_output = if name.is_empty() { None } else { Some(name) };
+                    }
+                    let targets = super::mac_apps::enumerate_targets();
+                    if targets.is_empty() {
+                        // Nothing is producing audio — nothing to tap/mix yet.
+                        thread::sleep(Duration::from_millis(500));
+                        continue;
+                    }
+                    let started = Instant::now();
+                    match SystemAudioTap::create_app_mixer(&targets) {
+                        Ok((tap, keys)) => {
+                            let pref = preferred_output.clone();
+                            match run_streams(
+                                &shared,
+                                pref.as_deref(),
+                                &output_tx,
+                                &sinks_tx,
+                                &mut last_active_output,
+                                &route_rx,
+                                &tap,
+                                Some((keys, Arc::clone(&app_gains))),
+                            ) {
+                                Ok(StreamExit::RouteChanged(new_pref)) => {
+                                    preferred_output =
+                                        if new_pref.is_empty() { None } else { Some(new_pref) };
+                                    backoff = Duration::from_millis(50);
+                                }
+                                Ok(StreamExit::Ended) => {}
+                                Err(e) => warn!("CoreAudio per-app: {e:#}; retrying…"),
+                            }
+                        }
+                        Err(e) => {
+                            warn!("CoreAudio per-app mixer tap failed: {e:#}; retrying…");
+                            thread::sleep(backoff);
+                            backoff = (backoff * 2).min(Duration::from_secs(5));
+                            continue;
+                        }
+                    }
+                    if started.elapsed() > Duration::from_secs(10) {
+                        backoff = Duration::from_millis(200);
+                    }
+                    thread::sleep(backoff);
+                    backoff = (backoff * 2).min(Duration::from_secs(5));
+                }
+            }
+
             // The tap binds to the current default output device so it inherits
             // that device's channel layout + sample rate. It is kept alive across
             // stream reconnects and recreated only when the bound device changes,
@@ -205,6 +260,7 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
                     &mut last_active_output,
                     &route_rx,
                     tap.as_ref().unwrap(),
+                    None,
                 ) {
                     Ok(StreamExit::RouteChanged(new_pref)) => {
                         preferred_output = if new_pref.is_empty() {
@@ -252,6 +308,16 @@ enum StreamExit {
     Ended,
 }
 
+/// Per-app mixer wiring for the output callback (per-app mode only). `keys` maps
+/// each aggregate tap-channel-pair to its application key, in tap order — pair
+/// `i` (input channels `[2i, 2i+1]`) is `keys[i]`. The callback gains each pair
+/// by that app's volume (0 when muted) and sums to stereo before the chain.
+struct MixerSpec {
+    keys: Vec<String>,
+    gains: Arc<Mutex<HashMap<String, (f64, bool)>>>,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_streams(
     shared: &Arc<Mutex<SharedRt>>,
     preferred: Option<&str>,
@@ -260,7 +326,12 @@ fn run_streams(
     last_active_output: &mut Option<String>,
     route_rx: &std_mpsc::Receiver<String>,
     tap: &SystemAudioTap,
+    mixer: Option<(Vec<String>, Arc<Mutex<HashMap<String, (f64, bool)>>>)>,
 ) -> Result<StreamExit> {
+    // In per-app mode the ring carries `2 * keys.len()` channels (one stereo pair
+    // per app) which the callback folds to a stereo mix, so the chain processes
+    // stereo. Keep the app key list for live app-set churn detection below.
+    let churn_keys: Option<Vec<String>> = mixer.as_ref().map(|(k, _)| k.clone());
     let tap_aggregate_id = tap.aggregate_id();
     let tap_native_rate = tap.native_rate();
     let host = cpal::default_host();
@@ -323,11 +394,14 @@ fn run_streams(
         // chain processes every channel (with per-channel EQ) instead of a forced
         // stereo mixdown.
         guard.chain.rebind_sample_rate(f64::from(sample_rate));
-        guard.chain.set_channels(capture_channels);
+        // Per-app mixer folds the tap pairs to stereo before the chain, so the
+        // chain runs at stereo width there; otherwise the device's full width.
+        let chain_channels = if mixer.is_some() { 2 } else { capture_channels };
+        guard.chain.set_channels(chain_channels);
         // Publish the live capture rate + width for `status` (and whether the
         // IOProc is resampling — it isn't, once the tap is bound to the device).
         guard.meters.set_capture_rate(hal_input.capture_rate);
-        guard.meters.set_channels(capture_channels);
+        guard.meters.set_channels(chain_channels);
     }
     let input_callbacks = Arc::clone(&hal_input.callback_count);
     let input_nonzero = Arc::clone(&hal_input.nonzero_blocks);
@@ -340,6 +414,7 @@ fn run_streams(
         ring_rx,
         Arc::clone(shared),
         Arc::clone(&stream_err),
+        mixer.map(|(keys, gains)| MixerSpec { keys, gains }),
     )
     .with_context(|| "build output stream")?;
     output_stream.play().with_context(|| "play output stream")?;
@@ -406,11 +481,28 @@ fn run_streams(
                     return Ok(StreamExit::Ended);
                 }
             }
+            // Per-app mode: rebuild the mixer when the set of audio-producing
+            // apps changes (an app started or stopped playing), so taps track
+            // the live set. Compared order-insensitively against the live keys.
+            if let Some(keys) = &churn_keys {
+                let mut cur: Vec<String> = super::mac_apps::enumerate_targets()
+                    .into_iter()
+                    .map(|(k, _)| k)
+                    .collect();
+                cur.sort();
+                let mut have = keys.clone();
+                have.sort();
+                if cur != have {
+                    info!("CoreAudio per-app: app set changed; rebuilding mixer");
+                    return Ok(StreamExit::Ended);
+                }
+            }
         }
         thread::sleep(Duration::from_millis(50));
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_output_stream(
     device: &Device,
     cfg: &StreamConfig,
@@ -419,6 +511,7 @@ fn build_output_stream(
     mut ring_rx: rtrb::Consumer<f32>,
     shared: Arc<Mutex<SharedRt>>,
     err_flag: Arc<AtomicBool>,
+    mixer: Option<MixerSpec>,
 ) -> Result<cpal::Stream> {
     let err_cb = {
         let e = Arc::clone(&err_flag);
@@ -432,6 +525,9 @@ fn build_output_stream(
     // Pre-allocate a per-callback work buffer (ring-channel-wide) — avoids alloc
     // on the audio thread. Grown if a callback ever asks for more frames.
     let mut work: Vec<f32> = Vec::with_capacity(8192 * rc);
+    // Per-app mixer: stereo scratch the per-app pairs are gained+summed into,
+    // becoming the chain input. Unused (stays empty) in the normal pass-through.
+    let mut mix: Vec<f32> = Vec::new();
 
     let data_cb = move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
         let frames = data.len() / dc;
@@ -458,6 +554,48 @@ fn build_output_stream(
             *s = 0.0;
         }
 
+        // ── Per-app fold → chain input ─────────────────────────────────────
+        // Normal: the chain processes the ring buffer (device width) directly.
+        // Per-app mixer: each app occupies channel pair `[2i,2i+1]`; gain it by
+        // the app's volume (0 when muted) and sum to stereo — that sum is the
+        // chain input, so the chain runs at stereo width. Summing all apps
+        // reproduces the system mix, preserving system-wide EQ.
+        let (chain_buf, cc): (&mut [f32], usize) = match &mixer {
+            Some(m) => {
+                let pairs = (rc / 2).min(m.keys.len());
+                let cn = frames * 2;
+                if mix.len() < cn {
+                    mix.resize(cn, 0.0);
+                }
+                let mixb = &mut mix[..cn];
+                let gains: Vec<f32> = {
+                    let gmap = m.gains.lock().unwrap();
+                    m.keys
+                        .iter()
+                        .map(|k| match gmap.get(k).copied() {
+                            Some((_, true)) => 0.0,
+                            Some((g, false)) => g as f32,
+                            None => 1.0,
+                        })
+                        .collect()
+                };
+                for f in 0..frames {
+                    let base = f * rc;
+                    let mut l = 0.0f32;
+                    let mut r = 0.0f32;
+                    for (i, &g) in gains.iter().enumerate().take(pairs) {
+                        l += buf[base + 2 * i] * g;
+                        r += buf[base + 2 * i + 1] * g;
+                    }
+                    mixb[f * 2] = l;
+                    mixb[f * 2 + 1] = r;
+                }
+                (mixb, 2)
+            }
+            None => (buf, rc),
+        };
+        let cneeded = frames * cc;
+
         // ── DSP ───────────────────────────────────────────────────────────
         let mut s = shared.lock().unwrap();
 
@@ -469,10 +607,10 @@ fn build_output_stream(
         // output device rate at stream setup).
         s.meters.set_sample_rate(s.chain.sample_rate);
 
-        let (in_peak, in_rms) = peak_rms_f32(buf);
+        let (in_peak, in_rms) = peak_rms_f32(chain_buf);
 
         if s.chain.enabled {
-            let need_f64 = needed;
+            let need_f64 = cneeded;
             if s.scratch.len() < need_f64 {
                 s.scratch.resize(need_f64, 0.0);
             }
@@ -480,7 +618,7 @@ fn build_output_stream(
                 s.routed.resize(need_f64, 0.0);
             }
             // Promote to f64, process, demote.
-            for (dst, src) in s.scratch[..need_f64].iter_mut().zip(buf.iter()) {
+            for (dst, src) in s.scratch[..need_f64].iter_mut().zip(chain_buf.iter()) {
                 *dst = f64::from(*src);
             }
             let t0 = Instant::now();
@@ -505,7 +643,7 @@ fn build_output_stream(
                     &scratch[..need_f64]
                 };
                 let pr = peak_rms(out);
-                for (dst, src) in buf.iter_mut().zip(out.iter()) {
+                for (dst, src) in chain_buf.iter_mut().zip(out.iter()) {
                     *dst = *src as f32;
                 }
                 pr
@@ -541,21 +679,20 @@ fn build_output_stream(
             });
         }
 
-        // Feed the spectrum ring from the OUTPUT (`buf`): per-frame mono average
-        // across the ring channels (any width). Outside the `enabled` check so
-        // the analyzer keeps tracking live audio when power is off (`buf` already
-        // holds whatever we render) instead of freezing on the last frame.
+        // Feed the spectrum ring from the OUTPUT (`chain_buf`): per-frame mono
+        // average across its channels. Outside the `enabled` check so the
+        // analyzer keeps tracking live audio when power is off.
         let cap = s.spectrum_tx.slots();
         let push_n = frames.min(cap);
         for i in 0..push_n {
-            let base = i * rc;
-            let sum: f32 = buf[base..base + rc].iter().sum();
-            let _ = s.spectrum_tx.push(sum / rc as f32);
+            let base = i * cc;
+            let sum: f32 = chain_buf[base..base + cc].iter().sum();
+            let _ = s.spectrum_tx.push(sum / cc as f32);
         }
         drop(s);
 
         // ── Render to output ──────────────────────────────────────────────
-        render_to_output(buf, data, rc, dc);
+        render_to_output(chain_buf, data, cc, dc);
 
         let _ = err_flag.load(Ordering::Relaxed);
     };
