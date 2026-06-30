@@ -57,14 +57,22 @@ use objc2_core_foundation::{
 use objc2_foundation::{NSArray, NSNumber, NSString};
 use std::ffi::{CStr, c_void};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{info, warn};
 
 /// Name the aggregate device shows up as in cpal/Audio MIDI Setup. cpal
 /// enumerates devices by name; we look it up by exactly this string.
 pub const TAP_DEVICE_NAME: &str = "Resonance EQ Tap";
-/// Stable UID for the aggregate device. UID is what `AudioMIDI` / cpal use
-/// to identify devices across reboots; keep ours unique to the app.
+/// UID prefix for the aggregate device. Each aggregate gets a per-process,
+/// per-creation-unique UID built from this (see `AGGREGATE_SEQ`): recreating the
+/// tap on a device/rate change must not collide with the old aggregate's UID
+/// before it is destroyed (`AudioHardwareCreateAggregateDevice` returns 'nope'
+/// on a duplicate UID).
 const AGGREGATE_DEVICE_UID: &str = "com.ealtun21.resonance.tap-aggregate";
+
+/// Monotonic counter making each created aggregate's UID unique within the
+/// process (combined with the pid).
+static AGGREGATE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Owns the Core Audio objects backing the system tap. Drops them on scope
 /// exit so the system goes back to normal routing even on panic.
@@ -532,6 +540,37 @@ pub fn default_output_uid() -> Result<String> {
     Ok(cf.to_string())
 }
 
+/// The default output device's current nominal sample rate, or None on failure.
+/// Lets the backend recreate the device-bound tap when the device's rate changes
+/// (Audio MIDI Setup, BT codec renegotiation): the tap inherits the device rate
+/// at creation, so a fresh tap keeps capture == output and the resampler
+/// bypassed instead of converting a stale tap rate.
+pub fn default_output_rate() -> Option<f64> {
+    let mut addr = AudioObjectPropertyAddress {
+        mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+    let mut dev_id: AudioObjectID = 0;
+    let mut size = std::mem::size_of::<AudioObjectID>() as u32;
+    // SAFETY: stack pointers valid for the call; the selector returns one
+    // AudioObjectID into dev_id.
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            1, // kAudioObjectSystemObject
+            NonNull::new(std::ptr::from_mut(&mut addr)).unwrap(),
+            0,
+            std::ptr::null(),
+            NonNull::new(std::ptr::from_mut(&mut size)).unwrap(),
+            NonNull::new(std::ptr::from_mut(&mut dev_id).cast::<c_void>()).unwrap(),
+        )
+    };
+    if status != 0 || dev_id == 0 {
+        return None;
+    }
+    read_nominal_rate(dev_id)
+}
+
 /// Build the `CFDictionary` that describes the aggregate device wrapping the
 /// tap. Keys come from `<CoreAudio/AudioHardware.h>` — we use the constants
 /// objc2-core-audio re-exports. `main_sub_uid` is the UID of an existing
@@ -577,7 +616,11 @@ fn build_aggregate_dict(
     let tap_list: CFRetained<CFArray<CFType>> = CFArray::from_objects(&[sub_as_cf]);
 
     let agg_name = CFString::from_str(TAP_DEVICE_NAME);
-    let agg_uid = CFString::from_str(AGGREGATE_DEVICE_UID);
+    // Per-process, per-creation-unique UID so recreating the tap never collides
+    // with the not-yet-destroyed old aggregate.
+    let pid = unsafe { libc::getpid() };
+    let seq = AGGREGATE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let agg_uid = CFString::from_str(&format!("{AGGREGATE_DEVICE_UID}.{pid}.{seq}"));
     let priv_true = unsafe { kCFBooleanTrue }.expect("kCFBooleanTrue exists");
     let priv_false = unsafe { kCFBooleanFalse }.expect("kCFBooleanFalse exists");
 
