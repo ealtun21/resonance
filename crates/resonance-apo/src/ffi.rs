@@ -705,6 +705,91 @@ mod hires_harness {
     }
 
     #[test]
+    fn apo_per_channel_eq_targets_only_masked_channel_6ch() {
+        use resonance_dsp::channel::ChannelMask;
+        let rate = 48_000.0;
+        let channels = 6usize;
+        // +12 dB @ 1 kHz, masked to channel 3 only — exercises the APO's
+        // N-channel (>2ch) per-channel path the macOS/PipeWire backends feed.
+        let band = ApoFilter::builder()
+            .filter_type(FilterType::Peaking)
+            .freq(1000.0)
+            .gain_db(12.0)
+            .q(4.0)
+            .enabled(true)
+            .channels(channels)
+            .sample_rate(rate)
+            .channel_mask(ChannelMask::single(3))
+            .build()
+            .unwrap();
+        let chain = ProcessorChain::builder()
+            .channels(channels)
+            .sample_rate(rate)
+            .add_filter(band)
+            .build();
+        {
+            let mut w = ApoStateWriter::create(&default_state_path()).expect("state writer");
+            w.publish(&chain);
+        }
+
+        let p = resonance_apo_create();
+        assert!(!p.is_null());
+        resonance_apo_lock(p, channels as u32, rate, 1024);
+
+        let frames = (rate * 0.5) as usize;
+        let amp = 0.2f64;
+        let w = 2.0 * PI * 1000.0 / rate;
+        // Identical 1 kHz tone on every channel.
+        let mut buf: Vec<f32> = Vec::with_capacity(frames * channels);
+        for i in 0..frames {
+            let s = (amp * (w * i as f64).sin()) as f32;
+            for _ in 0..channels {
+                buf.push(s);
+            }
+        }
+        let mut off = 0usize;
+        while off < frames {
+            let n = (frames - off).min(1024);
+            resonance_apo_process(
+                p,
+                buf[off * channels..].as_mut_ptr(),
+                n as u32,
+                channels as u32,
+            );
+            off += n;
+        }
+        resonance_apo_unlock(p);
+        resonance_apo_destroy(p);
+
+        let skip = frames / 4;
+        let in_rms = amp / 2f64.sqrt();
+        let chan_gain = |ch: usize| {
+            let ms = (skip..frames)
+                .map(|i| {
+                    let x = f64::from(buf[i * channels + ch]);
+                    x * x
+                })
+                .sum::<f64>()
+                / (frames - skip) as f64;
+            20.0 * (ms.sqrt() / in_rms).log10()
+        };
+        for ch in 0..channels {
+            let g = chan_gain(ch);
+            if ch == 3 {
+                assert!(
+                    (g - 12.0).abs() < 1.5,
+                    "masked channel 3 should boost +12 dB, got {g:.2}"
+                );
+            } else {
+                assert!(
+                    g.abs() < 1.0,
+                    "unmasked channel {ch} should be ~0 dB, got {g:.2}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn apo_routing_swaps_channels() {
         use resonance_dsp::channel::ChannelMatrix;
         let rate = 48_000.0;
