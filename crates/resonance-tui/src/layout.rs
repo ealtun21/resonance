@@ -12,6 +12,8 @@ pub struct Panes {
     pub spectrum: Rect,
     pub effects: Rect,
     pub bands: Rect,
+    /// Per-application volume strip (height 0 when no apps are reported).
+    pub apps: Rect,
     pub footer: Rect,
 }
 
@@ -22,13 +24,17 @@ pub struct Panes {
 /// it takes the lion's share of the height and grows with the window. The
 /// spectrum is a fixed strip that collapses to nothing when `show_spectrum` is
 /// off, handing its rows to the graph.
-pub fn panes(area: Rect, show_spectrum: bool) -> Panes {
+pub fn panes(area: Rect, show_spectrum: bool, show_apps: bool) -> Panes {
     let spectrum_h = if show_spectrum { 13 } else { 0 };
+    // Per-app strip: a fixed bordered row below the controls, collapsing to
+    // nothing when the backend reports no application streams (progressive).
+    let apps_h = if show_apps { 7 } else { 0 };
     let v = Layout::vertical([
         Constraint::Length(1),          // status
         Constraint::Fill(3),            // EQ curve — the hero
         Constraint::Length(spectrum_h), // spectrum (0 = hidden)
         Constraint::Fill(2),            // bands + effects row
+        Constraint::Length(apps_h),     // applications (0 = hidden)
         Constraint::Length(1),          // footer
     ])
     .split(area);
@@ -43,7 +49,8 @@ pub fn panes(area: Rect, show_spectrum: bool) -> Panes {
         spectrum: v[2],
         bands: bottom[0],
         effects: bottom[1],
-        footer: v[4],
+        apps: v[4],
+        footer: v[5],
     }
 }
 

@@ -38,6 +38,9 @@ pub enum Panel {
     /// The interactive FR graph — nodes editable by keyboard (arrows) and mouse
     /// (click-select + drag).
     Graph,
+    /// Per-application volume/mute list (in the Tab cycle only when the daemon
+    /// reports application streams).
+    Apps,
 }
 
 /// An in-progress mouse drag of a band node on the FR graph.
@@ -103,11 +106,15 @@ impl InputMode {
     }
 }
 
+// `app_cursor` mirrors the sibling `effect_cursor`/`band_cursor` naming; the
+// `_cursor` convention is clearer than renaming to dodge the struct-name lint.
+#[allow(clippy::struct_field_names)]
 pub struct App {
     pub state: Option<DaemonState>,
     pub running: bool,
     pub focus: Panel,
     pub effect_cursor: usize,
+    pub app_cursor: usize,
     pub band_cursor: usize,
     pub band_field: BandField,
     pub mode: InputMode,
@@ -176,6 +183,7 @@ impl App {
             running: true,
             focus: Panel::Effects,
             effect_cursor: 0,
+            app_cursor: 0,
             band_cursor: 0,
             band_field: BandField::Gain,
             mode: InputMode::Normal,
@@ -539,8 +547,23 @@ impl App {
                 BandField::Gain => self.band_field = BandField::Q,
                 BandField::Q => self.focus = Panel::Graph,
             },
-            Panel::Graph => self.focus = Panel::Effects,
+            // After the graph, visit Applications when the daemon reports any
+            // (otherwise wrap straight back to Effects).
+            Panel::Graph => {
+                self.focus = if self.has_apps() {
+                    Panel::Apps
+                } else {
+                    Panel::Effects
+                };
+            }
+            Panel::Apps => self.focus = Panel::Effects,
         }
+    }
+
+    /// Whether the daemon currently reports any application streams (drives the
+    /// Applications panel's progressive disclosure + Tab inclusion).
+    pub fn has_apps(&self) -> bool {
+        self.state.as_ref().is_some_and(|s| !s.apps.is_empty())
     }
 
     pub fn cursor_up(&mut self) {
@@ -548,6 +571,11 @@ impl App {
             Panel::Effects => {
                 if self.effect_cursor > 0 {
                     self.effect_cursor -= 1;
+                }
+            }
+            Panel::Apps => {
+                if self.app_cursor > 0 {
+                    self.app_cursor -= 1;
                 }
             }
             Panel::Bands => {
@@ -566,6 +594,15 @@ impl App {
                 let max = 4; // 5 effects
                 if self.effect_cursor < max {
                     self.effect_cursor += 1;
+                }
+            }
+            Panel::Apps => {
+                let max = self
+                    .state
+                    .as_ref()
+                    .map_or(0, |s| s.apps.len().saturating_sub(1));
+                if self.app_cursor < max {
+                    self.app_cursor += 1;
                 }
             }
             Panel::Bands => {
@@ -632,6 +669,27 @@ impl App {
                 });
                 self.refresh_state();
             }
+            Panel::Apps => {
+                // Per-app volume nudge: capture key + current value first so the
+                // immutable `state` borrow ends before `send`/`refresh` (&mut self).
+                let Some((key, cur)) = self
+                    .state
+                    .as_ref()
+                    .and_then(|s| s.apps.get(self.app_cursor))
+                    .map(|a| (a.key.clone(), a.volume))
+                else {
+                    return;
+                };
+                let new_vol = ((cur + delta).clamp(0.0, 1.0) * 100.0).round() / 100.0;
+                if (new_vol - cur).abs() > 0.001 {
+                    self.push_undo();
+                    self.send(Command::SetAppVolume {
+                        key,
+                        volume: new_vol,
+                    });
+                    self.refresh_state();
+                }
+            }
             // Graph uses dedicated 2-axis nudges (gain/freq), not the single
             // active-field `adjust`; handled in the key dispatcher.
             Panel::Graph => {}
@@ -642,7 +700,7 @@ impl App {
 
     /// Resolve a click on the effects column to an effect index.
     fn hit_effect(&self, col: u16, row: u16) -> Option<usize> {
-        let p = crate::layout::panes(self.last_frame, self.prefs.show_spectrum);
+        let p = crate::layout::panes(self.last_frame, self.prefs.show_spectrum, self.has_apps());
         if !crate::layout::hit(p.effects, col, row) {
             return None;
         }
@@ -653,7 +711,7 @@ impl App {
 
     /// Resolve a click on the bands panel to (band index, optional field).
     fn hit_band(&self, col: u16, row: u16) -> Option<(usize, BandHit)> {
-        let p = crate::layout::panes(self.last_frame, self.prefs.show_spectrum);
+        let p = crate::layout::panes(self.last_frame, self.prefs.show_spectrum, self.has_apps());
         if !crate::layout::hit(p.bands, col, row) {
             return None;
         }
@@ -797,6 +855,20 @@ impl App {
                 });
                 self.refresh_state();
             }
+            // Toggle the selected application's mute.
+            Panel::Apps => {
+                let Some((key, muted)) = self
+                    .state
+                    .as_ref()
+                    .and_then(|s| s.apps.get(self.app_cursor))
+                    .map(|a| (a.key.clone(), a.muted))
+                else {
+                    return;
+                };
+                self.push_undo();
+                self.send(Command::SetAppMute { key, muted: !muted });
+                self.refresh_state();
+            }
         }
     }
 
@@ -804,14 +876,14 @@ impl App {
 
     /// The interactive plot rectangle of the EQ curve (None if too small).
     fn eq_plot(&self) -> Option<Rect> {
-        let p = crate::layout::panes(self.last_frame, self.prefs.show_spectrum);
+        let p = crate::layout::panes(self.last_frame, self.prefs.show_spectrum, self.has_apps());
         let plot = crate::layout::eq_plot_area(p.eq);
         (plot.width >= 2 && plot.height >= 2).then_some(plot)
     }
 
     /// True if (col,row) is inside the EQ-curve panel.
     pub fn in_eq_panel(&self, col: u16, row: u16) -> bool {
-        let p = crate::layout::panes(self.last_frame, self.prefs.show_spectrum);
+        let p = crate::layout::panes(self.last_frame, self.prefs.show_spectrum, self.has_apps());
         crate::layout::hit(p.eq, col, row)
     }
 

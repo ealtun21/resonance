@@ -6,7 +6,7 @@ use crate::{
     curve,
     settings::{ConfirmAction, SettingsState, TABS},
 };
-use resonance_ipc::{ChannelMask, RoutingMatrix};
+use resonance_ipc::{AppStream, ChannelMask, RoutingMatrix};
 use resonance_reference::reference::SeriesRole;
 
 use ratatui::{
@@ -24,7 +24,7 @@ use ratatui::{
 const DB_RANGE: f64 = 18.0;
 
 pub fn render(app: &App, frame: &mut Frame) {
-    let p = crate::layout::panes(frame.area(), app.prefs.show_spectrum);
+    let p = crate::layout::panes(frame.area(), app.prefs.show_spectrum, app.has_apps());
 
     render_status(app, frame, p.status);
     render_eq_curve(app, frame, p.eq);
@@ -33,6 +33,9 @@ pub fn render(app: &App, frame: &mut Frame) {
     }
     render_effects(app, frame, p.effects);
     render_bands(app, frame, p.bands);
+    if app.has_apps() {
+        render_apps(app, frame, p.apps);
+    }
     render_footer(app, frame, p.footer);
 
     if let InputMode::Browse(b) = &app.mode {
@@ -140,6 +143,7 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
     let common = "[Tab] focus  [↑↓] select  [←→] adjust  [+/-] preamp  [Space] toggle  [l] load  [s] settings  [o] output  [p] power  [?] help  [q] quit";
     let mut ctx = match app.focus {
         Panel::Effects => "  •  [←→] intensity".to_string(),
+        Panel::Apps => "  •  [←→] volume  [Space] mute".to_string(),
         Panel::Bands => "  •  [a] add  [d] del  [t] type".to_string(),
         Panel::Graph => {
             "  •  drag node: [↑↓] gain  [←→] freq  [ ][ ] select  [a/d/t] band".to_string()
@@ -870,6 +874,97 @@ fn render_effect_row(app: &App, frame: &mut Frame, idx: usize, area: Rect, panel
 
     // row[3] is an intentional gap between the % and the enable indicator.
     frame.render_widget(Paragraph::new(Line::from(vec![enable_sym])), row[4]);
+}
+
+// ── Applications panel ──────────────────────────────────────────────────────
+
+/// Per-application volume/mute strip: one row per app (mute glyph · name ·
+/// volume gauge · percentage), mirroring the Effects rows. Shown only when the
+/// daemon reports application streams.
+fn render_apps(app: &App, frame: &mut Frame, area: Rect) {
+    let focused = app.focus == Panel::Apps;
+    let border_style = if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .title(Line::from(" Applications ").fg(if focused { Color::Cyan } else { Color::Magenta }))
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(border_style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some(state) = app.state.as_ref() else {
+        return;
+    };
+    let fit = inner.height as usize;
+    let shown = state.apps.len().min(fit);
+    if shown == 0 {
+        return;
+    }
+    let rows = Layout::vertical(vec![Constraint::Length(1); shown]).split(inner);
+    for (idx, line) in rows.iter().enumerate() {
+        render_app_row(app, frame, &state.apps[idx], idx, *line, focused);
+    }
+}
+
+fn render_app_row(
+    app: &App,
+    frame: &mut Frame,
+    stream: &AppStream,
+    idx: usize,
+    area: Rect,
+    panel_focused: bool,
+) {
+    let selected = panel_focused && app.app_cursor == idx;
+    let name_style = if selected {
+        Style::default().fg(Color::Yellow).bold()
+    } else if stream.muted {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let mute_sym = if stream.muted {
+        Span::styled("○", Style::default().fg(Color::DarkGray))
+    } else {
+        Span::styled("●", Style::default().fg(Color::Green))
+    };
+    let pct = (stream.volume * 100.0).round() as i32;
+    let ratio = stream.volume.clamp(0.0, 1.0);
+
+    // Layout: mute(1) · gap(1) · name(18) · gauge(min) · " NNNN%"(6)
+    let row = Layout::horizontal([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(18),
+        Constraint::Min(6),
+        Constraint::Length(6),
+    ])
+    .split(area);
+
+    frame.render_widget(Paragraph::new(Line::from(vec![mute_sym])), row[0]);
+    frame.render_widget(
+        Paragraph::new(Span::styled(stream.display_name.clone(), name_style)),
+        row[2],
+    );
+    let gauge_color = if stream.muted {
+        Color::DarkGray
+    } else if selected {
+        Color::Yellow
+    } else {
+        Color::Cyan
+    };
+    let gauge = Gauge::default()
+        .gauge_style(Style::default().fg(gauge_color).bg(Color::Black))
+        .ratio(ratio)
+        .label("");
+    frame.render_widget(gauge, row[3]);
+    frame.render_widget(
+        Paragraph::new(format!(" {pct:4}%")).style(Style::default().fg(Color::Gray)),
+        row[4],
+    );
 }
 
 // ── EQ bands panel ────────────────────────────────────────────────────────
@@ -2307,7 +2402,18 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
-    use resonance_ipc::{BandState, BandType, DaemonState, EffectsState, Meters};
+    use resonance_ipc::{AppStream, BandState, BandType, DaemonState, EffectsState, Meters};
+
+    fn app_stream(key: &str, name: &str, volume: f64, muted: bool) -> AppStream {
+        AppStream {
+            key: key.into(),
+            display_name: name.into(),
+            pid: Some(1),
+            volume,
+            muted,
+            active: true,
+        }
+    }
 
     fn band(freq: f64, channels: ChannelMask) -> BandState {
         BandState {
@@ -2392,6 +2498,52 @@ mod tests {
             !text.contains("2ch"),
             "stereo showed a channel summary:\n{text}"
         );
+    }
+
+    #[test]
+    fn applications_panel_lists_apps_when_present() {
+        let mut app = App::new();
+        let mut st = fixture(2);
+        st.apps.push(app_stream("firefox.1", "Firefox", 1.0, false));
+        st.apps.push(app_stream("spotify.2", "Spotify", 0.5, true));
+        app.state = Some(st);
+        let text = render_to_text(&app, 120, 44);
+        assert!(
+            text.contains("Applications"),
+            "missing Applications panel:\n{text}"
+        );
+        assert!(text.contains("Firefox"), "missing Firefox row:\n{text}");
+        assert!(text.contains("Spotify"), "missing Spotify row:\n{text}");
+    }
+
+    #[test]
+    fn applications_panel_hidden_without_apps() {
+        let mut app = App::new();
+        app.state = Some(fixture(2)); // fixture has no apps
+        let text = render_to_text(&app, 120, 44);
+        assert!(
+            !text.contains("Applications"),
+            "Applications panel shown with no apps:\n{text}"
+        );
+    }
+
+    #[test]
+    fn tab_includes_apps_only_when_present() {
+        let mut app = App::new();
+        // No apps: Graph wraps straight back to Effects.
+        app.state = Some(fixture(2));
+        app.focus = Panel::Graph;
+        app.next_panel();
+        assert_eq!(app.focus, Panel::Effects, "no-apps Graph should skip Apps");
+        // With apps: Graph → Apps → Effects.
+        let mut st = fixture(2);
+        st.apps.push(app_stream("firefox.1", "Firefox", 1.0, false));
+        app.state = Some(st);
+        app.focus = Panel::Graph;
+        app.next_panel();
+        assert_eq!(app.focus, Panel::Apps, "Graph should advance to Apps");
+        app.next_panel();
+        assert_eq!(app.focus, Panel::Effects, "Apps should wrap to Effects");
     }
 
     #[test]
@@ -2562,8 +2714,8 @@ mod tests {
     #[test]
     fn hiding_spectrum_enlarges_the_graph() {
         let area = ratatui::layout::Rect::new(0, 0, 100, 44);
-        let on = crate::layout::panes(area, true);
-        let off = crate::layout::panes(area, false);
+        let on = crate::layout::panes(area, true, false);
+        let off = crate::layout::panes(area, false, false);
         assert!(
             off.eq.height > on.eq.height,
             "graph should grow when the spectrum is hidden ({} → {})",
