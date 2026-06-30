@@ -141,7 +141,8 @@ impl SystemAudioTap {
         // SAFETY: tap_id is a stack u32, valid for write. desc lives for
         // the duration of this call. A non-zero status means the system
         // rejected the request (most commonly: missing TCC permission).
-        let status = unsafe { AudioHardwareCreateProcessTap(Some(&desc), &mut tap_id) };
+        let status =
+            unsafe { AudioHardwareCreateProcessTap(Some(&desc), std::ptr::from_mut(&mut tap_id)) };
         if status != 0 || tap_id == 0 {
             return Err(anyhow!(
                 "AudioHardwareCreateProcessTap failed (status={status}) — \
@@ -255,9 +256,9 @@ fn get_tap_uid(tap_id: AudioObjectID) -> Result<CFRetained<CFString>> {
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain,
     };
-    let addr_ptr = NonNull::new(&mut addr).unwrap();
+    let addr_ptr = NonNull::new(std::ptr::from_mut(&mut addr)).unwrap();
     let mut data_size: u32 = std::mem::size_of::<*const CFString>() as u32;
-    let size_ptr = NonNull::new(&mut data_size).unwrap();
+    let size_ptr = NonNull::new(std::ptr::from_mut(&mut data_size)).unwrap();
     let mut uid_ptr: *const CFString = std::ptr::null();
     // SAFETY: addr/size/uid_ptr are all valid stack pointers; HAL writes
     // a CFString pointer into uid_ptr on success. The property API returns
@@ -315,7 +316,7 @@ unsafe fn dict_set<K: ?Sized, V: ?Sized>(
     // C struct. The generics are a Rust-only convenience for the typed
     // accessor methods. Reinterpret to the untyped variant before calling
     // the raw setter.
-    let raw = (dict as *const CFMutableDictionary<K, V>).cast::<CFMutableDictionary>();
+    let raw = std::ptr::from_ref(dict).cast::<CFMutableDictionary>();
     unsafe {
         CFMutableDictionary::set_value(Some(&*raw), key, value);
     }
@@ -344,10 +345,10 @@ fn translate_pid_to_process_object(pid: i32) -> Option<u32> {
         AudioObjectGetPropertyData(
             // kAudioObjectSystemObject = 1
             1,
-            NonNull::new(&mut addr).unwrap(),
+            NonNull::new(std::ptr::from_mut(&mut addr)).unwrap(),
             std::mem::size_of::<i32>() as u32,
             std::ptr::from_ref(&pid_qualifier).cast::<c_void>(),
-            NonNull::new(&mut size).unwrap(),
+            NonNull::new(std::ptr::from_mut(&mut size)).unwrap(),
             NonNull::new(std::ptr::from_mut(&mut object_id).cast::<c_void>()).unwrap(),
         )
     };
@@ -371,10 +372,10 @@ fn default_output_uid() -> Result<CFRetained<CFString>> {
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain,
     };
-    let addr_ptr = NonNull::new(&mut addr).unwrap();
+    let addr_ptr = NonNull::new(std::ptr::from_mut(&mut addr)).unwrap();
     let mut dev_id: AudioObjectID = 0;
     let mut size = std::mem::size_of::<AudioObjectID>() as u32;
-    let size_ptr = NonNull::new(&mut size).unwrap();
+    let size_ptr = NonNull::new(std::ptr::from_mut(&mut size)).unwrap();
     let status = unsafe {
         AudioObjectGetPropertyData(
             // kAudioObjectSystemObject = 1
@@ -399,9 +400,9 @@ fn default_output_uid() -> Result<CFRetained<CFString>> {
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain,
     };
-    let uid_addr_ptr = NonNull::new(&mut uid_addr).unwrap();
+    let uid_addr_ptr = NonNull::new(std::ptr::from_mut(&mut uid_addr)).unwrap();
     let mut uid_size = std::mem::size_of::<*const CFString>() as u32;
-    let uid_size_ptr = NonNull::new(&mut uid_size).unwrap();
+    let uid_size_ptr = NonNull::new(std::ptr::from_mut(&mut uid_size)).unwrap();
     let mut uid_ptr: *const CFString = std::ptr::null();
     let status = unsafe {
         AudioObjectGetPropertyData(
@@ -465,9 +466,7 @@ fn build_aggregate_dict(
     }
 
     // Tap list: a CFArray of one dict (CFType element type).
-    let sub_as_cf: &CFType = unsafe {
-        &*(&*sub_tap_dict as *const CFMutableDictionary<CFString, CFType>).cast::<CFType>()
-    };
+    let sub_as_cf: &CFType = unsafe { &*std::ptr::from_ref(&*sub_tap_dict).cast::<CFType>() };
     let tap_list: CFRetained<CFArray<CFType>> = CFArray::from_objects(&[sub_as_cf]);
 
     let agg_name = CFString::from_str(TAP_DEVICE_NAME);
