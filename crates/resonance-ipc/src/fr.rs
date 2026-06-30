@@ -12,6 +12,7 @@ pub const LOG_MIN: f64 = 1.301_029_9; // log10(20)
 pub const LOG_MAX: f64 = 4.301_029_9; // log10(20000)
 
 /// Combined frequency response in dB at `freq_hz`.
+#[must_use]
 pub fn response_db(bands: &[BandState], freq_hz: f64, sample_rate: f64) -> f64 {
     bands
         .iter()
@@ -36,6 +37,7 @@ fn coeffs_for(b: &BandState, sr: f64) -> Option<BiquadCoeffs> {
 }
 
 /// Map a frequency to its clamped log10 x-axis coordinate (Hz → curve x).
+#[must_use]
 pub fn band_marker_x(freq: f64) -> f64 {
     freq.clamp(20.0, 20000.0).log10()
 }
@@ -46,6 +48,7 @@ pub fn band_marker_x(freq: f64) -> f64 {
 /// Each point is sub-sampled across its own log-frequency step and the
 /// largest-magnitude value kept, so narrow high-Q peaks/notches are not skipped
 /// between samples (which made the displayed curve look Q-independent).
+#[must_use]
 pub fn curve_points_range(
     bands: &[BandState],
     sample_rate: f64,

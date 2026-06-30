@@ -6,10 +6,10 @@ use crate::state::GAIN_LIMIT;
 use crate::theme::Palette;
 use eframe::egui;
 
-/// Bundled icon font: a ~2 KB subset of DejaVu Sans containing only the eight
+/// Bundled icon font: a ~2 KB subset of `DejaVu` Sans containing only the eight
 /// glyphs the UI draws (●▸↑✕✚→·…), which egui's built-in fonts lack. Embedded
 /// so icons render identically everywhere with negligible binary cost.
-/// DejaVu license; see `assets/DejaVuSans-LICENSE.txt`.
+/// `DejaVu` license; see `assets/DejaVuSans-LICENSE.txt`.
 const SYMBOL_FONT: &[u8] = include_bytes!("../../assets/icons.ttf");
 
 /// Register the bundled symbol font as a fallback so the geometric glyphs used
@@ -41,7 +41,7 @@ pub(crate) fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui
 }
 
 /// A section card with a right-aligned hint in its head bar (mockup `.card>.head`
-/// trailing text — e.g. "FxSound chain", "6 bands · 1 off").
+/// trailing text — e.g. "`FxSound` chain", "6 bands · 1 off").
 pub(crate) fn section_hint(
     ui: &mut egui::Ui,
     title: &str,
@@ -112,7 +112,7 @@ pub(crate) fn padded_scroll(ui: &mut egui::Ui, salt: &str, add: impl FnOnce(&mut
 /// A colour that contrasts strongly with `bg`: near-white on dark backgrounds,
 /// near-black on light ones. Used for UI guides that must read on any theme.
 pub(crate) fn contrast_color(bg: egui::Color32) -> egui::Color32 {
-    let lum = 0.299 * bg.r() as f32 + 0.587 * bg.g() as f32 + 0.114 * bg.b() as f32;
+    let lum = 0.299 * f32::from(bg.r()) + 0.587 * f32::from(bg.g()) + 0.114 * f32::from(bg.b());
     if lum < 128.0 {
         egui::Color32::from_rgb(245, 245, 250)
     } else {
@@ -122,7 +122,7 @@ pub(crate) fn contrast_color(bg: egui::Color32) -> egui::Color32 {
 
 pub(crate) fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
     let t = t.clamp(0.0, 1.0);
-    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t) as u8;
+    let l = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t) as u8;
     egui::Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
 }
 
@@ -165,7 +165,7 @@ pub(crate) fn freq_color(freq: f64) -> egui::Color32 {
     } else {
         ((t - t0) / (t1 - t0)).clamp(0.0, 1.0)
     };
-    let l = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * f) as u8;
+    let l = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * f) as u8;
     egui::Color32::from_rgb(l(r0, r1), l(g0, g1), l(b0, b1))
 }
 

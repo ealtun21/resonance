@@ -32,7 +32,7 @@ fn bin(freq: f64, n: usize) -> usize {
 fn peak_near(spec: &[f64], center: usize, radius: usize) -> f64 {
     let lo = center.saturating_sub(radius);
     let hi = (center + radius + 1).min(spec.len());
-    spec[lo..hi].iter().cloned().fold(0.0f64, f64::max)
+    spec[lo..hi].iter().copied().fold(0.0f64, f64::max)
 }
 
 fn rms(s: &[f64]) -> f64 {
@@ -233,7 +233,7 @@ fn ambience_bypassed_at_very_low_intensity() {
     assert_eq!(out, input);
 }
 
-/// The first impulse sample is the dry signal scaled by the FxSound dry gain
+/// The first impulse sample is the dry signal scaled by the `FxSound` dry gain
 /// (0.897 at full intensity); combs return later.
 #[test]
 fn ambience_impulse_first_sample_is_dry_gain() {
@@ -259,8 +259,8 @@ fn width_energy(intensity: f64) -> f64 {
     let omega = 2.0 * PI * 1000.0 / SR;
     let stereo: Vec<f64> = (0..n_frames)
         .flat_map(|i| {
-            let l = (omega * i as f64).sin();
-            let r = (omega * i as f64 + 0.5).sin();
+            let l = (omega * f64::from(i)).sin();
+            let r = (omega * f64::from(i) + 0.5).sin();
             [l, r]
         })
         .collect();
@@ -305,7 +305,7 @@ fn surround_negative_intensity_narrows() {
 fn surround_zero_intensity_passthrough() {
     let input: Vec<f64> = (0..512)
         .flat_map(|i| {
-            let s = (2.0 * PI * 1000.0 / SR * i as f64).sin() * 0.5;
+            let s = (2.0 * PI * 1000.0 / SR * f64::from(i)).sin() * 0.5;
             [s, -s]
         })
         .collect();

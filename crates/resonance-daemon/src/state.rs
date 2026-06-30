@@ -74,13 +74,13 @@ pub struct Inner {
     pub needs_resync: bool,
     /// Latest spectrum — updated by the spectrum task, read by IPC handler.
     pub spectrum: [f32; SPECTRUM_BINS],
-    /// Available PipeWire Audio/Sink names (updated by pw_node).
+    /// Available `PipeWire` Audio/Sink names (updated by `pw_node`).
     pub available_sinks: Vec<String>,
-    /// Friendly `node.description` per sink as `(node_name, description)` (updated by pw_node).
+    /// Friendly `node.description` per sink as `(node_name, description)` (updated by `pw_node`).
     pub sink_descriptions: Vec<(String, String)>,
-    /// Preferred output node name set by SetOutputTarget.
+    /// Preferred output node name set by `SetOutputTarget`.
     pub preferred_output: Option<String>,
-    /// Send a preferred-output name to the pw_node main-loop thread.
+    /// Send a preferred-output name to the `pw_node` main-loop thread.
     pub route_tx: std::sync::mpsc::Sender<String>,
     /// In-memory A/B comparison slots ([A, B]); filled by `StoreSlot`.
     pub ab_slots: [Option<crate::config::Profile>; 2],
@@ -140,8 +140,7 @@ impl SharedState {
         let inner = &mut *guard;
         let watching = inner
             .last_poll
-            .map(|t| t.elapsed() < std::time::Duration::from_millis(1500))
-            .unwrap_or(false);
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(1500));
         let Some(w) = inner.apo_writer.as_ref() else {
             return;
         };
@@ -168,8 +167,8 @@ impl SharedState {
                 // the real rate (e.g. 96 kHz) instead of the mirror chain's
                 // construction default. 0 until the APO has locked a format.
                 if t.sample_rate > 0.0 {
-                    inner.meters.set_sample_rate(t.sample_rate as f64);
-                    inner.meters.set_capture_rate(t.sample_rate as f64);
+                    inner.meters.set_sample_rate(f64::from(t.sample_rate));
+                    inner.meters.set_capture_rate(f64::from(t.sample_rate));
                 }
             }
         } else {
@@ -293,7 +292,7 @@ impl SharedState {
 
     /// Read the live `(channels, sample_rate)` and rebuild both the RT and the
     /// shadow chain from the same builder, then swap them in. `build` is invoked
-    /// twice — the RT thread and the GetState shadow each need their own
+    /// twice — the RT thread and the `GetState` shadow each need their own
     /// instance — so it must produce an identical chain on each call.
     pub fn rebuild_chain(&self, build: impl Fn(usize, f64) -> ProcessorChain) {
         let (channels, sample_rate) = {

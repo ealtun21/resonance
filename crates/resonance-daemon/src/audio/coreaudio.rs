@@ -1,7 +1,7 @@
-//! CoreAudio backend (via cpal + native Core Audio Process Tap) — macOS.
+//! `CoreAudio` backend (via cpal + native Core Audio Process Tap) — macOS.
 //!
 //! Architecture:
-//!   1. `SystemAudioTap` (see `system_tap.rs`) builds a CATapDescription
+//!   1. `SystemAudioTap` (see `system_tap.rs`) builds a `CATapDescription`
 //!      that taps every running process's output. Apple wraps the tap in a
 //!      private aggregate device that appears in the Core Audio HAL as a
 //!      regular input device — cpal sees and opens it normally.
@@ -18,10 +18,10 @@
 //!      changes (rebuilds when they change), and tears down the tap on
 //!      shutdown so the system goes back to normal routing.
 //!   6. On any stream/setup error, the supervisor rebuilds with exponential
-//!      backoff capped at 5 s, same shape as the PipeWire backend's loop.
+//!      backoff capped at 5 s, same shape as the `PipeWire` backend's loop.
 //!
 //! Result: every app's audio (Apple Music, browser, games, calls) flows
-//! through the DSP chain — no BlackHole, no kernel extension, no manual
+//! through the DSP chain — no `BlackHole`, no kernel extension, no manual
 //! routing. Requires macOS 14.2+ and the "System Audio Capture" /
 //! "Microphone" TCC permission (prompted on first run).
 
@@ -113,7 +113,7 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
                 let pref_snapshot = preferred_output.clone();
                 let agg_id = tap.as_ref().unwrap().aggregate_id();
                 match run_streams(
-                    Arc::clone(&shared),
+                    &shared,
                     pref_snapshot.as_deref(),
                     &output_tx,
                     &sinks_tx,
@@ -168,7 +168,7 @@ enum StreamExit {
 }
 
 fn run_streams(
-    shared: Arc<Mutex<SharedRt>>,
+    shared: &Arc<Mutex<SharedRt>>,
     preferred: Option<&str>,
     output_tx: &tokio::sync::mpsc::UnboundedSender<String>,
     sinks_tx: &tokio::sync::mpsc::UnboundedSender<Vec<(String, String)>>,
@@ -195,7 +195,7 @@ fn run_streams(
         let mut guard = shared.lock().unwrap();
         // Re-bind the DSP chain to the output device's sample rate so the
         // filter *and* effect coefficients are correct for the rate we render at.
-        guard.chain.rebind_sample_rate(sample_rate as f64);
+        guard.chain.rebind_sample_rate(f64::from(sample_rate));
         // The process tap captures the stereo system mix, and the IOProc always
         // emits L/R pairs, so the chain processes stereo regardless of
         // RESONANCE_CHANNELS. Pin its width to the stereo buffers the callback
@@ -222,7 +222,7 @@ fn run_streams(
 
     // Raw HAL IOProc on the aggregate-tap device — bypasses cpal/AUHAL,
     // which doesn't reliably surface the tap stream and was reading silence.
-    let hal_input = HalInputStream::open(tap_aggregate_id, ring_tx, sample_rate as f64)
+    let hal_input = HalInputStream::open(tap_aggregate_id, ring_tx, f64::from(sample_rate))
         .with_context(|| "open HAL input on tap aggregate")?;
     // Publish the capture rate so `status` can show whether the IOProc is
     // resampling (tap rate ≠ output rate).
@@ -239,7 +239,7 @@ fn run_streams(
         &out_cfg,
         out_channels,
         ring_rx,
-        Arc::clone(&shared),
+        Arc::clone(shared),
         Arc::clone(&stream_err),
     )
     .with_context(|| "build output stream")?;
@@ -375,7 +375,7 @@ fn build_output_stream(
             }
             // Promote to f64, process, demote.
             for (dst, src) in s.scratch[..need_f64].iter_mut().zip(buf.iter()) {
-                *dst = *src as f64;
+                *dst = f64::from(*src);
             }
             let t0 = Instant::now();
             // Split-borrow: separate `&mut chain`/`scratch`/`routed` so process +
@@ -483,7 +483,7 @@ fn render_stereo_to_output(stereo: &[f32], data: &mut [f32], channels: usize) {
                 let base = f * n;
                 data[base] = stereo[f * 2];
                 data[base + 1] = stereo[f * 2 + 1];
-                for d in data[base + 2..base + n].iter_mut() {
+                for d in &mut data[base + 2..base + n] {
                     *d = 0.0;
                 }
             }
@@ -565,7 +565,7 @@ mod tests {
         // (the built-in speakers / aggregate). Asserts cpal links + the
         // host enumerates devices without permission prompts.
         let host = cpal::default_host();
-        let count = host.output_devices().map(|d| d.count()).unwrap_or(0);
+        let count = host.output_devices().map_or(0, |d| d.count());
         assert!(count >= 1, "expected ≥1 output device, got {count}");
     }
 
@@ -586,6 +586,9 @@ mod tests {
     }
 
     #[test]
+    // The 2ch path is an exact `copy_from_slice` passthrough, so the output must
+    // equal the input bit-for-bit; the float equality here is intentional.
+    #[allow(clippy::float_cmp)]
     fn render_stereo_is_passthrough() {
         let stereo = [1.0f32, 2.0, 3.0, 4.0];
         let mut data = [0.0f32; 4];

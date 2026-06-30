@@ -14,7 +14,7 @@
 use eframe::egui::{self, Color32, Pos2, Shape, Stroke, pos2};
 
 /// The icon set. Add a variant + a `match` arm in [`paths`] to grow it.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Icon {
     Menu,
     Speaker,
@@ -169,7 +169,7 @@ impl Pen<'_> {
     }
     /// Tip + tangent direction of an arc end at `ang` degrees (radius `rad`,
     /// centre `cx,cy`). `cw` = the arc was drawn clockwise (increasing angle).
-    fn arc_end(&self, cx: f32, cy: f32, rad: f32, ang: f32, cw: bool) -> ((f32, f32), (f32, f32)) {
+    fn arc_end(cx: f32, cy: f32, rad: f32, ang: f32, cw: bool) -> ((f32, f32), (f32, f32)) {
         let a = ang.to_radians();
         let tip = (cx + rad * a.cos(), cy + rad * a.sin());
         // d/dθ(cos,sin) = (-sin, cos); reverse it for a counter-clockwise sweep.
@@ -182,188 +182,254 @@ impl Pen<'_> {
     }
 }
 
-/// The geometry of each icon, in the unit box.
+/// Dispatch to each icon's drawing routine. Each arm delegates to a small
+/// `draw_*` fn so the per-icon geometry stays cohesive and individually
+/// readable; the painter paths are identical to inlining them here.
 fn paths(p: &Pen, icon: Icon) {
     match icon {
-        Icon::Menu => {
-            for y in [0.30, 0.50, 0.70] {
-                p.seg((0.18, y), (0.82, y));
-            }
-        }
-        Icon::Speaker => {
-            // Cone (closed) + two sound arcs to the right.
-            p.poly(&[
-                (0.16, 0.40),
-                (0.30, 0.40),
-                (0.46, 0.24),
-                (0.46, 0.76),
-                (0.30, 0.60),
-                (0.16, 0.60),
-            ]);
-            p.arc(0.46, 0.50, 0.16, -48.0, 48.0);
-            p.arc(0.46, 0.50, 0.30, -42.0, 42.0);
-        }
-        Icon::Folder => {
-            // Closed folder (a pressable "load" target): body + tab.
-            p.poly(&[
-                (0.16, 0.74),
-                (0.16, 0.36),
-                (0.40, 0.36),
-                (0.46, 0.44),
-                (0.84, 0.44),
-                (0.84, 0.74),
-            ]);
-        }
-        Icon::FolderOpen => {
-            // Open folder (the currently-loaded one): back panel + an angled front
-            // flap tilting open.
-            p.line(&[
-                (0.16, 0.72),
-                (0.16, 0.34),
-                (0.38, 0.34),
-                (0.45, 0.43),
-                (0.82, 0.43),
-                (0.82, 0.52),
-            ]);
-            p.poly(&[(0.16, 0.72), (0.27, 0.52), (0.92, 0.52), (0.81, 0.72)]);
-        }
-        Icon::Save => {
-            // Floppy: body with a cut top-right corner, shutter + label slots.
-            p.poly(&[
-                (0.20, 0.20),
-                (0.66, 0.20),
-                (0.80, 0.34),
-                (0.80, 0.80),
-                (0.20, 0.80),
-            ]);
-            p.poly(&[(0.34, 0.20), (0.34, 0.36), (0.60, 0.36), (0.60, 0.20)]);
-            p.poly(&[(0.32, 0.80), (0.32, 0.56), (0.68, 0.56), (0.68, 0.80)]);
-        }
-        Icon::Download => {
-            p.seg((0.50, 0.20), (0.50, 0.62));
-            p.line(&[(0.34, 0.46), (0.50, 0.64), (0.66, 0.46)]);
-            p.seg((0.22, 0.80), (0.78, 0.80));
-        }
-        Icon::Plus => {
-            p.seg((0.50, 0.22), (0.50, 0.78));
-            p.seg((0.22, 0.50), (0.78, 0.50));
-        }
-        Icon::Close => {
-            p.seg((0.27, 0.27), (0.73, 0.73));
-            p.seg((0.73, 0.27), (0.27, 0.73));
-        }
-        Icon::Trash => {
-            p.seg((0.20, 0.30), (0.80, 0.30));
-            p.line(&[(0.40, 0.30), (0.42, 0.22), (0.58, 0.22), (0.60, 0.30)]);
-            p.line(&[(0.28, 0.30), (0.32, 0.80), (0.68, 0.80), (0.72, 0.30)]);
-            p.seg((0.43, 0.40), (0.44, 0.71));
-            p.seg((0.57, 0.40), (0.56, 0.71));
-        }
-        Icon::Copy => {
-            // Two overlapping squares — front (lower-right) over back (upper-left).
-            p.poly(&[(0.34, 0.34), (0.88, 0.34), (0.88, 0.88), (0.34, 0.88)]);
-            p.line(&[(0.34, 0.20), (0.12, 0.20), (0.12, 0.66), (0.26, 0.66)]);
-        }
-        Icon::Refresh => {
-            // A near-full circular arrow (small gap top-right) with one filled
-            // head — the universal "reload".
-            let (cx, cy, r) = (0.50, 0.50, 0.30);
-            p.arc(cx, cy, r, 300.0, 600.0); // 300°→240° (wraps), ~300° clockwise
-            let (tip, dir) = p.arc_end(cx, cy, r, 600.0, true);
-            p.head(tip, dir, 0.20);
-        }
-        Icon::Sliders => {
-            // Mixer: three tracks, each with a knob at a different position.
-            let rows = [(0.30, 0.64), (0.50, 0.36), (0.70, 0.56)];
-            for (y, kx) in rows {
-                p.seg((0.18, y), (0.82, y));
-                p.dot(kx, y, 0.085);
-            }
-        }
-        Icon::Target => {
-            p.ring(0.50, 0.50, 0.30);
-            p.ring(0.50, 0.50, 0.15);
-            p.dot(0.50, 0.50, 0.05);
-        }
-        Icon::Wave => {
-            let pts: Vec<(f32, f32)> = (0..=28)
-                .map(|i| {
-                    let t = i as f32 / 28.0;
-                    let x = 0.16 + 0.68 * t;
-                    let y = 0.50 - 0.22 * (t * std::f32::consts::TAU * 1.15).sin();
-                    (x, y)
-                })
-                .collect();
-            p.line(&pts);
-        }
-        Icon::Wand => {
-            // A magic wand: a stick bottom-left → top-right, with a four-point
-            // sparkle (long axes + short diagonals) at the tip → reads as "auto".
-            p.seg((0.22, 0.82), (0.58, 0.46));
-            let (sx, sy) = (0.70, 0.28);
-            p.seg((sx, sy - 0.16), (sx, sy + 0.16));
-            p.seg((sx - 0.16, sy), (sx + 0.16, sy));
-            p.seg((sx - 0.08, sy - 0.08), (sx + 0.08, sy + 0.08));
-            p.seg((sx - 0.08, sy + 0.08), (sx + 0.08, sy - 0.08));
-        }
-        Icon::Undo => {
-            // ↶ — arc over the TOP (y is down, so the top is 180°→360°), sweeping
-            // right→top→left, with the head at the left end pointing down.
-            let (cx, cy, r) = (0.50, 0.55, 0.27);
-            p.arc(cx, cy, r, 380.0, 180.0); // decreasing = counter-clockwise
-            let (tip, dir) = p.arc_end(cx, cy, r, 180.0, false);
-            p.head(tip, dir, 0.18);
-        }
-        Icon::Redo => {
-            // ↷ — mirror of Undo: left→top→right, head at the right end.
-            let (cx, cy, r) = (0.50, 0.55, 0.27);
-            p.arc(cx, cy, r, 160.0, 360.0); // increasing = clockwise
-            let (tip, dir) = p.arc_end(cx, cy, r, 360.0, true);
-            p.head(tip, dir, 0.18);
-        }
-        Icon::Up => {
-            p.seg((0.50, 0.80), (0.50, 0.24));
-            p.line(&[(0.30, 0.46), (0.50, 0.24), (0.70, 0.46)]);
-        }
-        Icon::Home => {
-            p.line(&[(0.16, 0.50), (0.50, 0.22), (0.84, 0.50)]);
-            p.line(&[(0.26, 0.46), (0.26, 0.80), (0.74, 0.80), (0.74, 0.46)]);
-            p.poly(&[(0.43, 0.80), (0.43, 0.60), (0.57, 0.60), (0.57, 0.80)]);
-        }
-        Icon::Check => p.line(&[(0.24, 0.52), (0.43, 0.70), (0.76, 0.32)]),
-        Icon::Gear => {
-            // Eight teeth radiating from a ring, plus a hub.
-            for k in 0..8 {
-                let a = (k as f32 * 45.0).to_radians();
-                let (dx, dy) = (a.cos(), a.sin());
-                p.seg(
-                    (0.50 + dx * 0.24, 0.50 + dy * 0.24),
-                    (0.50 + dx * 0.36, 0.50 + dy * 0.36),
-                );
-            }
-            p.ring(0.50, 0.50, 0.22);
-            p.dot(0.50, 0.50, 0.07);
-        }
-        Icon::Chevron => p.line(&[(0.32, 0.42), (0.50, 0.60), (0.68, 0.42)]),
-        Icon::Power => {
-            p.seg((0.50, 0.18), (0.50, 0.46));
-            p.arc(0.50, 0.52, 0.28, -60.0, 240.0);
-        }
-        Icon::Help => {
-            // A "?" inside a ring.
-            p.ring(0.50, 0.50, 0.36);
-            p.line(&[
-                (0.38, 0.40),
-                (0.43, 0.32),
-                (0.56, 0.32),
-                (0.62, 0.40),
-                (0.58, 0.49),
-                (0.50, 0.54),
-                (0.50, 0.61),
-            ]);
-            p.dot(0.50, 0.71, 0.045);
-        }
+        Icon::Menu => draw_menu(p),
+        Icon::Speaker => draw_speaker(p),
+        Icon::Folder => draw_folder(p),
+        Icon::FolderOpen => draw_folder_open(p),
+        Icon::Save => draw_save(p),
+        Icon::Download => draw_download(p),
+        Icon::Plus => draw_plus(p),
+        Icon::Close => draw_close(p),
+        Icon::Trash => draw_trash(p),
+        Icon::Copy => draw_copy(p),
+        Icon::Refresh => draw_refresh(p),
+        Icon::Sliders => draw_sliders(p),
+        Icon::Target => draw_target(p),
+        Icon::Wave => draw_wave(p),
+        Icon::Wand => draw_wand(p),
+        Icon::Undo => draw_undo(p),
+        Icon::Redo => draw_redo(p),
+        Icon::Up => draw_up(p),
+        Icon::Home => draw_home(p),
+        Icon::Check => draw_check(p),
+        Icon::Gear => draw_gear(p),
+        Icon::Chevron => draw_chevron(p),
+        Icon::Power => draw_power(p),
+        Icon::Help => draw_help(p),
     }
+}
+
+/// Three stacked horizontal bars (hamburger).
+fn draw_menu(p: &Pen) {
+    for y in [0.30, 0.50, 0.70] {
+        p.seg((0.18, y), (0.82, y));
+    }
+}
+
+/// Speaker cone (closed) + two sound arcs to the right.
+fn draw_speaker(p: &Pen) {
+    p.poly(&[
+        (0.16, 0.40),
+        (0.30, 0.40),
+        (0.46, 0.24),
+        (0.46, 0.76),
+        (0.30, 0.60),
+        (0.16, 0.60),
+    ]);
+    p.arc(0.46, 0.50, 0.16, -48.0, 48.0);
+    p.arc(0.46, 0.50, 0.30, -42.0, 42.0);
+}
+
+/// Closed folder (a pressable "load" target): body + tab.
+fn draw_folder(p: &Pen) {
+    p.poly(&[
+        (0.16, 0.74),
+        (0.16, 0.36),
+        (0.40, 0.36),
+        (0.46, 0.44),
+        (0.84, 0.44),
+        (0.84, 0.74),
+    ]);
+}
+
+/// Open folder (the currently-loaded one): back panel + an angled front flap
+/// tilting open.
+fn draw_folder_open(p: &Pen) {
+    p.line(&[
+        (0.16, 0.72),
+        (0.16, 0.34),
+        (0.38, 0.34),
+        (0.45, 0.43),
+        (0.82, 0.43),
+        (0.82, 0.52),
+    ]);
+    p.poly(&[(0.16, 0.72), (0.27, 0.52), (0.92, 0.52), (0.81, 0.72)]);
+}
+
+/// Floppy disk: body with a cut top-right corner, shutter + label slots.
+fn draw_save(p: &Pen) {
+    p.poly(&[
+        (0.20, 0.20),
+        (0.66, 0.20),
+        (0.80, 0.34),
+        (0.80, 0.80),
+        (0.20, 0.80),
+    ]);
+    p.poly(&[(0.34, 0.20), (0.34, 0.36), (0.60, 0.36), (0.60, 0.20)]);
+    p.poly(&[(0.32, 0.80), (0.32, 0.56), (0.68, 0.56), (0.68, 0.80)]);
+}
+
+/// Down-arrow into a tray.
+fn draw_download(p: &Pen) {
+    p.seg((0.50, 0.20), (0.50, 0.62));
+    p.line(&[(0.34, 0.46), (0.50, 0.64), (0.66, 0.46)]);
+    p.seg((0.22, 0.80), (0.78, 0.80));
+}
+
+/// A plus sign.
+fn draw_plus(p: &Pen) {
+    p.seg((0.50, 0.22), (0.50, 0.78));
+    p.seg((0.22, 0.50), (0.78, 0.50));
+}
+
+/// An X.
+fn draw_close(p: &Pen) {
+    p.seg((0.27, 0.27), (0.73, 0.73));
+    p.seg((0.73, 0.27), (0.27, 0.73));
+}
+
+/// Trash can: lid line, handle, body, two stripes.
+fn draw_trash(p: &Pen) {
+    p.seg((0.20, 0.30), (0.80, 0.30));
+    p.line(&[(0.40, 0.30), (0.42, 0.22), (0.58, 0.22), (0.60, 0.30)]);
+    p.line(&[(0.28, 0.30), (0.32, 0.80), (0.68, 0.80), (0.72, 0.30)]);
+    p.seg((0.43, 0.40), (0.44, 0.71));
+    p.seg((0.57, 0.40), (0.56, 0.71));
+}
+
+/// Two overlapping squares — front (lower-right) over back (upper-left).
+fn draw_copy(p: &Pen) {
+    p.poly(&[(0.34, 0.34), (0.88, 0.34), (0.88, 0.88), (0.34, 0.88)]);
+    p.line(&[(0.34, 0.20), (0.12, 0.20), (0.12, 0.66), (0.26, 0.66)]);
+}
+
+/// A near-full circular arrow (small gap top-right) with one filled head — the
+/// universal "reload".
+fn draw_refresh(p: &Pen) {
+    let (cx, cy, r) = (0.50, 0.50, 0.30);
+    p.arc(cx, cy, r, 300.0, 600.0); // 300°→240° (wraps), ~300° clockwise
+    let (tip, dir) = Pen::arc_end(cx, cy, r, 600.0, true);
+    p.head(tip, dir, 0.20);
+}
+
+/// Mixer: three tracks, each with a knob at a different position.
+fn draw_sliders(p: &Pen) {
+    let rows = [(0.30, 0.64), (0.50, 0.36), (0.70, 0.56)];
+    for (y, kx) in rows {
+        p.seg((0.18, y), (0.82, y));
+        p.dot(kx, y, 0.085);
+    }
+}
+
+/// Concentric rings + centre dot (a target/bullseye).
+fn draw_target(p: &Pen) {
+    p.ring(0.50, 0.50, 0.30);
+    p.ring(0.50, 0.50, 0.15);
+    p.dot(0.50, 0.50, 0.05);
+}
+
+/// A single sine cycle across the box.
+fn draw_wave(p: &Pen) {
+    let pts: Vec<(f32, f32)> = (0..=28)
+        .map(|i| {
+            let t = i as f32 / 28.0;
+            let x = 0.16 + 0.68 * t;
+            let y = 0.50 - 0.22 * (t * std::f32::consts::TAU * 1.15).sin();
+            (x, y)
+        })
+        .collect();
+    p.line(&pts);
+}
+
+/// A magic wand: a stick bottom-left → top-right, with a four-point sparkle
+/// (long axes + short diagonals) at the tip → reads as "auto".
+fn draw_wand(p: &Pen) {
+    p.seg((0.22, 0.82), (0.58, 0.46));
+    let (sx, sy) = (0.70, 0.28);
+    p.seg((sx, sy - 0.16), (sx, sy + 0.16));
+    p.seg((sx - 0.16, sy), (sx + 0.16, sy));
+    p.seg((sx - 0.08, sy - 0.08), (sx + 0.08, sy + 0.08));
+    p.seg((sx - 0.08, sy + 0.08), (sx + 0.08, sy - 0.08));
+}
+
+/// ↶ — arc over the TOP (y is down, so the top is 180°→360°), sweeping
+/// right→top→left, with the head at the left end pointing down.
+fn draw_undo(p: &Pen) {
+    let (cx, cy, r) = (0.50, 0.55, 0.27);
+    p.arc(cx, cy, r, 380.0, 180.0); // decreasing = counter-clockwise
+    let (tip, dir) = Pen::arc_end(cx, cy, r, 180.0, false);
+    p.head(tip, dir, 0.18);
+}
+
+/// ↷ — mirror of Undo: left→top→right, head at the right end.
+fn draw_redo(p: &Pen) {
+    let (cx, cy, r) = (0.50, 0.55, 0.27);
+    p.arc(cx, cy, r, 160.0, 360.0); // increasing = clockwise
+    let (tip, dir) = Pen::arc_end(cx, cy, r, 360.0, true);
+    p.head(tip, dir, 0.18);
+}
+
+/// An up-arrow.
+fn draw_up(p: &Pen) {
+    p.seg((0.50, 0.80), (0.50, 0.24));
+    p.line(&[(0.30, 0.46), (0.50, 0.24), (0.70, 0.46)]);
+}
+
+/// House roof, walls, and a door.
+fn draw_home(p: &Pen) {
+    p.line(&[(0.16, 0.50), (0.50, 0.22), (0.84, 0.50)]);
+    p.line(&[(0.26, 0.46), (0.26, 0.80), (0.74, 0.80), (0.74, 0.46)]);
+    p.poly(&[(0.43, 0.80), (0.43, 0.60), (0.57, 0.60), (0.57, 0.80)]);
+}
+
+/// A checkmark.
+fn draw_check(p: &Pen) {
+    p.line(&[(0.24, 0.52), (0.43, 0.70), (0.76, 0.32)]);
+}
+
+/// Eight teeth radiating from a ring, plus a hub.
+fn draw_gear(p: &Pen) {
+    for k in 0..8 {
+        let a = (k as f32 * 45.0).to_radians();
+        let (dx, dy) = (a.cos(), a.sin());
+        p.seg(
+            (0.50 + dx * 0.24, 0.50 + dy * 0.24),
+            (0.50 + dx * 0.36, 0.50 + dy * 0.36),
+        );
+    }
+    p.ring(0.50, 0.50, 0.22);
+    p.dot(0.50, 0.50, 0.07);
+}
+
+/// A downward chevron.
+fn draw_chevron(p: &Pen) {
+    p.line(&[(0.32, 0.42), (0.50, 0.60), (0.68, 0.42)]);
+}
+
+/// Power glyph: a vertical stem through the top of a near-full ring.
+fn draw_power(p: &Pen) {
+    p.seg((0.50, 0.18), (0.50, 0.46));
+    p.arc(0.50, 0.52, 0.28, -60.0, 240.0);
+}
+
+/// A "?" inside a ring.
+fn draw_help(p: &Pen) {
+    p.ring(0.50, 0.50, 0.36);
+    p.line(&[
+        (0.38, 0.40),
+        (0.43, 0.32),
+        (0.56, 0.32),
+        (0.62, 0.40),
+        (0.58, 0.49),
+        (0.50, 0.54),
+        (0.50, 0.61),
+    ]);
+    p.dot(0.50, 0.71, 0.045);
 }
 
 /// Dev gallery: paint every icon in a labelled grid. Gated behind
@@ -397,4 +463,48 @@ pub(crate) fn gallery(ui: &mut egui::Ui) {
             }
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `arc_end` must place the tip on the circle and return a unit tangent that
+    /// flips sign with the sweep direction (the head must point along the sweep).
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn arc_end_tip_on_circle_and_tangent_flips() {
+        let (cx, cy, rad) = (0.5_f32, 0.5, 0.3);
+        // At 0° the tip is at (cx + rad, cy); the clockwise tangent is +y.
+        let (tip, dir) = Pen::arc_end(cx, cy, rad, 0.0, true);
+        assert!((tip.0 - (cx + rad)).abs() < 1e-6);
+        assert!((tip.1 - cy).abs() < 1e-6);
+        assert!((dir.0).abs() < 1e-6 && (dir.1 - 1.0).abs() < 1e-6);
+        // The counter-clockwise tangent at the same point is the exact negation.
+        let (_, ccw) = Pen::arc_end(cx, cy, rad, 0.0, false);
+        assert_eq!(ccw.0, -dir.0);
+        assert_eq!(ccw.1, -dir.1);
+    }
+
+    /// The tangent direction is always unit length (so `head` length is in box
+    /// units regardless of angle).
+    #[test]
+    fn arc_end_tangent_is_unit_length() {
+        for deg in [0.0_f32, 37.0, 90.0, 180.0, 313.0] {
+            let (_, dir) = Pen::arc_end(0.5, 0.5, 0.3, deg, true);
+            let mag = (dir.0 * dir.0 + dir.1 * dir.1).sqrt();
+            assert!((mag - 1.0).abs() < 1e-5, "deg={deg} mag={mag}");
+        }
+    }
+
+    /// `ALL` must list exactly the icons `paths` can dispatch (one label each),
+    /// so the dev gallery never drifts from the icon set.
+    #[test]
+    fn all_table_has_unique_icons() {
+        let mut seen = std::collections::HashSet::new();
+        for (icon, _) in ALL {
+            assert!(seen.insert(*icon), "duplicate icon in ALL");
+        }
+        assert_eq!(seen.len(), ALL.len());
+    }
 }

@@ -65,70 +65,56 @@ fn init_logging() {
     }));
 }
 
-// A single-threaded runtime is plenty: the daemon's async side is all low-rate
-// IPC and event handling, and the only real-time work (the audio callback) runs
-// on its own dedicated OS thread, not on tokio. The default multi-thread runtime
-// would otherwise spawn one worker per core — wasted stacks and idle scheduler
-// wakeups for no latency benefit. Blocking work (preset parsing) still uses
-// spawn_blocking's separate pool.
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<()> {
-    init_logging();
+/// Measurement mode: `resonanced --measure-loopback <dev-substr> <out.raw> <secs>`
+/// loopback-captures an output endpoint to raw f32le for spectral analysis.
+/// Returns `Ok(true)` when the mode ran (the caller should exit), `Ok(false)`
+/// when the flag was absent (continue normal startup).
+#[cfg(target_os = "windows")]
+fn handle_measure_loopback() -> Result<bool> {
+    let args: Vec<String> = std::env::args().collect();
+    let Some(p) = args.iter().position(|a| a == "--measure-loopback") else {
+        return Ok(false);
+    };
+    let dev = args.get(p + 1).cloned().unwrap_or_default();
+    let out = args.get(p + 2).cloned().unwrap_or_default();
+    let secs = args.get(p + 3).and_then(|s| s.parse().ok()).unwrap_or(6);
+    audio::measure_loopback(&dev, &out, secs)?;
+    Ok(true)
+}
 
-    info!("resonanced starting");
-
-    // Measurement mode: `resonanced --measure-loopback <dev-substr> <out.raw> <secs>`
-    // loopback-captures an output endpoint to raw f32le for spectral analysis.
-    // Skips the pidfile/IPC so it can run alongside a live daemon.
-    #[cfg(target_os = "windows")]
-    {
-        let args: Vec<String> = std::env::args().collect();
-        if let Some(p) = args.iter().position(|a| a == "--measure-loopback") {
-            let dev = args.get(p + 1).cloned().unwrap_or_default();
-            let out = args.get(p + 2).cloned().unwrap_or_default();
-            let secs = args.get(p + 3).and_then(|s| s.parse().ok()).unwrap_or(6);
-            audio::measure_loopback(&dev, &out, secs)?;
-            return Ok(());
-        }
-    }
-
-    // Single-instance guard. If another live daemon already holds the lock,
-    // exit *cleanly* (status 0) and DON'T touch its socket/pidfile — so a
-    // duplicate launch (e.g. launchd racing a manual start) is a no-op instead
-    // of a crash that `KeepAlive { SuccessfulExit = false }` would relaunch in a
-    // throttled loop.
+/// Acquire the single-instance lock. Returns `Ok(true)` when this process owns
+/// it (continue startup), `Ok(false)` when another live daemon already holds it.
+///
+/// A duplicate launch (e.g. launchd racing a manual start) exits *cleanly*
+/// (status 0) and does NOT touch the other daemon's socket/pidfile — a crash
+/// here would be relaunched in a throttled loop by `KeepAlive { SuccessfulExit
+/// = false }`.
+fn acquire_singleton_or_exit() -> Result<bool> {
     match shutdown::acquire_singleton() {
-        Ok(shutdown::Singleton::Acquired) => {}
+        Ok(shutdown::Singleton::Acquired) => Ok(true),
         Ok(shutdown::Singleton::AlreadyRunning) => {
             info!("another resonanced already holds the single-instance lock; exiting");
-            return Ok(());
+            Ok(false)
         }
         Err(e) => anyhow::bail!("single-instance lock: {e}"),
     }
-    shutdown::install_signal_handlers();
+}
 
-    let (cmd_tx, cmd_rx) = RingBuffer::<state::AudioCommand>::new(256);
-    let (spectrum_tx, spectrum_rx) = RingBuffer::<f32>::new(audio::SPECTRUM_BUF);
-    let (route_tx, route_rx) = std::sync::mpsc::channel::<String>();
-    let (sinks_tx, mut sinks_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<(String, String)>>();
-
-    let initial_chain = ProcessorChain::builder()
-        .channels(audio::target_channels())
-        .sample_rate(48000.0)
-        .build();
-
-    let meters = std::sync::Arc::new(meters::AtomicMeters::default());
-    let shared = state::SharedState::new(cmd_tx, route_tx, meters.clone());
-
-    // Spectrum computation task
+/// Spawn the spectrum-computation task: drains the post-DSP sample ring and
+/// publishes analyzer bins into shared state.
+fn spawn_spectrum_task(spectrum_rx: rtrb::Consumer<f32>, shared: &state::SharedState) {
     let spectrum_state = shared.clone();
     tokio::spawn(async move {
         spectrum::run(spectrum_rx, spectrum_state).await;
     });
+}
 
-    // Output-device change task: when PipeWire reports a new real sink, auto-load
-    // the profile mapped to it (if any).
-    let (output_tx, mut output_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+/// Spawn the output-device change task: when the backend reports a new real sink,
+/// record it as the active output and auto-load the profile mapped to it (if any).
+fn spawn_output_mapping_task(
+    mut output_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    shared: &state::SharedState,
+) {
     let output_state = shared.clone();
     tokio::spawn(async move {
         while let Some(output) = output_rx.recv().await {
@@ -137,7 +123,7 @@ async fn main() -> Result<()> {
             {
                 let mut inner = output_state.0.lock().unwrap();
                 inner.active_output = Some(output.clone());
-                inner.mapped_profile = mapped.clone();
+                inner.mapped_profile.clone_from(&mapped);
             }
             if let Some(name) = mapped {
                 match apply_profile(&name, &output_state) {
@@ -150,13 +136,18 @@ async fn main() -> Result<()> {
             }
         }
     });
+}
 
-    // Available-sinks update task: keep SharedState in sync with PipeWire graph.
+/// Spawn the available-sinks update task: keep shared state in sync with the
+/// backend's view of the graph, folding freshly-seen sinks into the persistent
+/// known-device registry so descriptions survive a device being unplugged.
+fn spawn_sinks_task(
+    mut sinks_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<(String, String)>>,
+    shared: &state::SharedState,
+) {
     let sinks_state = shared.clone();
     tokio::spawn(async move {
         while let Some(sinks) = sinks_rx.recv().await {
-            // Fold the freshly-seen sinks into the persistent known-device
-            // registry so descriptions survive a device being unplugged.
             let mut known = KnownSinks::load();
             let mut changed = false;
             for (name, desc) in &sinks {
@@ -186,6 +177,108 @@ async fn main() -> Result<()> {
             }
         }
     });
+}
+
+/// Initialise the Windows control plane: open the APO state bridge, start the
+/// telemetry pump (mirrors APO meters/spectrum into shared state for clients),
+/// and start the device-watch thread that auto-attaches the APO to every
+/// appearing render endpoint and tracks the system default.
+#[cfg(target_os = "windows")]
+fn init_windows_control_plane(shared: &state::SharedState) {
+    let path = resonance_apo::state::default_state_path();
+    match resonance_apo::state::ApoStateWriter::create(&path) {
+        Ok(writer) => {
+            shared.set_apo_writer(writer);
+            info!("APO control bridge ready at {}", path.display());
+        }
+        Err(e) => warn!("APO control bridge unavailable ({}): {e}", path.display()),
+    }
+
+    let tele_state = shared.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(30));
+        loop {
+            tick.tick().await;
+            tele_state.pump_telemetry();
+        }
+    });
+
+    // Device list: enumerate render endpoints so clients can pick an output;
+    // also track the current system default. Runs on a dedicated thread — the
+    // COM calls block, and must never stall the async IPC runtime.
+    let dev_state = shared.clone();
+    std::thread::spawn(move || {
+        // Render endpoints we've already auto-attached the APO to this run.
+        // Poll-and-diff (not IMMNotificationClient OnDeviceAdded, which only
+        // fires for never-before-seen devices — re-connected DACs/BT slip
+        // through it) so EVERY newly-appearing endpoint gets the APO: a
+        // hot-plugged DAC or a Bluetooth headset is attached on the spot,
+        // without re-running the installer.
+        let mut attached: std::collections::HashSet<String> = std::collections::HashSet::new();
+        loop {
+            let endpoints = audio::win_devices::enumerate_render_endpoints();
+            let default = audio::win_devices::default_render_id();
+            for (id, _name) in &endpoints {
+                if let Some(guid) = audio::win_devices::endpoint_guid(id) {
+                    if attached.insert(guid.to_string()) {
+                        let r = audio::win_devices::attach_apo_endpoint(guid);
+                        info!("APO auto-attach {guid}: {r}");
+                    }
+                }
+            }
+            {
+                let mut inner = dev_state.0.lock().unwrap();
+                inner.available_sinks = endpoints.iter().map(|(id, _)| id.clone()).collect();
+                inner.sink_descriptions = endpoints;
+                inner.active_output = default;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    });
+}
+
+// A single-threaded runtime is plenty: the daemon's async side is all low-rate
+// IPC and event handling, and the only real-time work (the audio callback) runs
+// on its own dedicated OS thread, not on tokio. The default multi-thread runtime
+// would otherwise spawn one worker per core — wasted stacks and idle scheduler
+// wakeups for no latency benefit. Blocking work (preset parsing) still uses
+// spawn_blocking's separate pool.
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<()> {
+    init_logging();
+
+    info!("resonanced starting");
+
+    // Measurement mode short-circuits before the pidfile/IPC so it can run
+    // alongside a live daemon.
+    #[cfg(target_os = "windows")]
+    if handle_measure_loopback()? {
+        return Ok(());
+    }
+
+    // Single-instance guard: a duplicate launch is a clean no-op, not a crash.
+    if !acquire_singleton_or_exit()? {
+        return Ok(());
+    }
+    shutdown::install_signal_handlers();
+
+    let (cmd_tx, cmd_rx) = RingBuffer::<state::AudioCommand>::new(256);
+    let (spectrum_tx, spectrum_rx) = RingBuffer::<f32>::new(audio::SPECTRUM_BUF);
+    let (route_tx, route_rx) = std::sync::mpsc::channel::<String>();
+    let (sinks_tx, sinks_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<(String, String)>>();
+    let (output_tx, output_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+    let initial_chain = ProcessorChain::builder()
+        .channels(audio::target_channels())
+        .sample_rate(48000.0)
+        .build();
+
+    let meters = std::sync::Arc::new(meters::AtomicMeters::default());
+    let shared = state::SharedState::new(cmd_tx, route_tx, meters.clone());
+
+    spawn_spectrum_task(spectrum_rx, &shared);
+    spawn_output_mapping_task(output_rx, &shared);
+    spawn_sinks_task(sinks_rx, &shared);
 
     // Audio backend on a dedicated RT thread (Linux/PipeWire, macOS/CoreAudio).
     // On Windows the daemon does no audio: the in-graph APO owns the DSP and the
@@ -214,57 +307,7 @@ async fn main() -> Result<()> {
             sinks_tx,
             meters,
         );
-        let path = resonance_apo::state::default_state_path();
-        match resonance_apo::state::ApoStateWriter::create(&path) {
-            Ok(writer) => {
-                shared.set_apo_writer(writer);
-                info!("APO control bridge ready at {}", path.display());
-            }
-            Err(e) => warn!("APO control bridge unavailable ({}): {e}", path.display()),
-        }
-        // Telemetry pump: mirror APO meters/spectrum into shared state for
-        // clients, but only while a client is polling (set in pump_telemetry).
-        let tele_state = shared.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_millis(30));
-            loop {
-                tick.tick().await;
-                tele_state.pump_telemetry();
-            }
-        });
-
-        // Device list: enumerate render endpoints so clients can pick an output;
-        // also track the current system default. Runs on a dedicated thread —
-        // the COM calls block, and must never stall the async IPC runtime.
-        let dev_state = shared.clone();
-        std::thread::spawn(move || {
-            // Render endpoints we've already auto-attached the APO to this run.
-            // Poll-and-diff (not IMMNotificationClient OnDeviceAdded, which only
-            // fires for never-before-seen devices — re-connected DACs/BT slip
-            // through it) so EVERY newly-appearing endpoint gets the APO: a
-            // hot-plugged DAC or a Bluetooth headset is attached on the spot,
-            // without re-running the installer.
-            let mut attached: std::collections::HashSet<String> = std::collections::HashSet::new();
-            loop {
-                let endpoints = audio::win_devices::enumerate_render_endpoints();
-                let default = audio::win_devices::default_render_id();
-                for (id, _name) in &endpoints {
-                    if let Some(guid) = audio::win_devices::endpoint_guid(id) {
-                        if attached.insert(guid.to_string()) {
-                            let r = audio::win_devices::attach_apo_endpoint(guid);
-                            info!("APO auto-attach {guid}: {r}");
-                        }
-                    }
-                }
-                {
-                    let mut inner = dev_state.0.lock().unwrap();
-                    inner.available_sinks = endpoints.iter().map(|(id, _)| id.clone()).collect();
-                    inner.sink_descriptions = endpoints;
-                    inner.active_output = default;
-                }
-                std::thread::sleep(std::time::Duration::from_secs(2));
-            }
-        });
+        init_windows_control_plane(&shared);
     }
 
     // IPC server (blocks until shutdown)

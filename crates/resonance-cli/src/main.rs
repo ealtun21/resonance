@@ -27,9 +27,9 @@ enum Sub {
         /// Directory to scan (optional)
         dir: Option<String>,
     },
-    /// Set an FxSound effect intensity (0–100)
+    /// Set an `FxSound` effect intensity (0–100)
     Set {
-        /// Effect name: fidelity / ambience / surround / dynamic_boost / bass
+        /// Effect name: fidelity / ambience / surround / `dynamic_boost` / bass
         effect: String,
         /// Intensity 0–100
         value: u8,
@@ -75,7 +75,7 @@ enum Sub {
     Maps,
     /// Reset to defaults: flat EQ, all effects off, 0 dB preamp
     Reset,
-    /// Export the current EQ to an EqualizerAPO .txt file
+    /// Export the current EQ to an `EqualizerAPO` .txt file
     Export {
         /// Output file path (e.g. ./my-eq.txt)
         path: String,
@@ -111,7 +111,7 @@ enum Sub {
         /// New profile name
         to: String,
     },
-    /// Download an AutoEq headphone correction and import it as a profile
+    /// Download an `AutoEq` headphone correction and import it as a profile
     Autoeq {
         /// Headphone name (e.g. "HD 600"); multiple words allowed
         query: Vec<String>,
@@ -203,7 +203,8 @@ fn main() -> Result<()> {
             path: path.to_string_lossy().into_owned(),
             name,
         })?;
-        return print_response(resp);
+        print_response(resp);
+        return Ok(());
     }
 
     // `daemon` controls the user service (systemd on Linux, launchd on
@@ -219,18 +220,20 @@ fn main() -> Result<()> {
             print_devices(&Paint::auto(), &s);
             return Ok(());
         }
-        return print_response(resp);
+        print_response(resp);
+        return Ok(());
     }
 
     // All `channel` subcommands need either a state fetch (info / layout-aware
     // band targeting) or a direct IPC send; handle them together.
     if let Sub::Channel { action } = &sub {
-        return run_channel(action);
+        return run_channel(action.as_ref());
     }
 
     let cmd = to_ipc_command(sub)?;
     let response = send(cmd)?;
-    print_response(response)
+    print_response(response);
+    Ok(())
 }
 
 fn to_ipc_command(sub: Sub) -> Result<Command> {
@@ -258,7 +261,7 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
             }
             Ok(Command::SetEffectIntensity {
                 effect: parse_effect(&effect)?,
-                value: value as f64 / 100.0,
+                value: f64::from(value) / 100.0,
             })
         }
         Sub::Save { name } => Ok(Command::SaveProfile { name }),
@@ -307,34 +310,42 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
 /// Handle the `channel` command group. `info` (or a bare `channel`) renders the
 /// layout; `swap`/`clear` map straight to IPC; `band` fetches state first so
 /// channel names resolve against the live layout and indices are range-checked.
-fn run_channel(action: &Option<ChannelAction>) -> Result<()> {
+fn run_channel(action: Option<&ChannelAction>) -> Result<()> {
     match action {
         None | Some(ChannelAction::Info) => {
             let resp = send(Command::GetState)?;
             if let Response::State(s) = resp {
                 print_channels(&Paint::auto(), &s);
-                Ok(())
             } else {
-                print_response(resp)
+                print_response(resp);
             }
+            Ok(())
         }
         Some(ChannelAction::Swap { a, b }) => {
-            print_response(send(Command::SwapChannels { a: *a, b: *b })?)
+            print_response(send(Command::SwapChannels { a: *a, b: *b })?);
+            Ok(())
         }
-        Some(ChannelAction::Clear) => print_response(send(Command::ClearRouting)?),
+        Some(ChannelAction::Clear) => {
+            print_response(send(Command::ClearRouting)?);
+            Ok(())
+        }
         Some(ChannelAction::Band { index, channels }) => {
             if *index == 0 {
                 bail!("band index is 1-based (see `status`)");
             }
             let st = match send(Command::GetState)? {
                 Response::State(s) => s,
-                other => return print_response(other),
+                other => {
+                    print_response(other);
+                    return Ok(());
+                }
             };
             let mask = parse_channel_mask(channels, &st)?;
             print_response(send(Command::SetBandChannels {
                 index: index - 1,
                 channels: mask,
-            })?)
+            })?);
+            Ok(())
         }
     }
 }
@@ -377,7 +388,7 @@ fn send(cmd: Command) -> Result<Response> {
     Ok(client.send_recv(cmd)?)
 }
 
-fn print_response(resp: Response) -> Result<()> {
+fn print_response(resp: Response) {
     let p = Paint::auto();
     match resp {
         Response::Ok => {}
@@ -406,7 +417,6 @@ fn print_response(resp: Response) -> Result<()> {
             std::process::exit(1);
         }
     }
-    Ok(())
 }
 
 fn print_state(p: &Paint, s: &resonance_ipc::DaemonState) {

@@ -127,7 +127,7 @@ impl GuiApp {
                     .default_size(controls_h)
                     .min_size(80.0)
                     .show_separator_line(false)
-                    .show_inside(ui, |ui| self.lower_columns(ui, &state));
+                    .show_inside(ui, |ui| self.lower_columns(ui, state.as_ref()));
                 // The hero card is the CentralPanel itself (so it fills): a card
                 // frame holds the head, plot, readout AND the reference bar as
                 // nested panels (mockup — the reference bar lives inside the graph
@@ -174,7 +174,7 @@ impl GuiApp {
                     egui::ScrollArea::vertical()
                         .id_salt("controls_scroll")
                         .auto_shrink([false, false])
-                        .show(ui, |ui| self.accordion_stack(ui, &state));
+                        .show(ui, |ui| self.accordion_stack(ui, state.as_ref()));
                 });
             }
         }
@@ -184,7 +184,7 @@ impl GuiApp {
     /// Devices/Profiles — that FILL the width like a native desktop app's panes
     /// (thin splitter rules between them). EQ bands takes all the slack so its
     /// table grows into the space rather than leaving a centred island.
-    fn lower_columns(&mut self, ui: &mut egui::Ui, state: &Option<DaemonState>) {
+    fn lower_columns(&mut self, ui: &mut egui::Ui, state: Option<&DaemonState>) {
         // Frame::NONE on every column so they share one top inset (the panels'
         // default frames differ — that's why EQ bands sat lower than its
         // neighbours) and no separator lines, so the three cards float on the body
@@ -199,7 +199,7 @@ impl GuiApp {
                 if let Some(s) = state {
                     padded_scroll(ui, "effects_scroll", |ui| {
                         section_hint(ui, "Effects", "DSP sound effects", |ui| {
-                            self.effects_section(ui, s)
+                            self.effects_section(ui, s);
                         });
                         // Channels sits under Effects (matches the design mock).
                         // Multi-channel-only — stereo users still get the L/R swap.
@@ -239,7 +239,7 @@ impl GuiApp {
     /// Narrow layout: the lower sections stacked as collapsible cards. No scroll
     /// area of its own — the caller wraps it in one (sized so the controls panel
     /// hugs this content and the graph fills the rest).
-    fn accordion_stack(&mut self, ui: &mut egui::Ui, state: &Option<DaemonState>) {
+    fn accordion_stack(&mut self, ui: &mut egui::Ui, state: Option<&DaemonState>) {
         egui::Frame::default()
             .inner_margin(egui::Margin::symmetric(8, 6))
             .show(ui, |ui| {
@@ -254,16 +254,16 @@ impl GuiApp {
                     }
                 });
                 accordion(ui, "acc_map_v3", "Device mapping", false, |ui| {
-                    self.device_mapping_section(ui)
+                    self.device_mapping_section(ui);
                 });
                 accordion(ui, "acc_prof_v3", "Profiles", false, |ui| {
-                    self.profiles_panel(ui)
+                    self.profiles_panel(ui);
                 });
                 // Channels below Profiles (matches the wide layout).
                 if let Some(s) = state {
                     if s.channels >= 2 {
                         accordion(ui, "acc_ch_v3", "Channels", false, |ui| {
-                            self.channels_section(ui, s)
+                            self.channels_section(ui, s);
                         });
                     }
                 }

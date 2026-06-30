@@ -152,7 +152,7 @@ fn process_alive(pid: u32) -> bool {
         // instance see the dying old PID as alive and bail on the single-instance
         // guard. Treat anything not STILL_ACTIVE as dead.
         let mut code: u32 = 0;
-        let ok = GetExitCodeProcess(handle, &mut code) != 0;
+        let ok = GetExitCodeProcess(handle, &raw mut code) != 0;
         CloseHandle(handle);
         ok && code == STILL_ACTIVE
     }

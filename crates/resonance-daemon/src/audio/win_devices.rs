@@ -8,12 +8,15 @@
 //! ("Speakers (VB-Audio Virtual Cable)" vs "Speakers (High Definition Audio
 //! Device)") so callers can disambiguate cpal's output devices by index.
 //!
-//! This mirrors how FxSound's `audiopassthru` identifies endpoints (by ID /
+//! This mirrors how `FxSound`'s `audiopassthru` identifies endpoints (by ID /
 //! friendly name, never the ambiguous description).
 
 // The COM interfaces below (IPolicyConfig / IPolicyConfigVista) must mirror their
 // vtable method names exactly, which are PascalCase — keep them as-is.
 #![allow(non_snake_case)]
+// `windows::core::interface` expands to vtable code that trips transmute_ptr_to_ptr;
+// the transmute is in the macro output, not our code, so allow it file-wide.
+#![allow(clippy::transmute_ptr_to_ptr)]
 
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Media::Audio::{
@@ -123,7 +126,7 @@ unsafe trait IPolicyConfigVista: windows::core::IUnknown {
 // device on selection. The in-graph APO follows whatever endpoint the audio
 // engine uses (the installer attaches the APO to the render endpoints).
 
-/// CLSID `CPolicyConfigClient` — the documented IPolicyConfig used by EarTrumpet
+/// CLSID `CPolicyConfigClient` — the documented `IPolicyConfig` used by `EarTrumpet`
 /// / nircmd to set the default endpoint.
 const CPOLICYCONFIG_CLIENT: GUID = GUID::from_u128(0x870af99c_171d_4f9e_af0d_e63df40c2bc9);
 
@@ -304,7 +307,11 @@ fn rate_by_name(name: &str) -> windows::core::Result<Option<u32>> {
             let id = dev.GetId()?;
             let mut pfmt: *mut WAVEFORMATEXTENSIBLE = std::ptr::null_mut();
             let mut rate = None;
-            if policy.GetDeviceFormat(PCWSTR(id.0), 0, &mut pfmt).is_ok() && !pfmt.is_null() {
+            if policy
+                .GetDeviceFormat(PCWSTR(id.0), 0, &raw mut pfmt)
+                .is_ok()
+                && !pfmt.is_null()
+            {
                 rate = Some((*pfmt).Format.nSamplesPerSec);
                 CoTaskMemFree(Some(pfmt as *const _));
             }
@@ -337,14 +344,14 @@ fn set_rates_where(target_rate: u32, want: impl Fn(&str) -> bool) -> windows::co
 
             let mut pfmt: *mut WAVEFORMATEXTENSIBLE = std::ptr::null_mut();
             // FALSE -> current format (not the OEM default).
-            if policy.GetDeviceFormat(idw, 0, &mut pfmt).is_ok() && !pfmt.is_null() {
+            if policy.GetDeviceFormat(idw, 0, &raw mut pfmt).is_ok() && !pfmt.is_null() {
                 if (*pfmt).Format.nSamplesPerSec != target_rate {
                     (*pfmt).Format.nSamplesPerSec = target_rate;
-                    let ch = (*pfmt).Format.nChannels as u32;
-                    let bits = (*pfmt).Format.wBitsPerSample as u32;
+                    let ch = u32::from((*pfmt).Format.nChannels);
+                    let bits = u32::from((*pfmt).Format.wBitsPerSample);
                     let block = (ch * bits / 8) as u16;
                     (*pfmt).Format.nBlockAlign = block;
-                    (*pfmt).Format.nAvgBytesPerSec = target_rate * block as u32;
+                    (*pfmt).Format.nAvgBytesPerSec = target_rate * u32::from(block);
                     let _ = policy.SetDeviceFormat(idw, pfmt, std::ptr::null());
                 }
                 CoTaskMemFree(Some(pfmt as *const _));

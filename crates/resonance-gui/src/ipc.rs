@@ -8,14 +8,14 @@
 use resonance_ipc::transport::SyncClient;
 use std::time::Duration;
 
-/// Read/write timeout for the worker's socket. A healthy GetState answers in
+/// Read/write timeout for the worker's socket. A healthy `GetState` answers in
 /// well under a millisecond; this only bounds how long the worker waits on a
 /// stalled daemon before tearing the connection down. It runs off the UI
 /// thread, so a generous value never freezes the window — and being generous
-/// stops a brief daemon stall (e.g. a CoreAudio device switch holding the state
-/// lock) from tripping a needless reconnect. The 150 ms it used to be was tight
-/// enough to flap on macOS under load.
-const TIMEOUT: Duration = Duration::from_millis(1000);
+/// stops a brief daemon stall (e.g. a `CoreAudio` device switch holding the state
+/// lock) from tripping a needless reconnect. A sub-second timeout is too tight
+/// here — it flaps on macOS under load.
+const TIMEOUT: Duration = Duration::from_secs(1);
 
 pub type IpcClient = SyncClient;
 

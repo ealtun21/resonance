@@ -18,3 +18,6 @@ crate-type = ["staticlib", "lib"]
 resonance-dsp = { path = "../resonance-dsp" }
 memmap2 = { workspace = true }
 rustfft = { workspace = true }
+
+[lints]
+workspace = true

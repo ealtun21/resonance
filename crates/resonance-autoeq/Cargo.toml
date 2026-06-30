@@ -12,3 +12,6 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+
+[lints]
+workspace = true

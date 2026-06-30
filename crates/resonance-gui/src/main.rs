@@ -98,7 +98,7 @@ fn main() -> eframe::Result<()> {
 ///   1. If the socket already responds, nothing to do.
 ///   2. Otherwise, if the platform service manager is reachable, ask IT
 ///      to start the daemon. We do NOT fall back to a direct spawn when
-///      service::start() succeeds — the spawned daemon takes the
+///      `service::start()` succeeds — the spawned daemon takes the
 ///      single-instance pidfile, which then blocks the service manager
 ///      from ever starting its own (the daemon refuses to boot when
 ///      another instance owns the pidfile). Mixing the two control

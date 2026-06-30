@@ -11,6 +11,7 @@
 use resonance_ipc::curve::RefCurve;
 use serde::Deserialize;
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 
@@ -67,7 +68,7 @@ struct Phone {
     suffix: StrOrVec,
 }
 
-/// A phone_book `file`/`suffix` field is a single string or an array of them.
+/// A `phone_book` `file`/`suffix` field is a single string or an array of them.
 #[derive(Deserialize, Default)]
 #[serde(untagged)]
 enum StrOrVec {
@@ -137,7 +138,7 @@ pub struct Catalog {
 /// A fetched measurement, ready to install as the active reference measurement.
 pub struct Fetched {
     pub name: String,
-    /// In-ear rig (drives AutoEQ's smoothing profile).
+    /// In-ear rig (drives `AutoEQ`'s smoothing profile).
     pub iem: bool,
     pub left: RefCurve,
     pub right: Option<RefCurve>,
@@ -168,8 +169,8 @@ pub enum DlEvent {
     Status(String),
     Busy(bool),
     Fetched(Fetched),
-    /// A curve to add to the target library (from FetchTarget /
-    /// AddMeasurementTarget).
+    /// A curve to add to the target library (from `FetchTarget` /
+    /// `AddMeasurementTarget`).
     FetchedTarget {
         name: String,
         curve: RefCurve,
@@ -189,12 +190,16 @@ struct Source {
 }
 
 /// Spawn the download worker. Returns the command sender + event receiver.
+///
+/// # Panics
+///
+/// Panics if the OS refuses to spawn the background worker thread.
 pub fn spawn(ctx: Wake) -> (Sender<DlCmd>, Receiver<DlEvent>) {
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<DlCmd>();
     let (ev_tx, ev_rx) = std::sync::mpsc::channel::<DlEvent>();
     std::thread::Builder::new()
         .name("resonance-curves".into())
-        .spawn(move || worker(cmd_rx, ev_tx, ctx))
+        .spawn(move || worker(cmd_rx, ev_tx, &ctx))
         .expect("spawn curve downloader");
     (cmd_tx, ev_rx)
 }
@@ -206,7 +211,10 @@ pub fn spawn(ctx: Wake) -> (Sender<DlCmd>, Receiver<DlEvent>) {
 /// every dialog-open. Manual "Refresh" ignores this and re-fetches everything.
 const CATALOG_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60 * 24 * 7);
 
-fn worker(rx: Receiver<DlCmd>, tx: Sender<DlEvent>, ctx: Wake) {
+// rx/tx are moved into and owned for the lifetime of the spawned worker thread,
+// so they must be owned, not borrowed.
+#[allow(clippy::needless_pass_by_value)]
+fn worker(rx: Receiver<DlCmd>, tx: Sender<DlEvent>, ctx: &Wake) {
     let mut sites: Vec<Source> = Vec::new();
     while let Ok(cmd) = rx.recv() {
         let _ = tx.send(DlEvent::Busy(true));
@@ -229,14 +237,14 @@ fn worker(rx: Receiver<DlCmd>, tx: Sender<DlEvent>, ctx: Wake) {
                     }
                     let idx: Vec<usize> = (0..sites.len()).filter(|&i| sites[i].enabled).collect();
                     // Phase 1 — instant snapshot from cache.
-                    load_sources_parallel(&mut sites, &idx, Freshness::CacheFirst, &tx, &ctx);
+                    load_sources_parallel(&mut sites, &idx, Freshness::CacheFirst, &tx, ctx);
                     // Phase 2 — freshen stale indexes in the background, republish.
                     load_sources_parallel(
                         &mut sites,
                         &idx,
                         Freshness::IfStale(CATALOG_TTL),
                         &tx,
-                        &ctx,
+                        ctx,
                     );
                 } else {
                     let _ = tx.send(DlEvent::Catalog(snapshot(&sites)));
@@ -251,7 +259,7 @@ fn worker(rx: Receiver<DlCmd>, tx: Sender<DlEvent>, ctx: Wake) {
                     }
                 }
                 let idx: Vec<usize> = (0..sites.len()).filter(|&i| sites[i].enabled).collect();
-                load_sources_parallel(&mut sites, &idx, Freshness::Refresh, &tx, &ctx);
+                load_sources_parallel(&mut sites, &idx, Freshness::Refresh, &tx, ctx);
             }
             DlCmd::SetEnabled(id, on) => {
                 if let Some(src) = sites.iter_mut().find(|s| s.id == id) {
@@ -268,7 +276,7 @@ fn worker(rx: Receiver<DlCmd>, tx: Sender<DlEvent>, ctx: Wake) {
             DlCmd::SetAll(on) => {
                 // Flip every flag and report it IMMEDIATELY so the toggles react
                 // at once; then load all newly-enabled indexes in parallel.
-                for src in sites.iter_mut() {
+                for src in &mut sites {
                     src.enabled = on;
                 }
                 save_enabled(&sites);
@@ -276,11 +284,11 @@ fn worker(rx: Receiver<DlCmd>, tx: Sender<DlEvent>, ctx: Wake) {
                 ctx();
                 if on {
                     let idx: Vec<usize> = (0..sites.len()).filter(|&i| !sites[i].loaded).collect();
-                    load_sources_parallel(&mut sites, &idx, Freshness::CacheFirst, &tx, &ctx);
+                    load_sources_parallel(&mut sites, &idx, Freshness::CacheFirst, &tx, ctx);
                 }
             }
             DlCmd::SetDefault => {
-                for src in sites.iter_mut() {
+                for src in &mut sites {
                     src.enabled = DEFAULT_ENABLED.contains(&src.id.as_str());
                 }
                 save_enabled(&sites);
@@ -289,7 +297,7 @@ fn worker(rx: Receiver<DlCmd>, tx: Sender<DlEvent>, ctx: Wake) {
                 let idx: Vec<usize> = (0..sites.len())
                     .filter(|&i| sites[i].enabled && !sites[i].loaded)
                     .collect();
-                load_sources_parallel(&mut sites, &idx, Freshness::CacheFirst, &tx, &ctx);
+                load_sources_parallel(&mut sites, &idx, Freshness::CacheFirst, &tx, ctx);
             }
             DlCmd::Fetch(m) => match fetch_model(&m) {
                 Ok(f) => {
@@ -410,11 +418,13 @@ fn load_enabled() -> Option<HashSet<String>> {
 fn save_enabled(sites: &[Source]) {
     let dir = resonance_ipc::paths::config_dir();
     let _ = std::fs::create_dir_all(&dir);
-    let body: String = sites
+    let body = sites
         .iter()
         .filter(|s| s.enabled)
-        .map(|s| format!("{}\n", s.id))
-        .collect();
+        .fold(String::new(), |mut acc, s| {
+            let _ = writeln!(acc, "{}", s.id);
+            acc
+        });
     let _ = std::fs::write(enabled_file(), body);
 }
 
@@ -432,7 +442,7 @@ fn db_base_url(src: &Source, db: &DbEntry) -> String {
     base_url
 }
 
-/// Parse a phone_book.json body into model entries appended to `out`.
+/// Parse a `phone_book.json` body into model entries appended to `out`.
 fn parse_phone_book(
     body: &str,
     base_url: &str,
@@ -700,7 +710,7 @@ fn fetch_measurement_target(m: &ModelEntry) -> Result<(String, RefCurve), String
 
 // ── config.js target parsing ──────────────────────────────────────────────────
 
-/// Extract target file basenames from a CrinGraph `config.js`. Finds the
+/// Extract target file basenames from a `CrinGraph` `config.js`. Finds the
 /// `targets = [ … ]` array and collects every quoted string inside each
 /// `files:[ … ]` (a target's basename → `<base>data/[targets/]<name> Target.txt`).
 /// Comments are stripped first (sites comment out dead targets); the whole scan
@@ -1056,9 +1066,9 @@ fn pct(s: &str) -> String {
     for b in s.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
+                out.push(b as char);
             }
-            _ => out.push_str(&format!("%{b:02X}")),
+            _ => write!(out, "%{b:02X}").unwrap(),
         }
     }
     out

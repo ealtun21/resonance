@@ -7,10 +7,10 @@
 
 use crate::curve;
 use crate::ipc::IpcClient;
-use crate::state::*;
+use crate::state::{Confirm, Dialog, Snapshot};
 use crate::theme::{Palette, Theme};
 use crate::ui::kit;
-use crate::ui::widgets::*;
+use crate::ui::widgets::{dialog_window, install_symbol_fonts};
 use eframe::egui;
 use resonance_ipc::{Command, DaemonState, Response, service, transport::TransportError};
 use std::sync::{Arc, Mutex};
@@ -27,7 +27,7 @@ const FRAME_INTERVAL: Duration = Duration::from_micros(6_944);
 /// frame both hammered the socket and made the bars jitter.
 const STATE_INTERVAL: Duration = Duration::from_millis(33);
 /// Profiles/mappings rarely change — poll them far less often than state.
-const META_INTERVAL: Duration = Duration::from_millis(1000);
+const META_INTERVAL: Duration = Duration::from_secs(1);
 /// How often the worker retries `connect()` while the daemon is unreachable.
 /// Snappy so a reconnect lands well inside `CONN_GRACE` after a daemon restart.
 const RECONNECT_INTERVAL: Duration = Duration::from_millis(500);
@@ -36,7 +36,7 @@ const RECONNECT_INTERVAL: Duration = Duration::from_millis(500);
 /// falling back to the "No daemon connected" start screen. A daemon restart or
 /// a momentary stall reconnects well within this window, so the UI no longer
 /// flickers between connected and disconnected on every blip.
-const CONN_GRACE: Duration = Duration::from_millis(3000);
+const CONN_GRACE: Duration = Duration::from_secs(3);
 /// Matugen colour-file mtime poll: snappy so the GUI recolours nearly as fast
 /// as other matugen-aware apps when the wallpaper/theme changes.
 const MATUGEN_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -126,7 +126,7 @@ mod native_titlebar {
 
     /// 0x00BBGGRR COLORREF from an egui colour.
     fn colorref(c: egui::Color32) -> u32 {
-        (c.r() as u32) | ((c.g() as u32) << 8) | ((c.b() as u32) << 16)
+        u32::from(c.r()) | (u32::from(c.g()) << 8) | (u32::from(c.b()) << 16)
     }
 
     fn hwnd() -> isize {
@@ -142,20 +142,20 @@ mod native_titlebar {
         if h == 0 {
             return false;
         }
-        let dark_i: i32 = dark as i32;
-        let cap = colorref(caption);
-        let txt = colorref(text);
+        let dark_i: i32 = i32::from(dark);
+        let caption_rgb = colorref(caption);
+        let text_rgb = colorref(text);
         // SAFETY: each call passes a pointer to a 4-byte value of the stated
         // size; unsupported attributes (Win10) just return an error we ignore.
         unsafe {
             DwmSetWindowAttribute(
                 h,
                 DWMWA_USE_IMMERSIVE_DARK_MODE,
-                (&dark_i as *const i32).cast(),
+                (&raw const dark_i).cast(),
                 4,
             );
-            DwmSetWindowAttribute(h, DWMWA_CAPTION_COLOR, (&cap as *const u32).cast(), 4);
-            DwmSetWindowAttribute(h, DWMWA_TEXT_COLOR, (&txt as *const u32).cast(), 4);
+            DwmSetWindowAttribute(h, DWMWA_CAPTION_COLOR, (&raw const caption_rgb).cast(), 4);
+            DwmSetWindowAttribute(h, DWMWA_TEXT_COLOR, (&raw const text_rgb).cast(), 4);
         }
         true
     }
@@ -163,10 +163,10 @@ mod native_titlebar {
 
 /// macOS: vertically centre the window's traffic-light buttons within our
 /// toolbar. With the unified (transparent) title bar the toolbar is taller than
-/// the standard title bar AppKit lays the buttons out for, so they sit high and
+/// the standard title bar `AppKit` lays the buttons out for, so they sit high and
 /// look top-aligned; we nudge them to the toolbar's vertical centre. Re-applied
-/// each frame because AppKit re-lays them out on resize. Best-effort: any missing
-/// piece just leaves the buttons where AppKit put them.
+/// each frame because `AppKit` re-lays them out on resize. Best-effort: any missing
+/// piece just leaves the buttons where `AppKit` put them.
 #[cfg(target_os = "macos")]
 mod traffic_lights {
     use objc2::MainThreadMarker;
@@ -281,7 +281,7 @@ pub struct GuiApp {
     pub(crate) last_service_poll: Instant,
     /// Channel into the service worker. We send `ServiceAction` requests
     /// off the UI thread because `launchctl` calls + the daemon's
-    /// CoreAudio teardown can take 200–800 ms — synchronous on the UI
+    /// `CoreAudio` teardown can take 200–800 ms — synchronous on the UI
     /// thread froze egui visibly when the user clicked Start/Stop.
     pub(crate) service_tx: std::sync::mpsc::Sender<ServiceAction>,
     /// Worker result channel. Each tick we drain it and apply updates
@@ -370,6 +370,131 @@ fn worker_status(shared: &Arc<Mutex<GuiShared>>, msg: String) {
     }
 }
 
+/// Outcome of draining the queued UI commands in the IPC worker.
+enum DrainOutcome {
+    /// The command channel is empty — carry on with the rest of the frame.
+    Empty,
+    /// A transport failure occurred; the caller must drop the connection and
+    /// reconnect on the next iteration.
+    ConnectionLost,
+    /// The UI-thread sender hung up — the worker thread should exit.
+    Shutdown,
+}
+
+/// Apply all currently-queued UI commands to the daemon connection `c`.
+///
+/// A daemon-level rejection (`Response::Error`) is surfaced as worker status but
+/// keeps the socket — only a transport failure tears the connection down. Sets
+/// `refresh_meta_now` when a command (or its follow-up) changed the profile set.
+fn drain_commands(
+    rx: &std::sync::mpsc::Receiver<WorkerCmd>,
+    shared: &Arc<Mutex<GuiShared>>,
+    c: &mut IpcClient,
+    refresh_meta_now: &mut bool,
+) -> DrainOutcome {
+    loop {
+        let msg = match rx.try_recv() {
+            Ok(m) => m,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return DrainOutcome::Empty,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => return DrainOutcome::Shutdown,
+        };
+        match msg {
+            WorkerCmd::Cmd(cmd) => match c.send(cmd) {
+                Ok(()) => {}
+                Err(TransportError::Daemon(msg)) => worker_status(shared, msg),
+                Err(_) => return DrainOutcome::ConnectionLost,
+            },
+            WorkerCmd::RefreshMeta => *refresh_meta_now = true,
+            WorkerCmd::Import(path) => {
+                match c.send_recv(Command::ImportPreset { path, name: None }) {
+                    Ok(Response::Imported(name)) => {
+                        let _ = c.send(Command::LoadProfile { name: name.clone() });
+                        *refresh_meta_now = true;
+                        worker_status(shared, format!("imported + loaded '{name}'"));
+                    }
+                    Ok(Response::Error(e)) => {
+                        worker_status(shared, format!("import failed: {e}"));
+                    }
+                    Ok(_) => worker_status(shared, "import failed".into()),
+                    Err(_) => return DrainOutcome::ConnectionLost,
+                }
+            }
+            WorkerCmd::Export(path) => {
+                match c.send_recv(Command::ExportProfile { path: path.clone() }) {
+                    Ok(Response::Ok) => worker_status(shared, format!("exported → {path}")),
+                    Ok(Response::Error(e)) => {
+                        worker_status(shared, format!("export failed: {e}"));
+                    }
+                    Ok(_) => worker_status(shared, "export failed".into()),
+                    Err(_) => return DrainOutcome::ConnectionLost,
+                }
+            }
+            WorkerCmd::ExportNamed(name, path) => {
+                match c.send_recv(Command::ExportProfileNamed {
+                    name: name.clone(),
+                    path: path.clone(),
+                }) {
+                    Ok(Response::Ok) => {
+                        worker_status(shared, format!("exported '{name}' → {path}"));
+                    }
+                    Ok(Response::Error(e)) => {
+                        worker_status(shared, format!("export failed: {e}"));
+                    }
+                    Ok(_) => worker_status(shared, "export failed".into()),
+                    Err(_) => return DrainOutcome::ConnectionLost,
+                }
+            }
+        }
+    }
+}
+
+/// Poll the live daemon state and publish it for the UI thread. Returns `false`
+/// on a transport error (caller drops the connection); the published state is
+/// set to `None` on failure so the UI sees the loss.
+fn poll_state(shared: &Arc<Mutex<GuiShared>>, c: &mut IpcClient, ctx: &egui::Context) -> bool {
+    if let Ok(st) = c.get_state() {
+        if let Ok(mut s) = shared.lock() {
+            s.state = Some(st);
+        }
+        ctx.request_repaint();
+        true
+    } else {
+        if let Ok(mut s) = shared.lock() {
+            s.state = None;
+        }
+        ctx.request_repaint();
+        false
+    }
+}
+
+/// Refresh the slow-changing meta (profile list + device→profile mappings) and
+/// publish it. Returns `false` on a transport error.
+///
+/// A transport error here must tear the connection down — leaving a half-read
+/// framed reply on the socket would desync the next `GetState` and surface as a
+/// spurious disconnect.
+fn refresh_meta(shared: &Arc<Mutex<GuiShared>>, c: &mut IpcClient) -> bool {
+    match c.send_recv(Command::ListProfiles) {
+        Ok(Response::PresetList(p)) => {
+            if let Ok(mut s) = shared.lock() {
+                s.profiles = p;
+            }
+        }
+        Ok(_) => {}
+        Err(_) => return false,
+    }
+    match c.send_recv(Command::ListMappings) {
+        Ok(Response::Mappings(m)) => {
+            if let Ok(mut s) = shared.lock() {
+                s.mappings = m;
+            }
+        }
+        Ok(_) => {}
+        Err(_) => return false,
+    }
+    true
+}
+
 /// IPC worker thread. Owns the daemon connection and performs ALL IPC —
 /// connect, poll, commands, meta — so the egui UI thread never blocks. A
 /// stopped or restarting daemon therefore can't freeze the window: blocking
@@ -383,153 +508,48 @@ fn spawn_ipc_worker(
         .name("resonance-ipc".into())
         .spawn(move || {
             let mut ipc: Option<IpcClient> = None;
-            let mut last_meta = Instant::now() - META_INTERVAL;
+            let mut last_meta = Instant::now().checked_sub(META_INTERVAL).unwrap();
             let mut refresh_meta_now = true;
             loop {
                 if ipc.is_none() {
-                    match crate::ipc::connect() {
-                        Ok(c) => {
-                            ipc = Some(c);
-                            refresh_meta_now = true;
+                    if let Ok(c) = crate::ipc::connect() {
+                        ipc = Some(c);
+                        refresh_meta_now = true;
+                    } else {
+                        if let Ok(mut s) = shared.lock() {
+                            s.state = None;
                         }
-                        Err(_) => {
-                            if let Ok(mut s) = shared.lock() {
-                                s.state = None;
-                            }
-                            ctx.request_repaint();
-                            std::thread::sleep(RECONNECT_INTERVAL);
-                            continue;
-                        }
+                        ctx.request_repaint();
+                        std::thread::sleep(RECONNECT_INTERVAL);
+                        continue;
                     }
                 }
 
                 // Apply queued UI commands.
-                loop {
-                    let msg = match rx.try_recv() {
-                        Ok(m) => m,
-                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                        Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
-                    };
-                    let Some(c) = ipc.as_mut() else { break };
-                    match msg {
-                        WorkerCmd::Cmd(cmd) => {
-                            // A daemon-level rejection (Response::Error) is not a
-                            // dead connection — surface it and keep the socket.
-                            // Only a transport failure tears it down to reconnect.
-                            match c.send(cmd) {
-                                Ok(()) => {}
-                                Err(TransportError::Daemon(msg)) => worker_status(&shared, msg),
-                                Err(_) => {
-                                    ipc = None;
-                                    break;
-                                }
-                            }
-                        }
-                        WorkerCmd::RefreshMeta => refresh_meta_now = true,
-                        WorkerCmd::Import(path) => {
-                            match c.send_recv(Command::ImportPreset { path, name: None }) {
-                                Ok(Response::Imported(name)) => {
-                                    let _ = c.send(Command::LoadProfile { name: name.clone() });
-                                    refresh_meta_now = true;
-                                    worker_status(&shared, format!("imported + loaded '{name}'"));
-                                }
-                                Ok(Response::Error(e)) => {
-                                    worker_status(&shared, format!("import failed: {e}"))
-                                }
-                                Ok(_) => worker_status(&shared, "import failed".into()),
-                                Err(_) => {
-                                    ipc = None;
-                                    break;
-                                }
-                            }
-                        }
-                        WorkerCmd::Export(path) => {
-                            match c.send_recv(Command::ExportProfile { path: path.clone() }) {
-                                Ok(Response::Ok) => {
-                                    worker_status(&shared, format!("exported → {path}"))
-                                }
-                                Ok(Response::Error(e)) => {
-                                    worker_status(&shared, format!("export failed: {e}"))
-                                }
-                                Ok(_) => worker_status(&shared, "export failed".into()),
-                                Err(_) => {
-                                    ipc = None;
-                                    break;
-                                }
-                            }
-                        }
-                        WorkerCmd::ExportNamed(name, path) => {
-                            match c.send_recv(Command::ExportProfileNamed {
-                                name: name.clone(),
-                                path: path.clone(),
-                            }) {
-                                Ok(Response::Ok) => {
-                                    worker_status(&shared, format!("exported '{name}' → {path}"))
-                                }
-                                Ok(Response::Error(e)) => {
-                                    worker_status(&shared, format!("export failed: {e}"))
-                                }
-                                Ok(_) => worker_status(&shared, "export failed".into()),
-                                Err(_) => {
-                                    ipc = None;
-                                    break;
-                                }
-                            }
-                        }
+                if let Some(c) = ipc.as_mut() {
+                    match drain_commands(&rx, &shared, c, &mut refresh_meta_now) {
+                        DrainOutcome::Empty => {}
+                        DrainOutcome::ConnectionLost => ipc = None,
+                        DrainOutcome::Shutdown => return,
                     }
                 }
 
                 // Poll state.
                 if let Some(c) = ipc.as_mut() {
-                    match c.get_state() {
-                        Ok(st) => {
-                            if let Ok(mut s) = shared.lock() {
-                                s.state = Some(st);
-                            }
-                            ctx.request_repaint();
-                        }
-                        Err(_) => {
-                            ipc = None;
-                            if let Ok(mut s) = shared.lock() {
-                                s.state = None;
-                            }
-                            ctx.request_repaint();
-                        }
+                    if !poll_state(&shared, c, &ctx) {
+                        ipc = None;
                     }
                 }
 
-                // Meta (profiles + mappings) on a slow timer / on request. A
-                // transport error here must tear the connection down — leaving a
-                // half-read framed reply on the socket would desync the next
-                // GetState and surface as a spurious disconnect.
-                if ipc.is_some() && (refresh_meta_now || last_meta.elapsed() >= META_INTERVAL) {
-                    let c = ipc.as_mut().unwrap();
-                    let mut ok = true;
-                    match c.send_recv(Command::ListProfiles) {
-                        Ok(Response::PresetList(p)) => {
-                            if let Ok(mut s) = shared.lock() {
-                                s.profiles = p;
-                            }
+                // Meta (profiles + mappings) on a slow timer / on request.
+                if let Some(c) = ipc.as_mut() {
+                    if refresh_meta_now || last_meta.elapsed() >= META_INTERVAL {
+                        if refresh_meta(&shared, c) {
+                            last_meta = Instant::now();
+                            refresh_meta_now = false;
+                        } else {
+                            ipc = None;
                         }
-                        Ok(_) => {}
-                        Err(_) => ok = false,
-                    }
-                    if ok {
-                        match c.send_recv(Command::ListMappings) {
-                            Ok(Response::Mappings(m)) => {
-                                if let Ok(mut s) = shared.lock() {
-                                    s.mappings = m;
-                                }
-                            }
-                            Ok(_) => {}
-                            Err(_) => ok = false,
-                        }
-                    }
-                    if ok {
-                        last_meta = Instant::now();
-                        refresh_meta_now = false;
-                    } else {
-                        ipc = None;
                     }
                 }
 
@@ -553,8 +573,7 @@ impl GuiApp {
         let theme = cc
             .storage
             .and_then(|s| s.get_string("theme"))
-            .map(|s| Theme::from_label(&s))
-            .unwrap_or(Theme::Resonance);
+            .map_or(Theme::Resonance, |s| Theme::from_label(&s));
         cc.egui_ctx.set_visuals(theme.visuals());
         // Restore the reference overlay (measurement + target) from a previous
         // session so a loaded measurement persists across restarts.
@@ -649,8 +668,7 @@ impl GuiApp {
             per_channel_eq: cc
                 .storage
                 .and_then(|s| s.get_string("per_channel_eq"))
-                .map(|v| v == "true")
-                .unwrap_or(false),
+                .is_some_and(|v| v == "true"),
             hidden_curves: std::collections::HashSet::new(),
             demo: std::env::var("RESONANCE_DEMO").is_ok(),
             open_customizer: std::env::var("RESONANCE_OPEN").as_deref() == Ok("customize"),
@@ -658,88 +676,94 @@ impl GuiApp {
         if let Some(p) = persisted_ref.and_then(|j| serde_json::from_str(&j).ok()) {
             app.reference.restore(p);
         }
-        // Dev/test hook: `RESONANCE_DEMO=1` injects a representative populated
-        // state so the full UI renders without a daemon — for the screenshot
-        // harness / design work. `pull_shared` early-returns in demo mode.
-        if app.demo {
-            app.state = Some(demo_state());
-            app.profiles = vec![
-                "Reference".into(),
-                "Harman 660S".into(),
-                "Late Night".into(),
-                "Vocal Forward".into(),
-                "Bass Heavy".into(),
-            ];
-            app.mappings = vec![
-                ("alsa_output.usb-D1".into(), "Reference".into()),
-                ("bluez.hd660s".into(), "Harman 660S".into()),
-                ("bluez.wh1000xm5".into(), "Commute".into()),
-            ];
-            app.per_channel_eq = true;
-            // Reference overlay on (target + synthetic measurement + bounds) so
-            // the demo shows the full reference workflow like the design mock.
-            let meas: Vec<(f64, f64)> = (0..96)
-                .map(|i| {
-                    let f = 20.0 * 1000f64.powf(i as f64 / 95.0); // 20 Hz → 20 kHz
-                    let l = f.log10();
-                    let db = 84.0
-                        + 4.0 / (1.0 + (f / 110.0).powi(2))
-                        + 3.0 * (-((l - 2700f64.log10()) / 0.22).powi(2)).exp()
-                        - 4.0 / (1.0 + (1500.0 / f).powi(3));
-                    (f, db)
-                })
-                .collect();
-            app.reference.set_measurement(
-                "Sennheiser HD 660S".into(),
-                false,
-                resonance_ipc::curve::RefCurve { points: meas },
-                None,
-            );
-            app.reference.enabled = true;
-            app.reference.show_bounds = true;
-            if let Some((_, sel)) = app
-                .reference
-                .target_options()
-                .into_iter()
-                .find(|(n, _)| n != "None")
-            {
-                app.reference.set_target(sel);
-            }
+        app.apply_dev_hooks(&cc.egui_ctx);
+        app
+    }
+
+    /// Apply the startup dev/screenshot hooks (`RESONANCE_DEMO`,
+    /// `RESONANCE_OPEN`, `RESONANCE_DEMO_REF`). No effect in normal use — they
+    /// only populate state / open dialogs for the screenshot harness.
+    fn apply_dev_hooks(&mut self, ctx: &egui::Context) {
+        if self.demo {
+            self.populate_demo_state();
         }
-        // Dev/test hook: `RESONANCE_OPEN=manage|browse` opens that dialog at
-        // startup so the screenshot harness can capture it. No effect otherwise.
+        // `RESONANCE_OPEN=manage|browse` opens that dialog at startup so the
+        // screenshot harness can capture it.
         match std::env::var("RESONANCE_OPEN").as_deref() {
-            Ok("manage") => app.reference.show_manage = true,
-            Ok("browse") => app.reference.show_browser = true,
+            Ok("manage") => self.reference.show_manage = true,
+            Ok("browse") => self.reference.show_browser = true,
             _ => {}
         }
-        // Dev/test hook: `RESONANCE_DEMO_REF=norm|raw` loads the first local curve
-        // as a stand-in measurement and turns the reference overlay on (normalised
-        // or absolute), so the harness can screenshot the overlay/legend/normalise
-        // morph without a live measurement. Also clears persisted panel sizes so
-        // the graph is full-height. No effect otherwise.
         if let Ok(mode) = std::env::var("RESONANCE_DEMO_REF") {
-            let dir = resonance_ipc::paths::user_curve_dir();
-            if let Ok(rd) = std::fs::read_dir(&dir) {
-                if let Some(p) = rd
-                    .flatten()
-                    .map(|e| e.path())
-                    .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("txt"))
-                    .min()
-                    && app.reference.load_measurement_file(&p)
-                {
-                    app.reference.enabled = true;
-                    app.reference.normalized = mode != "raw";
-                    app.reference.show_bounds = true;
-                }
-            }
-            use egui::containers::panel::PanelState;
-            cc.egui_ctx.data_mut(|d| {
-                d.remove::<PanelState>(egui::Id::new("controls_panel"));
-                d.remove::<PanelState>(egui::Id::new("graph_narrow"));
-            });
+            self.apply_demo_ref(ctx, &mode);
         }
-        app
+    }
+
+    /// `RESONANCE_DEMO=1`: inject a representative populated state so the full UI
+    /// renders without a daemon — for the screenshot harness / design work.
+    /// `pull_shared` early-returns in demo mode so IPC never clobbers it.
+    fn populate_demo_state(&mut self) {
+        self.state = Some(demo_state());
+        self.profiles = vec![
+            "Reference".into(),
+            "Harman 660S".into(),
+            "Late Night".into(),
+            "Vocal Forward".into(),
+            "Bass Heavy".into(),
+        ];
+        self.mappings = vec![
+            ("alsa_output.usb-D1".into(), "Reference".into()),
+            ("bluez.hd660s".into(), "Harman 660S".into()),
+            ("bluez.wh1000xm5".into(), "Commute".into()),
+        ];
+        self.per_channel_eq = true;
+        // Reference overlay on (target + synthetic measurement + bounds) so the
+        // demo shows the full reference workflow like the design mock.
+        self.reference.set_measurement(
+            "Sennheiser HD 660S".into(),
+            false,
+            resonance_ipc::curve::RefCurve {
+                points: demo_measurement(),
+            },
+            None,
+        );
+        self.reference.enabled = true;
+        self.reference.show_bounds = true;
+        if let Some((_, sel)) = self
+            .reference
+            .target_options()
+            .into_iter()
+            .find(|(n, _)| n != "None")
+        {
+            self.reference.set_target(sel);
+        }
+    }
+
+    /// `RESONANCE_DEMO_REF=norm|raw`: load the first local curve as a stand-in
+    /// measurement and turn the reference overlay on (normalised unless `raw`),
+    /// so the harness can screenshot the overlay/legend/normalise morph without a
+    /// live measurement. Also clears persisted panel sizes so the graph is
+    /// full-height.
+    fn apply_demo_ref(&mut self, ctx: &egui::Context, mode: &str) {
+        use egui::containers::panel::PanelState;
+        let dir = resonance_ipc::paths::user_curve_dir();
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            if let Some(p) = rd
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("txt"))
+                .min()
+                && self.reference.load_measurement_file(&p)
+            {
+                self.reference.enabled = true;
+                self.reference.normalized = mode != "raw";
+                self.reference.show_bounds = true;
+            }
+        }
+        ctx.data_mut(|d| {
+            d.remove::<PanelState>(egui::Id::new("controls_panel"));
+            d.remove::<PanelState>(egui::Id::new("graph_narrow"));
+        });
     }
 
     /// Drain download-worker events each frame: update the catalog snapshot /
@@ -767,7 +791,7 @@ impl GuiApp {
         }
     }
 
-    /// Apply a finished background Auto-EQ fit (undo snapshot + ApplyState).
+    /// Apply a finished background Auto-EQ fit (undo snapshot + `ApplyState`).
     pub(crate) fn pump_autoeq(&mut self) {
         while let Ok(o) = self.autoeq_rx.try_recv() {
             self.autoeq_busy = false;
@@ -819,8 +843,7 @@ impl GuiApp {
         let now = Instant::now();
         let coalesce = self
             .last_edit
-            .map(|t| now.duration_since(t) < UNDO_COALESCE)
-            .unwrap_or(false);
+            .is_some_and(|t| now.duration_since(t) < UNDO_COALESCE);
         if !coalesce {
             if let Some(s) = self.snapshot() {
                 self.undo_stack.push(s);
@@ -918,7 +941,7 @@ impl GuiApp {
         // Drop lock pins that no longer name a valid band — a profile load or
         // another client can shrink the band list, after which a stale pin would
         // silently apply to a different band.
-        let bands = self.state.as_ref().map(|s| s.bands.len()).unwrap_or(0);
+        let bands = self.state.as_ref().map_or(0, |s| s.bands.len());
         self.vlock = self.vlock.filter(|&i| i < bands);
         self.hlock = self.hlock.filter(|&i| i < bands);
         if let Some(msg) = status {
@@ -981,6 +1004,24 @@ impl GuiApp {
         self.dirty = false; // loading a preset replaces the current tuning
         let _ = self.cmd_tx.send(WorkerCmd::Import(path));
     }
+}
+
+/// A synthetic headphone measurement for `RESONANCE_DEMO=1`: 96 points log-spaced
+/// 20 Hz → 20 kHz around an 84 dB baseline, with a low-frequency lift, a presence
+/// hump near 2.7 kHz, and a sub-bass roll-off — a plausible-looking IEM curve for
+/// the demo overlay.
+fn demo_measurement() -> Vec<(f64, f64)> {
+    (0..96)
+        .map(|i| {
+            let f = 20.0 * 1000f64.powf(f64::from(i) / 95.0); // 20 Hz → 20 kHz
+            let l = f.log10();
+            let db = 84.0
+                + 4.0 / (1.0 + (f / 110.0).powi(2))
+                + 3.0 * (-((l - 2700f64.log10()) / 0.22).powi(2)).exp()
+                - 4.0 / (1.0 + (1500.0 / f).powi(3));
+            (f, db)
+        })
+        .collect()
 }
 
 /// A representative populated `DaemonState` for `RESONANCE_DEMO=1` — lets the full
@@ -1106,11 +1147,31 @@ impl eframe::App for GuiApp {
         // Read the latest snapshot the IPC worker published (never blocks).
         self.pull_shared();
 
-        // Save-before-quit guard: if the EQ has unsaved edits, intercept the
-        // window close and offer to save them as a profile first.
-        if ui.ctx().input(|i| i.viewport().close_requested()) && !self.allow_close && self.dirty {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        self.handle_quit_guard(ui.ctx());
+        self.run_window_migration(ui.ctx());
+        #[cfg(target_os = "windows")]
+        self.apply_native_titlebar();
+        self.handle_keyboard(ui.ctx());
+        self.pump_workers(ui.ctx());
+
+        self.render_panels(ui);
+
+        let ctx = ui.ctx().clone();
+        self.render_dialogs(&ctx);
+
+        // Drive ~144 fps repaint so spectrum/curve stay smooth.
+        ctx.request_repaint_after(FRAME_INTERVAL);
+    }
+}
+
+impl GuiApp {
+    /// Save-before-quit guard plus the deferred close. If the EQ has unsaved
+    /// edits, intercept the window close and offer to save them as a profile
+    /// first; once a "Save & Quit" has had a moment to flush to the daemon,
+    /// actually close the window.
+    fn handle_quit_guard(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close && self.dirty {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             if !self.pending_quit {
                 self.pending_quit = true;
                 self.quit_save_name = self
@@ -1120,33 +1181,32 @@ impl eframe::App for GuiApp {
                     .unwrap_or_default();
             }
         }
-        // Deferred close: once a "Save & Quit" has had a moment to flush to the
-        // daemon, actually close the window.
         if let Some(dl) = self.quit_deadline {
             if Instant::now() >= dl {
                 self.quit_deadline = None;
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
+    }
 
-        // One-time window-state migration: older (CSD/borderless) builds persisted
-        // `fullscreen:true`/`maximized:true` plus panel sizes scaled to the full
-        // screen, which eframe restores into this decorated build — opening
-        // full-screen with no title bar and squashed panels. Force a normal window
-        // once; then, after it has resized (a few frames later), clear the stale
-        // panel sizes so they re-derive from the windowed height. Runs once, then
-        // the user's later window/panel choices are respected and re-persisted.
-        let migrated = ui.ctx().data_mut(|d| {
+    /// One-time window-state migration: older (CSD/borderless) builds persisted
+    /// `fullscreen:true`/`maximized:true` plus panel sizes scaled to the full
+    /// screen, which eframe restores into this decorated build — opening
+    /// full-screen with no title bar and squashed panels. Force a normal window
+    /// once; then, after it has resized (a few frames later), clear the stale
+    /// panel sizes so they re-derive from the windowed height. Runs once, then
+    /// the user's later window/panel choices are respected and re-persisted.
+    fn run_window_migration(&mut self, ctx: &egui::Context) {
+        use egui::containers::panel::PanelState;
+        let migrated = ctx.data_mut(|d| {
             let id = egui::Id::new("window_state_migrated_v07");
             let done = d.get_persisted::<bool>(id).unwrap_or(false);
             d.insert_persisted(id, true);
             done
         });
         if !migrated {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
             self.migrate_settle = Some(0);
         }
         if let Some(n) = self.migrate_settle {
@@ -1154,26 +1214,29 @@ impl eframe::App for GuiApp {
                 // Window has settled to its windowed size; drop the stale panel
                 // sizes so the proportional defaults re-apply to that size.
                 self.migrate_settle = None;
-                use egui::containers::panel::PanelState;
-                ui.ctx()
-                    .data_mut(|d| d.remove::<PanelState>(egui::Id::new("controls_panel")));
+                ctx.data_mut(|d| d.remove::<PanelState>(egui::Id::new("controls_panel")));
             } else {
                 self.migrate_settle = Some(n + 1);
             }
         }
+    }
 
-        // Tint the native Windows title bar to match the theme (re-apply on theme
-        // change; retry until the window handle exists).
-        #[cfg(target_os = "windows")]
+    /// Tint the native Windows title bar to match the theme (re-apply on theme
+    /// change; retry until the window handle exists).
+    #[cfg(target_os = "windows")]
+    fn apply_native_titlebar(&mut self) {
         if self.native_titlebar_theme != Some(self.theme) {
             let (caption, text) = self.theme.native_caption_colors();
             if native_titlebar::apply(!self.theme.is_light(), caption, text) {
                 self.native_titlebar_theme = Some(self.theme);
             }
         }
+    }
 
-        // Keyboard: Ctrl-Z undo, Ctrl-Y / Ctrl-Shift-Z redo.
-        let (undo, redo) = ui.ctx().input(|i| {
+    /// Global keyboard shortcuts: Ctrl-Z undo, Ctrl-Y / Ctrl-Shift-Z redo, and
+    /// F1 / `?` to toggle the help overlay (Esc closes it).
+    fn handle_keyboard(&mut self, ctx: &egui::Context) {
+        let (undo, redo) = ctx.input(|i| {
             let ctrl = i.modifiers.command || i.modifiers.ctrl;
             let undo = ctrl && i.key_pressed(egui::Key::Z) && !i.modifiers.shift;
             let redo = ctrl
@@ -1186,9 +1249,7 @@ impl eframe::App for GuiApp {
         } else if redo {
             self.redo();
         }
-
-        // F1 or `?` toggles the keybind/gesture help overlay; Esc closes it.
-        ui.ctx().input(|i| {
+        ctx.input(|i| {
             if i.key_pressed(egui::Key::F1)
                 || (i.key_pressed(egui::Key::Questionmark) && !i.modifiers.command)
             {
@@ -1198,17 +1259,20 @@ impl eframe::App for GuiApp {
                 self.show_help = false;
             }
         });
+    }
 
-        // Drain any results the service worker thread has produced. Each
-        // result carries a fresh Status snapshot and (for Run requests)
-        // a feedback string for the toolbar status line.
+    /// Per-frame background-worker housekeeping: drain service-worker results,
+    /// pump download + Auto-EQ events, poll the daemon status on a slow timer,
+    /// expire transient status feedback, and live-reload the Matugen theme.
+    fn pump_workers(&mut self, ctx: &egui::Context) {
+        // Drain service-worker results: each carries a fresh Status snapshot and
+        // (for Run requests) a toolbar feedback string. Any result clears the
+        // "busy" gate so further clicks can fire again.
         while let Ok(res) = self.service_rx.try_recv() {
             self.daemon_status = res.status;
             if let Some(msg) = res.feedback {
                 self.set_status(msg);
             }
-            // Receiving a result always clears the "busy" gate; further
-            // clicks can fire again.
             self.service_busy = false;
         }
 
@@ -1216,9 +1280,10 @@ impl eframe::App for GuiApp {
         self.pump_downloads();
         // Apply any finished background Auto-EQ fit.
         self.pump_autoeq();
-        // Service status drives the toolbar daemon controls; poll it on a
-        // slow timer via the worker (off the UI thread so launchctl
-        // latency never freezes egui).
+
+        // Service status drives the toolbar daemon controls; poll it on a slow
+        // timer via the worker (off the UI thread so launchctl latency never
+        // freezes egui).
         if self.last_service_poll.elapsed() >= Duration::from_millis(1500) {
             self.last_service_poll = Instant::now();
             let _ = self.service_tx.send(ServiceAction::RefreshStatus);
@@ -1240,21 +1305,23 @@ impl eframe::App for GuiApp {
             let mtime = crate::theme::matugen_source_mtime();
             if mtime != self.matugen_mtime {
                 self.matugen_mtime = mtime;
-                let ctx = ui.ctx().clone();
-                self.set_theme(&ctx, Theme::Matugen);
+                self.set_theme(ctx, Theme::Matugen);
             }
         }
+    }
 
+    /// Lay out the frame's panels: top toolbar, bottom status strip (only when
+    /// connected), then the central shell.
+    fn render_panels(&mut self, ui: &mut egui::Ui) {
         let toolbar = egui::Panel::top("toolbar").show_inside(ui, |ui| self.toolbar(ui));
         // macOS: keep the traffic lights centred in the toolbar (see module docs).
         #[cfg(target_os = "macos")]
-        traffic_lights::center(toolbar.response.rect.height() as f64);
+        traffic_lights::center(f64::from(toolbar.response.rect.height()));
         #[cfg(not(target_os = "macos"))]
         let _ = toolbar;
 
-        // Live meters now live in a bottom status strip (the brand/meters title-bar
-        // row was removed). Added before `shell` so it claims the window's bottom
-        // edge; the controls cluster then stacks above it. Only when connected.
+        // The bottom status strip claims the window's bottom edge before `shell`
+        // so the controls cluster stacks above it. Only when connected.
         if self.state.is_some() {
             egui::Panel::bottom("statusbar")
                 .resizable(false)
@@ -1262,21 +1329,20 @@ impl eframe::App for GuiApp {
         }
 
         self.shell(ui);
+    }
 
-        let ctx = ui.ctx().clone();
-
-        self.preset_dialog(&ctx);
-        self.export_dialog(&ctx);
-        self.confirm_dialog(&ctx);
-        self.help_dialog(&ctx);
-        self.browse_dialog(&ctx);
-        self.manage_dialog(&ctx);
-        self.curve_picker_dialog(&ctx);
-        self.quit_dialog(&ctx);
-        self.status_toast(&ctx);
-
-        // Drive ~144 fps repaint so spectrum/curve stay smooth.
-        ctx.request_repaint_after(FRAME_INTERVAL);
+    /// Render all top-level dialogs / overlays for the frame (order preserved so
+    /// later ones draw on top).
+    fn render_dialogs(&mut self, ctx: &egui::Context) {
+        self.preset_dialog(ctx);
+        self.export_dialog(ctx);
+        self.confirm_dialog(ctx);
+        self.help_dialog(ctx);
+        self.browse_dialog(ctx);
+        self.manage_dialog(ctx);
+        self.curve_picker_dialog(ctx);
+        self.quit_dialog(ctx);
+        self.status_toast(ctx);
     }
 }
 
@@ -1391,5 +1457,26 @@ impl GuiApp {
     /// Export a *named* stored profile (per-row export) rather than the live chain.
     pub(crate) fn export_profile_named(&mut self, name: String, path: String) {
         let _ = self.cmd_tx.send(WorkerCmd::ExportNamed(name, path));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The demo measurement spans 20 Hz → 20 kHz over exactly 96 log-spaced
+    /// points, strictly increasing in frequency, with finite dB values.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn demo_measurement_span_and_monotonic() {
+        let m = demo_measurement();
+        assert_eq!(m.len(), 96);
+        assert_eq!(m.first().unwrap().0, 20.0);
+        // Last point lands on 20 kHz (20 · 1000^1 = 20000) within float error.
+        assert!((m.last().unwrap().0 - 20_000.0).abs() < 1e-6);
+        for w in m.windows(2) {
+            assert!(w[1].0 > w[0].0, "frequency must increase");
+        }
+        assert!(m.iter().all(|&(f, db)| f.is_finite() && db.is_finite()));
     }
 }

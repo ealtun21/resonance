@@ -47,10 +47,10 @@ struct Shared {
     in_rms: AtomicU32,
     out_rms: AtomicU32,
     /// Lock-free "latest samples" ring (mono mix) the RT thread fills and the
-    /// worker reads for the FFT. AtomicU32 holds f32 bits.
+    /// worker reads for the FFT. `AtomicU32` holds f32 bits.
     ring: [AtomicU32; RING],
     ring_pos: AtomicUsize,
-    /// APOProcess call counter, for throttled diagnostic logging.
+    /// `APOProcess` call counter, for throttled diagnostic logging.
     proc_calls: AtomicU64,
 }
 
@@ -71,7 +71,10 @@ fn build_chain(snap: Option<&ChainSnapshot>, channels: usize, sample_rate: f64) 
 
 /// Worker thread: rebuild the chain on daemon changes, and (only when a client
 /// is watching) compute the spectrum off the RT thread and publish telemetry.
+// `weak` is moved into and owned for the lifetime of this spawned worker thread.
+#[allow(clippy::needless_pass_by_value)]
 fn worker_loop(weak: Weak<Shared>) {
+    const STARVE_TICKS: u32 = 16; // ~400 ms at the 25 ms worker tick
     let path = state::default_state_path();
     let mut file: Option<SharedFile> = None;
     let mut last_gen: u64 = u64::MAX;
@@ -140,7 +143,7 @@ fn worker_loop(weak: Weak<Shared>) {
         // only for telemetry *writes* below (the APO's own region).
         let _ = f;
         let fresh = crate::state::read_chain_fresh(&path);
-        let want = fresh.as_ref().map(|(_, _, gate)| *gate).unwrap_or(false);
+        let want = fresh.as_ref().is_some_and(|(_, _, gate)| *gate);
         shared.telemetry_on.store(want, Ordering::Release);
 
         // Rebuild the chain when the daemon publishes new params.
@@ -186,7 +189,6 @@ fn worker_loop(weak: Weak<Shared>) {
         // Decay toward silence when the ring has stalled (the APO process
         // callback stopped feeding it) instead of re-FFTing a frozen window.
         // Debounced past any realistic callback gap.
-        const STARVE_TICKS: u32 = 16; // ~400 ms at the 25 ms worker tick
         let ring_pos = shared.ring_pos.load(Ordering::Acquire);
         if ring_pos == last_ring_pos {
             starved_ticks = starved_ticks.saturating_add(1);
@@ -195,7 +197,7 @@ fn worker_loop(weak: Weak<Shared>) {
             last_ring_pos = ring_pos;
         }
         let bins = if starved_ticks >= STARVE_TICKS {
-            for e in envelope.iter_mut() {
+            for e in &mut envelope {
                 *e *= 0.7;
                 if *e < 1e-4 {
                     *e = 0.0;
@@ -266,7 +268,7 @@ fn peak_rms_f32(buf: &[f32]) -> (f32, f32) {
         if a > peak {
             peak = a;
         }
-        sumsq += (x as f64) * (x as f64);
+        sumsq += f64::from(x) * f64::from(x);
     }
     let rms = if buf.is_empty() {
         0.0
@@ -403,7 +405,7 @@ pub extern "C" fn resonance_apo_process(
         }
 
         for (d, s) in l.scratch[..n].iter_mut().zip(samples.iter()) {
-            *d = *s as f64;
+            *d = f64::from(*s);
         }
         l.chain.process(&mut l.scratch[..n]);
         // Apply the output routing matrix (square remap) in place when present;
@@ -493,8 +495,8 @@ mod hires_harness {
     /// Deterministic LCG — reproducible "random" rates across runs/CI.
     fn next_rand(s: &mut u64) -> u64 {
         *s = s
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
         *s >> 33
     }
 
@@ -523,7 +525,7 @@ mod hires_harness {
 
         // Steady-state mono (channel 0); skip the filter's settling transient.
         let skip = frames / 4;
-        let mono: Vec<f64> = (skip..frames).map(|i| buf[i * 2] as f64).collect();
+        let mono: Vec<f64> = (skip..frames).map(|i| f64::from(buf[i * 2])).collect();
         let in_rms = amp / 2f64.sqrt();
         let out_rms = (mono.iter().map(|x| x * x).sum::<f64>() / mono.len() as f64).sqrt();
         let gain_db = 20.0 * (out_rms / in_rms).log10();
@@ -575,6 +577,7 @@ mod hires_harness {
 
     #[test]
     fn apo_eq_rate_correct_across_many_rates() {
+        const TONE: f64 = 1_000.0;
         // Publish a known chain: one +12 dB peak band at 1 kHz, nothing else.
         let band = ApoFilter::builder()
             .filter_type(FilterType::Peaking)
@@ -607,7 +610,6 @@ mod hires_harness {
             rates.push(8_000.0 + (next_rand(&mut seed) % 376_001) as f64);
         }
 
-        const TONE: f64 = 1_000.0;
         for r in rates {
             assert!(
                 TONE < r / 2.0 - 200.0,
@@ -683,7 +685,7 @@ mod hires_harness {
         let chan_gain = |ch: usize| {
             let ms = (skip..frames)
                 .map(|i| {
-                    let x = buf[i * 2 + ch] as f64;
+                    let x = f64::from(buf[i * 2 + ch]);
                     x * x
                 })
                 .sum::<f64>()

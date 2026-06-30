@@ -13,3 +13,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # squig.link measurement downloader (background thread).
 ureq = { workspace = true }
+
+[lints]
+workspace = true

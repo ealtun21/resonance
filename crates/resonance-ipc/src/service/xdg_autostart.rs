@@ -4,7 +4,7 @@
 //! Used on systems without a reachable `systemctl --user` (Artix/OpenRC,
 //! Void/runit, Devuan/SysV, Gentoo, Alpine, or a bare session). A per-user
 //! audio daemon does not belong in a *system* init (those run as root, once,
-//! before the user's PipeWire session exists), so instead of an init script we:
+//! before the user's `PipeWire` session exists), so instead of an init script we:
 //!
 //!   - autostart at login via `$XDG_CONFIG_HOME/autostart/resonanced.desktop`
 //!     (honoured by every desktop session regardless of the init system), and

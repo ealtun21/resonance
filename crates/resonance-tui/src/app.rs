@@ -294,7 +294,7 @@ impl App {
             // Disconnected: decay the bars to zero instead of freezing the last
             // frame, so a dead daemon doesn't look like it's still playing.
             let coeff = 1.0 - (-dt / SPECTRUM_DECAY_TAU).exp();
-            for disp in self.spectrum_display.iter_mut() {
+            for disp in &mut self.spectrum_display {
                 *disp -= *disp * coeff;
             }
             return;
@@ -357,10 +357,10 @@ impl App {
                 // Keep the band cursor in range: a profile load or another
                 // client can shrink the band list out from under it, after which
                 // band edits/deletes would target the wrong (or no) band.
-                if !s.bands.is_empty() {
-                    self.band_cursor = self.band_cursor.min(s.bands.len() - 1);
-                } else {
+                if s.bands.is_empty() {
                     self.band_cursor = 0;
+                } else {
+                    self.band_cursor = self.band_cursor.min(s.bands.len() - 1);
                 }
                 self.state = Some(s);
                 // Don't wipe the status here — it expires on its own TTL so
@@ -383,12 +383,11 @@ impl App {
             // A daemon-level rejection (e.g. "profile not found") is not a
             // broken connection — show it but keep the socket. Only a real
             // transport error drops the connection so we reconnect.
-            match e {
-                TransportError::Daemon(msg) => self.set_status(msg),
-                _ => {
-                    self.set_status(format!("error: {e}"));
-                    self.ipc = None;
-                }
+            if let TransportError::Daemon(msg) = e {
+                self.set_status(msg);
+            } else {
+                self.set_status(format!("error: {e}"));
+                self.ipc = None;
             }
         }
     }
@@ -411,7 +410,7 @@ impl App {
     // ── Normal-mode actions ────────────────────────────────────────────────
 
     pub fn toggle_power(&mut self) {
-        let enabled = self.state.as_ref().map(|s| !s.enabled).unwrap_or(true);
+        let enabled = self.state.as_ref().is_none_or(|s| !s.enabled);
         // Snapshot first: `enabled` is part of the undo state, so toggling power
         // must be undoable like every other edit.
         self.push_undo();
@@ -509,7 +508,7 @@ impl App {
                     self.import_and_load(path);
                     self.refresh_state();
                 }
-                crate::browser::BrowsePurpose::LoadMeasurement => self.load_measurement(path),
+                crate::browser::BrowsePurpose::LoadMeasurement => self.load_measurement(&path),
             }
         }
     }
@@ -573,8 +572,7 @@ impl App {
                 let max = self
                     .state
                     .as_ref()
-                    .map(|s| s.bands.len().saturating_sub(1))
-                    .unwrap_or(0);
+                    .map_or(0, |s| s.bands.len().saturating_sub(1));
                 if self.band_cursor < max {
                     self.band_cursor += 1;
                 }
@@ -663,7 +661,7 @@ impl App {
         if inner.height < 2 || row < inner.y + 1 {
             return None; // border or header
         }
-        let n = self.state.as_ref().map(|s| s.bands.len()).unwrap_or(0);
+        let n = self.state.as_ref().map_or(0, |s| s.bands.len());
         let visible = (inner.height - 1) as usize;
         let offset = crate::layout::band_scroll_offset(self.band_cursor, n, visible);
         let line = (row - (inner.y + 1)) as usize;
@@ -826,9 +824,9 @@ impl App {
             if !b.enabled {
                 continue;
             }
-            let nc = crate::layout::graph_node_col(plot, b.freq) as i64;
-            let nr = crate::layout::graph_node_row(plot, b.gain_db) as i64;
-            let d = (nc - col as i64).pow(2) + (nr - row as i64).pow(2);
+            let nc = i64::from(crate::layout::graph_node_col(plot, b.freq));
+            let nr = i64::from(crate::layout::graph_node_row(plot, b.gain_db));
+            let d = (nc - i64::from(col)).pow(2) + (nr - i64::from(row)).pow(2);
             if d < best_d {
                 best_d = d;
                 best = Some(i);
@@ -843,7 +841,7 @@ impl App {
 
     /// Select the previous/next band node (Graph-panel `[` / `]`).
     pub fn graph_select(&mut self, delta: i32) {
-        let n = self.state.as_ref().map(|s| s.bands.len()).unwrap_or(0);
+        let n = self.state.as_ref().map_or(0, |s| s.bands.len());
         if n == 0 {
             return;
         }
@@ -918,7 +916,7 @@ impl App {
         }
         let (freq, gain, q) = if drag.q_mode {
             // Relative drag: up = narrower (higher Q), exponential like the GUI.
-            let dy = drag.last_row as f64 - row as f64;
+            let dy = f64::from(drag.last_row) - f64::from(row);
             let q = (bq * (dy * 0.06).exp()).clamp(0.1, 20.0);
             if let Some(d) = &mut self.graph_drag {
                 d.last_row = row;
@@ -957,7 +955,7 @@ impl App {
     /// stereo/mono users never see the channel column or the picker — only
     /// >2-channel devices reveal per-band channel targeting.
     pub(crate) fn show_ch(&self) -> bool {
-        self.state.as_ref().map(|s| s.channels > 2).unwrap_or(false)
+        self.state.as_ref().is_some_and(|s| s.channels > 2)
     }
 
     /// Open the per-band channel-target picker (`c`) for the selected band.
@@ -979,7 +977,7 @@ impl App {
     }
 
     pub fn band_channels_move(&mut self, delta: i32) {
-        let channels = self.state.as_ref().map(|s| s.channels).unwrap_or(0);
+        let channels = self.state.as_ref().map_or(0, |s| s.channels);
         if let InputMode::SelectBandChannels { cursor, .. } = &mut self.mode {
             if channels == 0 {
                 return;
@@ -991,7 +989,7 @@ impl App {
 
     /// Toggle the channel under the cursor in the live mask.
     pub fn band_channels_toggle(&mut self) {
-        let channels = self.state.as_ref().map(|s| s.channels).unwrap_or(0);
+        let channels = self.state.as_ref().map_or(0, |s| s.channels);
         if let InputMode::SelectBandChannels { mask, cursor, .. } = &mut self.mode {
             let c = *cursor;
             if c >= channels {
@@ -1028,7 +1026,7 @@ impl App {
 
     /// Apply the edited mask to the band and close the picker (Enter).
     pub fn band_channels_apply(&mut self) {
-        let channels = self.state.as_ref().map(|s| s.channels).unwrap_or(0);
+        let channels = self.state.as_ref().map_or(0, |s| s.channels);
         let (index, mask) = match &self.mode {
             InputMode::SelectBandChannels { index, mask, .. } => (*index, *mask),
             _ => return,
@@ -1091,10 +1089,10 @@ impl App {
 
     /// Load a measurement file into the reference overlay (enabling it so the
     /// overlay shows immediately).
-    fn load_measurement(&mut self, path: String) {
+    fn load_measurement(&mut self, path: &str) {
         if self
             .reference
-            .load_measurement_file(std::path::Path::new(&path))
+            .load_measurement_file(std::path::Path::new(path))
         {
             // load_measurement_file already enables the overlay.
             let name = self.reference.measurement_name.clone();
@@ -1136,8 +1134,14 @@ impl App {
         };
         // Sample both curves onto AutoEQ's fixed log grid (dB).
         let f = resonance_autoeq::log_freqs();
-        let target: Vec<f32> = f.iter().map(|&hz| tgt.interp(hz as f64) as f32).collect();
-        let measured: Vec<f32> = f.iter().map(|&hz| meas.interp(hz as f64) as f32).collect();
+        let target: Vec<f32> = f
+            .iter()
+            .map(|&hz| tgt.interp(f64::from(hz)) as f32)
+            .collect();
+        let measured: Vec<f32> = f
+            .iter()
+            .map(|&hz| meas.interp(f64::from(hz)) as f32)
+            .collect();
         let smoothing = if self.reference.measurement_iem {
             Smoothing::InEar
         } else {
@@ -1183,7 +1187,7 @@ impl App {
             .ok();
     }
 
-    /// Apply any finished Auto-EQ fit (undo snapshot + ApplyState). Called each
+    /// Apply any finished Auto-EQ fit (undo snapshot + `ApplyState`). Called each
     /// loop iteration, like the spectrum pump.
     pub fn pump_autoeq(&mut self) {
         while let Ok(o) = self.autoeq_rx.try_recv() {
@@ -1377,7 +1381,7 @@ impl App {
     }
 
     pub fn preamp_adjust(&mut self, delta: f64) {
-        let current = self.state.as_ref().map(|s| s.preamp_db).unwrap_or(0.0);
+        let current = self.state.as_ref().map_or(0.0, |s| s.preamp_db);
         let new_db = ((current + delta) * 10.0).round() / 10.0;
         let new_db = new_db.clamp(-20.0, 20.0);
         if (new_db - current).abs() > 1e-6 {
@@ -1652,11 +1656,11 @@ impl App {
         };
         match tab {
             0 => self.settings_load_profile(),
-            1 => {}
             2 => self.settings_route_output(),
             3 => self.settings_pref_activate(),
             4 => self.settings_daemon_activate(),
             5 => self.settings_reference_activate(),
+            // Tab 1 has no enter action; the wildcard covers it (and any other tab).
             _ => {}
         }
     }
@@ -1869,11 +1873,11 @@ impl App {
             }
             1 => {
                 let can_unmap = match (&self.mode, &self.state) {
-                    (InputMode::Settings(s), Some(state)) => s
-                        .mappings
-                        .get(s.cursor)
-                        .map(|(out, _)| state.active_output.as_deref() == Some(out.as_str()))
-                        .unwrap_or(false),
+                    (InputMode::Settings(s), Some(state)) => {
+                        s.mappings.get(s.cursor).is_some_and(|(out, _)| {
+                            state.active_output.as_deref() == Some(out.as_str())
+                        })
+                    }
                     _ => false,
                 };
                 if can_unmap {
@@ -1900,9 +1904,8 @@ impl App {
         if tab != 1 && tab != 2 {
             return;
         }
-        let profiles = match self.query(Command::ListProfiles) {
-            Some(Response::PresetList(v)) => v,
-            _ => return,
+        let Some(Response::PresetList(profiles)) = self.query(Command::ListProfiles) else {
+            return;
         };
         if profiles.is_empty() {
             self.set_status("no profiles saved");

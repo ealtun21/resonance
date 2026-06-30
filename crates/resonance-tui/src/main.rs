@@ -151,16 +151,16 @@ fn handle_normal(app: &mut App, key: KeyEvent) {
         KeyCode::Char('s') => app.begin_settings(),
         // ── Graph panel: arrows drag the selected node in 2 axes ──
         KeyCode::Up if app.focus == app::Panel::Graph => {
-            app.graph_nudge(if shift { 1.0 } else { 0.5 }, 0.0)
+            app.graph_nudge(if shift { 1.0 } else { 0.5 }, 0.0);
         }
         KeyCode::Down if app.focus == app::Panel::Graph => {
-            app.graph_nudge(if shift { -1.0 } else { -0.5 }, 0.0)
+            app.graph_nudge(if shift { -1.0 } else { -0.5 }, 0.0);
         }
         KeyCode::Left if app.focus == app::Panel::Graph => {
-            app.graph_nudge(0.0, if shift { -2.0 } else { -1.0 })
+            app.graph_nudge(0.0, if shift { -2.0 } else { -1.0 });
         }
         KeyCode::Right if app.focus == app::Panel::Graph => {
-            app.graph_nudge(0.0, if shift { 2.0 } else { 1.0 })
+            app.graph_nudge(0.0, if shift { 2.0 } else { 1.0 });
         }
         KeyCode::Char('[') if app.focus == app::Panel::Graph => app.graph_select(-1),
         KeyCode::Char(']') if app.focus == app::Panel::Graph => app.graph_select(1),
@@ -169,7 +169,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) {
         KeyCode::Down => app.cursor_down(),
         KeyCode::Right => app.adjust(if shift { 0.10 } else { 0.05 }),
         KeyCode::Left => app.adjust(if shift { -0.10 } else { -0.05 }),
-        KeyCode::Char('+') | KeyCode::Char('=') => app.preamp_adjust(0.5),
+        KeyCode::Char('+' | '=') => app.preamp_adjust(0.5),
         KeyCode::Char('-') => app.preamp_adjust(-0.5),
         KeyCode::Char(' ') | KeyCode::Enter => app.toggle_selected(),
         KeyCode::Char('a') if band_focus => app.add_band(),
@@ -251,7 +251,7 @@ fn handle_settings(app: &mut App, key: KeyEvent) {
                     .modifiers
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
-                app.settings_text_char(c)
+                app.settings_text_char(c);
             }
             _ => {}
         }
@@ -296,7 +296,7 @@ fn handle_settings(app: &mut App, key: KeyEvent) {
         KeyCode::Down | KeyCode::Char('j') => app.settings_move(1),
         KeyCode::Enter | KeyCode::Char(' ') => app.settings_enter(),
         // Adjust the customizer value under the cursor (Reference tab).
-        KeyCode::Char('+') | KeyCode::Char('=') => app.settings_adjust(1.0),
+        KeyCode::Char('+' | '=') => app.settings_adjust(1.0),
         KeyCode::Char('-') => app.settings_adjust(-1.0),
         KeyCode::Char('n') => app.settings_key_n(),
         KeyCode::Char('e') => app.settings_key_e(),

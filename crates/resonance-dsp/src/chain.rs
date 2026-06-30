@@ -45,6 +45,7 @@ pub struct ProcessorChain {
 }
 
 impl ProcessorChain {
+    #[must_use]
     pub fn builder() -> ProcessorChainBuilder {
         ProcessorChainBuilder::default()
     }
@@ -59,7 +60,9 @@ impl ProcessorChain {
 
         if self.preamp_db != 0.0 {
             let gain = db_to_linear(self.preamp_db);
-            buf.iter_mut().for_each(|s| *s *= gain);
+            for s in buf.iter_mut() {
+                *s *= gain;
+            }
         }
 
         // Band-major cascade: each biquad makes one pass over the buffer. The
@@ -103,6 +106,7 @@ impl ProcessorChain {
     /// `(intensity, enabled)` for one effect — the read counterpart of
     /// `set_effect_intensity` / `set_effect_enabled`, so callers can iterate
     /// `FxEffect::ALL` instead of unrolling all five effects by hand.
+    #[must_use]
     pub fn effect_params(&self, effect: FxEffect) -> (f64, bool) {
         match effect {
             FxEffect::Fidelity => (self.fidelity.intensity(), self.fidelity.enabled()),
@@ -126,7 +130,9 @@ impl ProcessorChain {
     }
 
     pub fn reset(&mut self) {
-        self.filters.iter_mut().for_each(|f| f.reset());
+        self.filters
+            .iter_mut()
+            .for_each(super::filter::ApoFilter::reset);
         self.fidelity.reset();
         self.ambience.reset();
         self.surround.reset();
@@ -142,12 +148,14 @@ impl ProcessorChain {
     /// in place; effects are rebuilt at the new rate, carrying over intensity +
     /// enabled (their sample history resets, which is unavoidable on a rate
     /// change). No-op when the rate is unchanged.
+    // float_cmp: exact compare of stored rate vs incoming is the no-op guard.
+    #[allow(clippy::float_cmp)]
     pub fn rebind_sample_rate(&mut self, sample_rate: f64) {
         if self.sample_rate == sample_rate {
             return;
         }
         self.sample_rate = sample_rate;
-        for f in self.filters.iter_mut() {
+        for f in &mut self.filters {
             // A band whose freq is at/above the new Nyquist (e.g. a 20 kHz band
             // after 48k→32k) can't be realized — `rebind` holds it inert rather
             // than leaving the old-rate coefficients live, and re-arms it on its
@@ -177,7 +185,7 @@ impl ProcessorChain {
             return;
         }
         self.channels = channels;
-        for f in self.filters.iter_mut() {
+        for f in &mut self.filters {
             f.set_channels(channels);
         }
         let sr = self.sample_rate;
@@ -243,26 +251,31 @@ impl Default for ProcessorChainBuilder {
 }
 
 impl ProcessorChainBuilder {
+    #[must_use]
     pub fn channels(mut self, n: usize) -> Self {
         self.channels = n;
         self
     }
 
+    #[must_use]
     pub fn sample_rate(mut self, sr: f64) -> Self {
         self.sample_rate = sr;
         self
     }
 
+    #[must_use]
     pub fn preamp_db(mut self, db: f64) -> Self {
         self.preamp_db = db;
         self
     }
 
+    #[must_use]
     pub fn add_filter(mut self, filter: ApoFilter) -> Self {
         self.filters.push(filter);
         self
     }
 
+    #[must_use]
     pub fn build(self) -> ProcessorChain {
         let channels = self.channels;
         let sr = self.sample_rate;
@@ -306,6 +319,8 @@ mod tests {
     }
 
     #[test]
+    // float_cmp: asserts the stored rate equals the exact rate just set.
+    #[allow(clippy::float_cmp)]
     fn rebind_sample_rate_updates_rate_and_preserves_effect_settings() {
         use crate::filter::{ApoFilter, FilterType};
         let mut chain = ProcessorChain::builder()
@@ -369,7 +384,9 @@ mod tests {
             }
             b.build()
         };
-        let input: Vec<f64> = (0..512).map(|i| ((i as f64) * 0.017).sin() * 0.6).collect();
+        let input: Vec<f64> = (0..512)
+            .map(|i| (f64::from(i) * 0.017).sin() * 0.6)
+            .collect();
 
         // Reference: each band applied as its own full pass (filter-major).
         let mut reference = input.clone();
@@ -449,7 +466,9 @@ mod tests {
         // Default chain: no filters, all effects at 0 intensity, preamp 0.
         // Must pass audio through bit-for-bit.
         let mut chain = ProcessorChain::builder().build();
-        let input: Vec<f64> = (0..256).map(|i| ((i as f64) * 0.013).sin() * 0.7).collect();
+        let input: Vec<f64> = (0..256)
+            .map(|i| (f64::from(i) * 0.013).sin() * 0.7)
+            .collect();
         let mut buf = input.clone();
         chain.process(&mut buf);
         assert_eq!(buf, input);

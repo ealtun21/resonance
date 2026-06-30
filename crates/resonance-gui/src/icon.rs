@@ -23,9 +23,9 @@ const BARS: [(f32, f32, f32, f32); 5] = [
 fn lerp3(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
     let t = t.clamp(0.0, 1.0);
     [
-        (a[0] as f32 + (b[0] as f32 - a[0] as f32) * t) as u8,
-        (a[1] as f32 + (b[1] as f32 - a[1] as f32) * t) as u8,
-        (a[2] as f32 + (b[2] as f32 - a[2] as f32) * t) as u8,
+        (f32::from(a[0]) + (f32::from(b[0]) - f32::from(a[0])) * t) as u8,
+        (f32::from(a[1]) + (f32::from(b[1]) - f32::from(a[1])) * t) as u8,
+        (f32::from(a[2]) + (f32::from(b[2]) - f32::from(a[2])) * t) as u8,
     ]
 }
 

@@ -6,9 +6,9 @@
 // (MIT). This is a faithful translation kept in its own crate so the copyleft
 // licence stays isolated from the rest of Resonance.
 //
-//! AutoEQ: fit a stack of biquad filters (peaking + low/high shelf) so a
+//! `AutoEQ`: fit a stack of biquad filters (peaking + low/high shelf) so a
 //! measured headphone response, once EQ'd, matches a target. Operates on a
-//! fixed 384-point log-frequency grid (20 Hz–20 kHz) in dB; an AdaBelief
+//! fixed 384-point log-frequency grid (20 Hz–20 kHz) in dB; an `AdaBelief`
 //! optimizer with analytic biquad gradients minimises mean-squared error, with
 //! adaptive treble smoothing so resonance peaks aren't flattened.
 
@@ -35,6 +35,8 @@ fn clip(x: f32, lo: f32, hi: f32) -> f32 {
 }
 /// Clamp in place; report whether it changed (to zero optimizer momentum).
 #[inline]
+// float_cmp: intentional — compare clamped value to stored original to detect a change.
+#[allow(clippy::float_cmp)]
 fn limit(x: &mut f32, lo: f32, hi: f32) -> bool {
     let orig = *x;
     *x = clip(*x, lo, hi);
@@ -42,6 +44,7 @@ fn limit(x: &mut f32, lo: f32, hi: f32) -> bool {
 }
 
 /// The 384 log-spaced grid frequencies (Hz) the fitter expects its inputs on.
+#[must_use]
 pub fn log_freqs() -> Vec<f32> {
     let (l0, l1) = (F0.ln(), F1.ln());
     let lr = l1 - l0;
@@ -266,7 +269,9 @@ struct Peak {
     idx: i32,
 }
 
-/// scipy-style largest-peak detector (find_peaks → prominences → widths).
+/// scipy-style largest-peak detector (`find_peaks` → prominences → widths).
+// float_cmp: intentional — exact equality walks flat plateaus (scipy find_peaks port).
+#[allow(clippy::float_cmp)]
 fn largest_peak(x: &[f32], f: &[f32], lim: Lim) -> Peak {
     let i_max = K - 1;
     let mut peaks: Vec<usize> = Vec::new();
@@ -503,6 +508,8 @@ struct Consts<'a> {
 }
 
 /// Loss (MSE in dB) + its gradient into `g`. Faithful to autoeq-c `grad`.
+// similar_names: dy_db0..dy_da2 mirror the b0..b2/a0..a2 coefficient partial-derivative math.
+#[allow(clippy::similar_names)]
 fn grad(c: &Consts, x: &Wrt, g: &mut Wrt, sc: &mut Scratch) -> f32 {
     let n = c.n;
     let r_k = 1.0 / K as f32;
@@ -547,17 +554,17 @@ fn grad(c: &Consts, x: &Wrt, g: &mut Wrt, sc: &mut Scratch) -> f32 {
             let a_poly = a_x0 + phi_k * (a_x1 + phi_k * a_x2);
             sc.pred[k] *= b_poly / a_poly;
 
-            let _8phi2 = 8.0 * sq(phi_k);
-            let _2phi = 2.0 * phi_k;
+            let eight_phi2 = 8.0 * sq(phi_k);
+            let two_phi = 2.0 * phi_k;
             let bm = 20.0 / LN_10 / b_poly;
             let am = -20.0 / LN_10 / a_poly;
 
-            let dy_db0 = bm * (ba - _2phi * (s.b1 + 4.0 * s.b2) + _8phi2 * s.b2);
-            let dy_db1 = bm * (ba - _2phi * (s.b0 + s.b2));
-            let dy_db2 = bm * (ba - _2phi * (4.0 * s.b0 + s.b1) + _8phi2 * s.b0);
-            let dy_da0 = am * (aa - _2phi * (s.a1 + 4.0 * s.a2) + _8phi2 * s.a2);
-            let dy_da1 = am * (aa - _2phi * (s.a0 + s.a2));
-            let dy_da2 = am * (aa - _2phi * (4.0 * s.a0 + s.a1) + _8phi2 * s.a0);
+            let dy_db0 = bm * (ba - two_phi * (s.b1 + 4.0 * s.b2) + eight_phi2 * s.b2);
+            let dy_db1 = bm * (ba - two_phi * (s.b0 + s.b2));
+            let dy_db2 = bm * (ba - two_phi * (4.0 * s.b0 + s.b1) + eight_phi2 * s.b0);
+            let dy_da0 = am * (aa - two_phi * (s.a1 + 4.0 * s.a2) + eight_phi2 * s.a2);
+            let dy_da1 = am * (aa - two_phi * (s.a0 + s.a2));
+            let dy_da2 = am * (aa - two_phi * (4.0 * s.a0 + s.a1) + eight_phi2 * s.a0);
 
             let dy_da = dy_db0 * s.db0_da
                 + dy_db1 * s.db1_da
@@ -763,10 +770,10 @@ fn autoeq_fit(
 // ── Preprocess: adaptive smoothing + treble roll-off ────────────────────────
 
 struct Smooth {
-    smooth_f0: f32,
-    smooth_f1: f32,
-    smooth_lo: f32,
-    smooth_hi: f32,
+    f0: f32,
+    f1: f32,
+    lo: f32,
+    hi: f32,
     bias_f0: f32,
     bias_f1: f32,
     bias_f2: f32,
@@ -778,10 +785,10 @@ struct Smooth {
 }
 
 const IE_SMOOTH: Smooth = Smooth {
-    smooth_lo: 0.3,
-    smooth_hi: 0.03,
-    smooth_f0: 3000.0,
-    smooth_f1: 12000.0,
+    lo: 0.3,
+    hi: 0.03,
+    f0: 3000.0,
+    f1: 12000.0,
     bias_lo: 0.0,
     bias_md: 0.15,
     bias_hi: 0.03,
@@ -793,10 +800,10 @@ const IE_SMOOTH: Smooth = Smooth {
 };
 
 const OE_SMOOTH: Smooth = Smooth {
-    smooth_lo: 0.3,
-    smooth_hi: 0.03,
-    smooth_f0: 5000.0,
-    smooth_f1: 15000.0,
+    lo: 0.3,
+    hi: 0.03,
+    f0: 5000.0,
+    f1: 15000.0,
     bias_lo: 0.0,
     bias_md: 0.3,
     bias_hi: 0.2,
@@ -829,8 +836,8 @@ fn sgm(x: f32, x0: f32, x1: f32) -> f32 {
 
 fn adaptive_smooth(s: &Smooth, f: &[f32], r: &mut [f32]) {
     const H: i32 = 48;
-    let smooth_l0 = s.smooth_f0.ln();
-    let smooth_l1 = s.smooth_f1.ln();
+    let smooth_l0 = s.f0.ln();
+    let smooth_l1 = s.f1.ln();
     let bias_l0 = s.bias_f0.ln();
     let bias_l1 = s.bias_f1.ln();
     let bias_l2 = s.bias_f2.ln();
@@ -842,7 +849,7 @@ fn adaptive_smooth(s: &Smooth, f: &[f32], r: &mut [f32]) {
     for k in 0..K {
         let l = f[k].ln();
         let x_k = x[k];
-        let sigma = s.smooth_lo + (s.smooth_hi - s.smooth_lo) * sgm(l, smooth_l0, smooth_l1);
+        let sigma = s.lo + (s.hi - s.lo) * sgm(l, smooth_l0, smooth_l1);
         let bias = s.bias_lo
             + (s.bias_md - s.bias_lo) * sgm(l, bias_l0, bias_l1)
             + (s.bias_hi - s.bias_md) * sgm(l, bias_l2, bias_l3);
@@ -901,6 +908,11 @@ fn preprocess(f: &[f32], dst: &[f32], src: &[f32], smooth: Option<&Smooth>) -> V
 /// that `measured_db` EQ'd by them matches `target_db`. Both inputs are dB on
 /// the [`log_freqs`] grid (length [`K`]). `steps` is the optimizer iteration
 /// count (peqdb's default is 3000).
+///
+/// # Panics
+///
+/// Panics if `target_db` or `measured_db` is not exactly [`K`] samples long
+/// (both must already be resampled onto the log-frequency grid).
 pub fn run(
     target_db: &[f32],
     measured_db: &[f32],
@@ -969,7 +981,7 @@ pub fn run(
     for i in 0..n {
         spectrum(types[i], f0[i], gain[i], q[i], &f, &mut y);
     }
-    let max = y.iter().cloned().fold(f32::MIN, f32::max).max(0.0);
+    let max = y.iter().copied().fold(f32::MIN, f32::max).max(0.0);
 
     let filters = (0..n)
         .map(|i| EqFilter {
@@ -978,15 +990,15 @@ pub fn run(
                 Type::Lsc => BandKind::LowShelf,
                 Type::Hsc => BandKind::HighShelf,
             },
-            freq: f0[i] as f64,
-            gain_db: gain[i] as f64,
-            q: q[i] as f64,
+            freq: f64::from(f0[i]),
+            gain_db: f64::from(gain[i]),
+            q: f64::from(q[i]),
         })
         .filter(|f| f.gain_db.abs() >= 0.1) // drop inaudible bands
         .collect();
 
     AutoEqResult {
-        preamp_db: -(max as f64),
+        preamp_db: -f64::from(max),
         filters,
     }
 }

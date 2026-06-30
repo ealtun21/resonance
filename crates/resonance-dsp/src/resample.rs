@@ -84,6 +84,13 @@ impl<T: Sample> StreamResampler<T> {
     /// channels. When the rates are equal (or either is non-positive) the
     /// resampler is a bypass: [`is_bypass`](Self::is_bypass) returns true and
     /// [`process`](Self::process) returns its input unchanged.
+    ///
+    /// # Panics
+    /// Panics if the underlying `rubato` sinc resampler rejects the derived
+    /// ratio — unreachable for the validated, finite `from_hz`/`to_hz` here.
+    // float_cmp: exact rate match gates the bypass; any difference resamples.
+    #[allow(clippy::float_cmp)]
+    #[must_use]
     pub fn new(from_hz: f64, to_hz: f64, channels: usize) -> Self {
         let channels = channels.max(1);
         let bypass = !(from_hz > 0.0 && to_hz > 0.0) || from_hz == to_hz;
@@ -125,18 +132,22 @@ impl<T: Sample> StreamResampler<T> {
 
     /// True when no conversion is needed (`from == to`). Callers should branch
     /// on this and use their input buffer directly to avoid an extra copy.
+    #[must_use]
     pub fn is_bypass(&self) -> bool {
         self.inner.is_none()
     }
 
+    #[must_use]
     pub fn from_hz(&self) -> f64 {
         self.from_hz
     }
 
+    #[must_use]
     pub fn to_hz(&self) -> f64 {
         self.to_hz
     }
 
+    #[must_use]
     pub fn channels(&self) -> usize {
         self.channels
     }
@@ -144,11 +155,9 @@ impl<T: Sample> StreamResampler<T> {
     /// Added latency in **output** frames (the resampler's group delay). Zero
     /// when bypassing. Backends report this so the daemon's `status` can show
     /// the true end-to-end latency.
+    #[must_use]
     pub fn output_delay_frames(&self) -> usize {
-        self.inner
-            .as_ref()
-            .map(|i| i.rs.output_delay())
-            .unwrap_or(0)
+        self.inner.as_ref().map_or(0, |i| i.rs.output_delay())
     }
 
     /// Resample one interleaved block (`from_hz`) and return the interleaved
@@ -158,6 +167,12 @@ impl<T: Sample> StreamResampler<T> {
     /// first chunk is still filling.
     ///
     /// On bypass this returns `input` unchanged (no copy).
+    ///
+    /// # Panics
+    /// Panics if rubato's interleaved adapter or chunk processing reports an
+    /// error. These reflect internal invariants (buffer sizing, channel count)
+    /// that are upheld by construction here, so they are not expected to fire in
+    /// practice.
     pub fn process<'a>(&'a mut self, input: &'a [T]) -> &'a [T] {
         let ch = self.channels;
         let Some(inner) = self.inner.as_mut() else {

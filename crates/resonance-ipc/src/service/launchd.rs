@@ -1,4 +1,4 @@
-//! macOS backend: launchd LaunchAgent control for `resonanced`.
+//! macOS backend: launchd `LaunchAgent` control for `resonanced`.
 //!
 //! Layout:
 //!   - Plist at `~/Library/LaunchAgents/com.ealtun21.resonanced.plist`
@@ -103,18 +103,18 @@ fn stage_binary() -> io::Result<PathBuf> {
     Ok(dst)
 }
 
-/// Render the LaunchAgent plist. `enabled` controls `RunAtLoad`: `true` makes
+/// Render the `LaunchAgent` plist. `enabled` controls `RunAtLoad`: `true` makes
 /// the agent come up at login (matches systemd's `WantedBy=default.target`),
 /// `false` leaves it installed but not autostarting (matches systemd's
 /// install-without-enable). `enable`/`disable` rewrite the plist to flip this.
 ///
-/// KeepAlive interaction: `KeepAlive { SuccessfulExit = false }` only relaunches
+/// `KeepAlive` interaction: `KeepAlive { SuccessfulExit = false }` only relaunches
 /// the daemon after a *crash* (non-zero exit), NOT after a clean exit. A user
 /// `stop()` sends SIGTERM and the daemon's handler exits 0, so launchd will not
 /// fight the user by relaunching it. This is independent of `RunAtLoad`, which
 /// only governs the initial start when the agent is (re)loaded at login — so a
 /// disabled agent (`RunAtLoad=false`) that the user manually starts still gets
-/// crash-restart from KeepAlive, but won't come back on its own after a reboot.
+/// crash-restart from `KeepAlive`, but won't come back on its own after a reboot.
 fn plist_text(enabled: bool, exec: &std::path::Path) -> String {
     let log_dir = home().join("Library").join("Logs").join("resonance");
     let stdout_log = log_dir.join("resonanced.out.log");
@@ -181,6 +181,8 @@ fn launchctl(args: &[&str]) -> io::Result<std::process::Output> {
 
 /// Treat launchctl's "already loaded" (errno 37) and "no such process" (errno
 /// 113) as non-fatal — they're the success cases for idempotent transitions.
+// Terminal consumer of a one-shot launchctl `Output`; callers never reuse it.
+#[allow(clippy::needless_pass_by_value)]
 fn check_launchctl(out: std::process::Output, what: &str) -> io::Result<()> {
     if out.status.success() {
         return Ok(());
@@ -214,8 +216,7 @@ pub fn manager_available() -> bool {
     Command::new("launchctl")
         .arg("version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 /// `launchctl print` exits 0 when the service exists in the domain. Pair with
@@ -324,9 +325,7 @@ pub fn uninstall() -> io::Result<()> {
 /// our `is_enabled`, which reflects the persistent `RunAtLoad` autostart intent).
 /// `launchctl print` exits 0 iff the service exists in the domain.
 fn is_loaded() -> bool {
-    launchctl(&["print", &service_target()])
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    launchctl(&["print", &service_target()]).is_ok_and(|o| o.status.success())
 }
 
 pub fn start() -> io::Result<()> {
@@ -393,19 +392,23 @@ mod tests {
             s.contains("Library/LaunchAgents"),
             "expected LaunchAgents path, got {s}"
         );
-        assert!(s.ends_with(".plist"), "expected .plist suffix, got {s}");
+        assert!(
+            std::path::Path::new(&s)
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("plist")),
+            "expected .plist suffix, got {s}"
+        );
         assert!(s.contains(UNIT_NAME), "expected unit name in path, got {s}");
     }
 
     #[test]
     fn service_target_includes_uid_and_label() {
         let t = service_target();
-        let expected_suffix = format!("/{}", UNIT_NAME);
+        let expected_suffix = format!("/{UNIT_NAME}");
         assert!(t.starts_with("gui/"), "expected gui/<uid> prefix, got {t}");
         assert!(
             t.ends_with(&expected_suffix),
-            "expected /{} suffix, got {t}",
-            UNIT_NAME
+            "expected /{UNIT_NAME} suffix, got {t}"
         );
     }
 
@@ -458,15 +461,12 @@ mod tests {
         let enabled = plist_text(true, exec);
         let disabled = plist_text(false, exec);
         let after = |s: &str| {
-            s.split("<key>RunAtLoad</key>")
-                .nth(1)
-                .map(|t| {
-                    let tr = t.find("<true/>");
-                    let fa = t.find("<false/>");
-                    matches!((tr, fa), (Some(a), Some(b)) if a < b)
-                        || matches!((tr, fa), (Some(_), None))
-                })
-                .unwrap_or(false)
+            s.split("<key>RunAtLoad</key>").nth(1).is_some_and(|t| {
+                let tr = t.find("<true/>");
+                let fa = t.find("<false/>");
+                matches!((tr, fa), (Some(a), Some(b)) if a < b)
+                    || matches!((tr, fa), (Some(_), None))
+            })
         };
         assert!(after(&enabled), "enabled plist must have RunAtLoad <true/>");
         assert!(

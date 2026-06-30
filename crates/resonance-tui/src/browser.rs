@@ -117,7 +117,7 @@ fn read_entries(dir: &Path, purpose: BrowsePurpose) -> Vec<Item> {
                 continue;
             }
             let path = e.path();
-            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
             if is_dir {
                 dirs.push(Item { name, path, is_dir });
             } else if accepts(&name, purpose) {
@@ -148,11 +148,14 @@ fn read_entries(dir: &Path, purpose: BrowsePurpose) -> Vec<Item> {
 /// the preset picker from offering `.csv` curves (which the importer rejects)
 /// and the measurement picker from offering `.fac`/`.toml` (which it can't parse).
 fn accepts(name: &str, purpose: BrowsePurpose) -> bool {
+    let has_ext = |ext: &str| {
+        Path::new(name)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case(ext))
+    };
     match purpose {
-        BrowsePurpose::LoadPreset => {
-            name.ends_with(".fac") || name.ends_with(".txt") || name.ends_with(".toml")
-        }
-        BrowsePurpose::LoadMeasurement => name.ends_with(".txt") || name.ends_with(".csv"),
+        BrowsePurpose::LoadPreset => has_ext("fac") || has_ext("txt") || has_ext("toml"),
+        BrowsePurpose::LoadMeasurement => has_ext("txt") || has_ext("csv"),
     }
 }
 
@@ -168,6 +171,7 @@ fn read_head(path: &Path, max: usize) -> std::io::Result<String> {
 
 /// Build a human-readable preview for a preset file (falls back to a raw head).
 fn preview_file(path: &Path) -> Vec<String> {
+    const MAX_BANDS: usize = 16;
     // Cap the read: this runs on every cursor move while browsing, so a huge or
     // hostile file shouldn't be slurped whole. Real presets are a few KB; 64 KiB
     // is plenty to summarise, and the parsers tolerate a truncated tail.
@@ -180,7 +184,12 @@ fn preview_file(path: &Path) -> Vec<String> {
     // a raw head instead of running them through the preset parsers.
     if ext == "toml" {
         let mut out = vec!["⮞ profile (.toml)".to_string(), String::new()];
-        out.extend(content.lines().take(30).map(|l| l.to_string()));
+        out.extend(
+            content
+                .lines()
+                .take(30)
+                .map(std::string::ToString::to_string),
+        );
         return out;
     }
     // GraphicEQ target curves are fitted to a parametric bank on import — an
@@ -225,7 +234,6 @@ fn preview_file(path: &Path) -> Vec<String> {
             }
             out.push(String::new());
             out.push(format!("EQ bands: {}", p.bands.len()));
-            const MAX_BANDS: usize = 16;
             for b in p.bands.iter().take(MAX_BANDS) {
                 let bt: BandType = FilterType::from(b.filter_type).into();
                 out.push(format!(
@@ -243,7 +251,12 @@ fn preview_file(path: &Path) -> Vec<String> {
         }
         Err(e) => {
             let mut out = vec![format!("(parse error: {e})"), String::new()];
-            out.extend(content.lines().take(30).map(|l| l.to_string()));
+            out.extend(
+                content
+                    .lines()
+                    .take(30)
+                    .map(std::string::ToString::to_string),
+            );
             out
         }
     }
@@ -257,7 +270,7 @@ fn fmt_freq(hz: f64) -> String {
     }
 }
 
-/// Cheap preview for an EqualizerAPO `GraphicEQ:` target line — point count and
+/// Cheap preview for an `EqualizerAPO` `GraphicEQ:` target line — point count and
 /// range, without running the (expensive) curve-fit that import performs.
 fn graphic_eq_preview(content: &str) -> Option<Vec<String>> {
     let s = resonance_preset::graphic::graphic_eq_summary(content)?;

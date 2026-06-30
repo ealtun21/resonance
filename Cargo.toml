@@ -20,6 +20,43 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/ealtun21/resonance"
 rust-version = "1.85"
 
+# Workspace lint policy. `clippy::pedantic` is enabled at warn (and escalated to
+# deny by `make check`'s `-D warnings`). The allows below are deliberate: each
+# either has no idiomatic alternative in this DSP/audio code or flags nothing
+# actionable here. Lints that DO catch real problems (float_cmp, ptr alignment,
+# pass-by-value, …) are left ACTIVE and exempted only at justified call sites
+# with a `#[allow(…)]` + reason, so they keep working on new code.
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+# Lossy numeric casts are pervasive and intentional: audio samples <-> buffer
+# indices, f64 <-> f32 at stage boundaries, and waveform generation in tests.
+# These fire on every such cast and catch nothing real, so allow them globally.
+# (Raw-pointer alignment casts are NOT covered here — `cast_ptr_alignment` stays
+# active and is exempted per-site in resonance-apo, the only place it occurs.)
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+
+# A maintainability nudge, not a correctness lint. The long functions here are
+# egui/ratatui render routines that read more clearly as one top-to-bottom pass
+# than split into single-call helpers.
+too_many_lines = "allow"
+
+# Single-character bindings are the established notation in this codebase's two
+# dense domains: DSP/EQ math (biquad coeffs a0..a2/b0..b2, x/y/w/q/r) and 2D
+# rendering geometry (p, r, ui). Renaming them to satisfy the lint would obscure
+# the math, not clarify it. Catches nothing actionable here.
+many_single_char_names = "allow"
+
+# Several config/UI-state structs carry many *independent* boolean toggles
+# (visibility, lock, enable flags). The lint suggests folding them into an enum
+# or state machine, but they are genuinely orthogonal switches — an enum would be
+# artificial. Allowed for structs and for the few render helpers taking flag args.
+struct_excessive_bools = "allow"
+fn_params_excessive_bools = "allow"
+
 [workspace.dependencies]
 # DSP
 biquad = "0.6"

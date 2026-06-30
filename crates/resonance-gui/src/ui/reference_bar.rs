@@ -70,6 +70,45 @@ const REF_LAYOUT: [(RefCtl, Section, bool, u8); 12] = [
 
 const SECTIONS: [Section; 3] = [Section::Targets, Section::Measurements, Section::AutoEq];
 
+/// Max rows rendered in each manage-dialog list before the rest are hidden — a
+/// guard so a huge federated catalog can't stall the immediate-mode layout.
+const MANAGE_LIST_CAP: usize = 400;
+
+/// Max rows rendered in the browse-dialog model list (with a "+N more" hint).
+const BROWSE_LIST_CAP: usize = 300;
+
+/// Actions a single manage-dialog frame can request, collected while `reference`
+/// is borrowed and applied once that borrow is released. Source-toggle actions
+/// (shared with the browse dialog) live in [`SourceActions`] instead.
+#[derive(Default)]
+struct ManageActions {
+    /// A catalog target curve the user pressed "Add" on.
+    fetch_target: Option<TargetEntry>,
+    /// A catalog measurement to install as a target (L+R averaged).
+    add_meas: Option<ModelEntry>,
+    /// A library label the user pressed the remove button on.
+    remove_label: Option<String>,
+    /// "Reset to defaults" pressed — un-hide every built-in target.
+    do_reset: bool,
+    /// "Close" pressed.
+    close: bool,
+}
+
+/// The squig.link source-list actions shared by the browse and manage dialogs.
+/// Collected by [`GuiApp::ref_sources_panel`] and dispatched by
+/// [`GuiApp::apply_source_actions`].
+#[derive(Default)]
+struct SourceActions {
+    /// "Refresh" pressed — re-fetch the source indexes.
+    refresh: bool,
+    /// `(source_id, enabled)` for a single toggled source.
+    toggle: Option<(String, bool)>,
+    /// `Some(on)` for "All"/"None" — enable or disable every source.
+    set_all: Option<bool>,
+    /// "Default" pressed — restore the built-in source selection.
+    set_default: bool,
+}
+
 impl GuiApp {
     /// Control strip under the FR graph: three sections (Targets · Measurements ·
     /// Auto-EQ) separated by hairlines. A single non-wrapping row that collapses
@@ -176,7 +215,7 @@ impl GuiApp {
                     continue;
                 }
                 if drawn {
-                    self.tb_sep(ui);
+                    Self::tb_sep(ui);
                 }
                 for c in items {
                     self.ref_ctl_inline(ui, c, can_auto, busy);
@@ -187,7 +226,7 @@ impl GuiApp {
             // ☰ overflow — only when something collapsed.
             if !collapsed.is_empty() {
                 if drawn {
-                    self.tb_sep(ui);
+                    Self::tb_sep(ui);
                 }
                 self.ref_overflow(ui, &collapsed, can_auto, busy);
             }
@@ -206,12 +245,10 @@ impl GuiApp {
                 kit::text_width(ui, kit::T_VALUE, "Target") + 2.0 + kit::SP_S + 148.0
             }
             RefCtl::Customize => icon_label("Customize"),
-            RefCtl::Manage => icon_only,
+            // Icon-only ghost pills all share the same fixed width.
+            RefCtl::Manage | RefCtl::Clear | RefCtl::MeasFile | RefCtl::ToTarget => icon_only,
             RefCtl::MeasChip => label_only(&self.meas_label()),
-            RefCtl::Clear => icon_only,
             RefCtl::Channel => label_only(self.reference.channel.label()),
-            RefCtl::MeasFile => icon_only,
-            RefCtl::ToTarget => icon_only,
             RefCtl::Raw => check("Raw"),
             RefCtl::Bounds => check("Bounds"),
             RefCtl::Normalize => check("Normalize"),
@@ -228,167 +265,201 @@ impl GuiApp {
         }
     }
 
-    /// Render one control inline as a pill (mockup `.refbar`). Secondary actions
-    /// are icon-only ghost pills with a hover tooltip; the view flags are
-    /// check-pills; Auto-EQ is an accent pill.
+    /// Render one control inline as a pill (mockup `.refbar`). Dispatches to a
+    /// per-control renderer so each control's pill shape stays a small, named
+    /// unit. Secondary actions are icon-only ghost pills with a hover tooltip;
+    /// the view flags are check-pills; Auto-EQ is an accent pill.
     fn ref_ctl_inline(&mut self, ui: &mut egui::Ui, c: RefCtl, can_auto: bool, busy: bool) {
         match c {
-            RefCtl::TargetDd => {
-                // A rounded "Target" selector: an accent prefix label + the value
-                // dropdown, sized to the pill row height (mockup `.ddl`).
-                let accent = kit::tokens(ui).accent;
-                let (lr, _) = ui.allocate_exact_size(
-                    egui::vec2(
-                        kit::text_width(ui, kit::T_VALUE, "Target") + 2.0,
-                        kit::PILL_H,
-                    ),
-                    egui::Sense::hover(),
-                );
-                ui.painter().text(
-                    egui::pos2(lr.left(), lr.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    "Target",
-                    egui::FontId::proportional(kit::T_VALUE),
-                    accent,
-                );
-                let opts = self.reference.target_options();
-                let labels: Vec<&str> = opts.iter().map(|(n, _)| n.as_str()).collect();
-                let cur = self.reference.target_label();
-                if let Some(i) = kit::dropdown(
-                    ui,
-                    148.0,
-                    kit::PILL_H,
-                    ui.make_persistent_id("ref_target_dd"),
-                    &cur,
-                    &labels,
-                ) {
-                    self.reference.set_target(opts[i].1.clone());
-                }
-            }
+            RefCtl::TargetDd => self.ref_target_dropdown(ui),
             RefCtl::Customize => self.ref_customize_button(ui),
-            RefCtl::Manage => {
-                if kit::pill_icon(
-                    ui,
-                    Some(Icon::Download),
-                    "",
-                    false,
-                    true,
-                    true,
-                    "Manage targets — add curves or measurements from squig.link, or remove them",
-                ) {
-                    self.open_manage();
-                }
-            }
-            RefCtl::MeasChip => {
-                let has_meas = self.reference.measurement.is_some();
-                let tip = if has_meas {
-                    "Measurement to overlay — click to pick another"
-                } else {
-                    "Pick a headphone/IEM measurement from squig.link to overlay"
-                };
-                let label = self.meas_label();
-                if kit::pill_icon(ui, None, &label, false, false, true, tip) {
-                    self.open_browser();
-                }
-            }
-            RefCtl::Clear => {
-                if kit::pill_icon(
-                    ui,
-                    Some(Icon::Close),
-                    "",
-                    false,
-                    true,
-                    true,
-                    "Remove the loaded measurement",
-                ) {
-                    self.reference.clear_measurement();
-                    self.touch_measurement();
-                }
-            }
-            RefCtl::Channel => {
-                if kit::pill_icon(
-                    ui,
-                    None,
-                    self.reference.channel.label(),
-                    false,
-                    false,
-                    true,
-                    "Measurement channel: cycle L+R average / Left / Right",
-                ) {
-                    self.cycle_channel();
-                }
-            }
-            RefCtl::ToTarget => {
-                if kit::pill_icon(
-                    ui,
-                    Some(Icon::Save),
-                    "",
-                    false,
-                    true,
-                    true,
-                    "Save this measurement as a target curve to EQ toward",
-                ) {
-                    self.meas_to_target();
-                }
-            }
-            RefCtl::MeasFile => {
-                if kit::pill_icon(
-                    ui,
-                    Some(Icon::Folder),
-                    "",
-                    false,
-                    true,
-                    true,
-                    "Load a measurement from a local .txt/.csv file",
-                ) {
-                    self.open_curve_picker(false);
-                }
-            }
-            RefCtl::Raw => {
-                if kit::pill_check(
-                    ui,
-                    "Raw",
-                    self.reference.show_measurement,
-                    "Also draw the raw (un-EQ'd) measurement",
-                ) {
-                    self.reference.show_measurement = !self.reference.show_measurement;
-                }
-            }
-            RefCtl::Bounds => {
-                if kit::pill_check(
-                    ui,
-                    "Bounds",
-                    self.reference.show_bounds,
-                    "Shade the listener-preference tolerance band around the target \
-                     (tight in the mids, wider in bass/treble) — keep the result inside it",
-                ) {
-                    self.reference.show_bounds = !self.reference.show_bounds;
-                }
-            }
-            RefCtl::Normalize => {
-                if kit::pill_check(
-                    ui,
-                    "Normalize",
-                    self.reference.normalized,
-                    "Flatten the target to 0 dB; show the EQ'd result as deviation",
-                ) {
-                    self.reference.normalized = !self.reference.normalized;
-                }
-            }
-            RefCtl::AutoEq => {
-                let label = if busy { "Auto-EQ…" } else { "Auto-EQ" };
-                if kit::pill_icon(
-                    ui,
-                    Some(Icon::Wand),
-                    label,
-                    true,
-                    false,
-                    can_auto,
-                    "Fit EQ bands so the EQ'd measurement matches the target (peqdb AutoEQ)",
-                ) {
-                    self.auto_eq(ui.ctx().clone());
-                }
-            }
+            RefCtl::Manage => self.ref_manage_pill(ui),
+            RefCtl::MeasChip => self.ref_meas_chip(ui),
+            RefCtl::Clear => self.ref_clear_pill(ui),
+            RefCtl::Channel => self.ref_channel_pill(ui),
+            RefCtl::ToTarget => self.ref_to_target_pill(ui),
+            RefCtl::MeasFile => self.ref_meas_file_pill(ui),
+            RefCtl::Raw => self.ref_raw_check(ui),
+            RefCtl::Bounds => self.ref_bounds_check(ui),
+            RefCtl::Normalize => self.ref_normalize_check(ui),
+            RefCtl::AutoEq => self.ref_autoeq_pill(ui, can_auto, busy),
+        }
+    }
+
+    /// The "Target" selector pill: an accent prefix label + the value dropdown,
+    /// sized to the pill row height (mockup `.ddl`).
+    fn ref_target_dropdown(&mut self, ui: &mut egui::Ui) {
+        let accent = kit::tokens(ui).accent;
+        let (lr, _) = ui.allocate_exact_size(
+            egui::vec2(
+                kit::text_width(ui, kit::T_VALUE, "Target") + 2.0,
+                kit::PILL_H,
+            ),
+            egui::Sense::hover(),
+        );
+        ui.painter().text(
+            egui::pos2(lr.left(), lr.center().y),
+            egui::Align2::LEFT_CENTER,
+            "Target",
+            egui::FontId::proportional(kit::T_VALUE),
+            accent,
+        );
+        let opts = self.reference.target_options();
+        let labels: Vec<&str> = opts.iter().map(|(n, _)| n.as_str()).collect();
+        let cur = self.reference.target_label();
+        if let Some(i) = kit::dropdown(
+            ui,
+            148.0,
+            kit::PILL_H,
+            ui.make_persistent_id("ref_target_dd"),
+            &cur,
+            &labels,
+        ) {
+            self.reference.set_target(opts[i].1.clone());
+        }
+    }
+
+    /// "Manage targets" ghost pill — opens the library dialog.
+    fn ref_manage_pill(&mut self, ui: &mut egui::Ui) {
+        if kit::pill_icon(
+            ui,
+            Some(Icon::Download),
+            "",
+            false,
+            true,
+            true,
+            "Manage targets — add curves or measurements from squig.link, or remove them",
+        ) {
+            self.open_manage();
+        }
+    }
+
+    /// The measurement chip: shows the loaded name (or a load prompt) and opens
+    /// the measurement browser when clicked.
+    fn ref_meas_chip(&mut self, ui: &mut egui::Ui) {
+        let tip = if self.reference.measurement.is_some() {
+            "Measurement to overlay — click to pick another"
+        } else {
+            "Pick a headphone/IEM measurement from squig.link to overlay"
+        };
+        let label = self.meas_label();
+        if kit::pill_icon(ui, None, &label, false, false, true, tip) {
+            self.open_browser();
+        }
+    }
+
+    /// Clear-measurement ghost pill.
+    fn ref_clear_pill(&mut self, ui: &mut egui::Ui) {
+        if kit::pill_icon(
+            ui,
+            Some(Icon::Close),
+            "",
+            false,
+            true,
+            true,
+            "Remove the loaded measurement",
+        ) {
+            self.reference.clear_measurement();
+            self.touch_measurement();
+        }
+    }
+
+    /// Channel-cycle pill (L+R average / Left / Right).
+    fn ref_channel_pill(&mut self, ui: &mut egui::Ui) {
+        if kit::pill_icon(
+            ui,
+            None,
+            self.reference.channel.label(),
+            false,
+            false,
+            true,
+            "Measurement channel: cycle L+R average / Left / Right",
+        ) {
+            self.cycle_channel();
+        }
+    }
+
+    /// "Save measurement as target" ghost pill.
+    fn ref_to_target_pill(&mut self, ui: &mut egui::Ui) {
+        if kit::pill_icon(
+            ui,
+            Some(Icon::Save),
+            "",
+            false,
+            true,
+            true,
+            "Save this measurement as a target curve to EQ toward",
+        ) {
+            self.meas_to_target();
+        }
+    }
+
+    /// "Load measurement from file" ghost pill.
+    fn ref_meas_file_pill(&mut self, ui: &mut egui::Ui) {
+        if kit::pill_icon(
+            ui,
+            Some(Icon::Folder),
+            "",
+            false,
+            true,
+            true,
+            "Load a measurement from a local .txt/.csv file",
+        ) {
+            self.open_curve_picker(false);
+        }
+    }
+
+    /// "Raw" view check-pill — also draw the un-EQ'd measurement.
+    fn ref_raw_check(&mut self, ui: &mut egui::Ui) {
+        if kit::pill_check(
+            ui,
+            "Raw",
+            self.reference.show_measurement,
+            "Also draw the raw (un-EQ'd) measurement",
+        ) {
+            self.reference.show_measurement = !self.reference.show_measurement;
+        }
+    }
+
+    /// "Bounds" view check-pill — shade the listener-preference tolerance band.
+    fn ref_bounds_check(&mut self, ui: &mut egui::Ui) {
+        if kit::pill_check(
+            ui,
+            "Bounds",
+            self.reference.show_bounds,
+            "Shade the listener-preference tolerance band around the target \
+             (tight in the mids, wider in bass/treble) — keep the result inside it",
+        ) {
+            self.reference.show_bounds = !self.reference.show_bounds;
+        }
+    }
+
+    /// "Normalize" view check-pill — flatten the target to 0 dB.
+    fn ref_normalize_check(&mut self, ui: &mut egui::Ui) {
+        if kit::pill_check(
+            ui,
+            "Normalize",
+            self.reference.normalized,
+            "Flatten the target to 0 dB; show the EQ'd result as deviation",
+        ) {
+            self.reference.normalized = !self.reference.normalized;
+        }
+    }
+
+    /// Auto-EQ accent pill — enabled only when a measurement and target are both
+    /// present and no fit is already running.
+    fn ref_autoeq_pill(&mut self, ui: &mut egui::Ui, can_auto: bool, busy: bool) {
+        let label = if busy { "Auto-EQ…" } else { "Auto-EQ" };
+        if kit::pill_icon(
+            ui,
+            Some(Icon::Wand),
+            label,
+            true,
+            false,
+            can_auto,
+            "Fit EQ bands so the EQ'd measurement matches the target (peqdb AutoEQ)",
+        ) {
+            self.auto_eq(ui.ctx().clone());
         }
     }
 
@@ -779,15 +850,10 @@ impl GuiApp {
         }
 
         let mut open = true;
-        let mut close = false;
-        let mut fetch_target: Option<TargetEntry> = None;
-        let mut add_meas: Option<ModelEntry> = None;
-        let mut remove_label: Option<String> = None;
-        let mut do_reset = false;
-        let mut refresh = false;
-        let mut toggle: Option<(String, bool)> = None;
-        let mut set_all: Option<bool> = None;
-        let mut set_default = false;
+        // Actions are collected inside the dialog closure (where `reference` is
+        // borrowed) and applied afterwards, once those borrows are released.
+        let mut acts = ManageActions::default();
+        let mut sources = SourceActions::default();
 
         // Snapshot the library (owned) before borrowing `reference` mutably.
         let lib = self.reference.library_entries();
@@ -803,276 +869,265 @@ impl GuiApp {
             .default_height(def_h)
             .open(&mut open)
             .show(ctx, |ui| {
-                // Tabs + search (top, fixed).
                 egui::Panel::top("manage_top").show_inside(ui, |ui| {
-                    ui.add_space(2.0);
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = kit::SP_S;
-                        let tabs = [
-                            (
-                                ManageTab::Targets,
-                                "Target curves",
-                                "Browse squig.link target curves to add to your library",
-                            ),
-                            (
-                                ManageTab::Measurements,
-                                "Measurements",
-                                "Add a headphone/IEM measurement as a target (L+R averaged)",
-                            ),
-                            (
-                                ManageTab::Yours,
-                                "Your targets",
-                                "Your current library — remove targets or reset to defaults",
-                            ),
-                        ];
-                        for (t, label, tip) in tabs {
-                            if kit::button_tip(ui, label, reference.manage_tab == t, true, tip) {
-                                reference.manage_tab = t;
-                            }
-                        }
-                    });
-                    if reference.manage_tab != ManageTab::Yours {
-                        ui.add_space(2.0);
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("search").size(kit::T_CAPTION).weak());
-                            let (id, buf, hint) = if reference.manage_tab == ManageTab::Targets {
-                                (
-                                    "manage_tq",
-                                    &mut reference.manage_tquery,
-                                    "target curve name…",
-                                )
-                            } else {
-                                (
-                                    "manage_mq",
-                                    &mut reference.manage_mquery,
-                                    "headphone or IEM…",
-                                )
-                            };
-                            kit::text_field(ui, 240.0, egui::Id::new(id), buf, hint, false);
-                            if kit::icon_text_btn(
-                                ui,
-                                Icon::Refresh,
-                                "Refresh",
-                                false,
-                                true,
-                                "Re-fetch source indexes from squig.link",
-                            ) {
-                                refresh = true;
-                            }
-                            if dl_busy {
-                                ui.label(egui::RichText::new("loading…").weak());
-                            }
-                        });
-                    }
-                    if !dl_status.is_empty() {
-                        ui.label(egui::RichText::new(dl_status).size(kit::T_CAPTION).weak());
-                    }
-                    ui.add_space(2.0);
+                    Self::manage_top_panel(ui, reference, dl_status, dl_busy, &mut sources.refresh);
                 });
-
                 // Sources + Close (bottom, fixed) — same federation toggles as the
                 // measurement browser; enabling more sites surfaces more targets.
                 egui::Panel::bottom("manage_bottom").show_inside(ui, |ui| {
-                    ui.add_space(2.0);
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("sources").size(kit::T_CAPTION).weak());
-                        if kit::button_tip(ui, "All", false, true, "Enable every squig.link source")
-                        {
-                            set_all = Some(true);
-                        }
-                        if kit::button_tip(ui, "None", false, true, "Disable every source") {
-                            set_all = Some(false);
-                        }
-                        if kit::button_tip(
-                            ui,
-                            "Default",
-                            false,
-                            true,
-                            "Restore the built-in default source selection",
-                        ) {
-                            set_default = true;
-                        }
-                    });
-                    egui::ScrollArea::vertical()
-                        .id_salt("manage_sources")
-                        .max_height(64.0)
-                        .show(ui, |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.spacing_mut().item_spacing = egui::vec2(kit::SP_XS, kit::SP_XS);
-                                if let Some(cat) = catalog {
-                                    for s in &cat.sources {
-                                        let lbl = if s.enabled && !s.loaded {
-                                            format!("{}…", s.name)
-                                        } else {
-                                            s.name.clone()
-                                        };
-                                        if kit::button_tip(
-                                            ui,
-                                            &lbl,
-                                            s.enabled,
-                                            true,
-                                            "Toggle this squig.link source on/off",
-                                        ) {
-                                            toggle = Some((s.id.clone(), !s.enabled));
-                                        }
-                                    }
-                                }
-                            });
-                        });
+                    Self::ref_sources_panel(ui, catalog, "manage_sources", 64.0, &mut sources);
                     ui.separator();
                     if kit::button_tip(ui, "Close", false, true, "Close this dialog") {
-                        close = true;
+                        acts.close = true;
                     }
                     ui.add_space(2.0);
                 });
-
                 egui::CentralPanel::default().show_inside(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .id_salt("manage_list")
                         .auto_shrink([false, false])
                         .show(ui, |ui| match reference.manage_tab {
                             ManageTab::Targets => {
-                                let q = reference.manage_tquery.to_lowercase();
-                                let Some(cat) = catalog else {
-                                    ui.weak("loading catalog…");
-                                    return;
-                                };
-                                let mut shown = 0usize;
-                                for t in &cat.targets {
-                                    if !q.is_empty() && !t.name.to_lowercase().contains(&q) {
-                                        continue;
-                                    }
-                                    shown += 1;
-                                    if shown > 400 {
-                                        continue;
-                                    }
-                                    ui.horizontal(|ui| {
-                                        if kit::icon_text_btn(
-                                            ui,
-                                            Icon::Plus,
-                                            "Add",
-                                            false,
-                                            true,
-                                            "Add this target curve to your library",
-                                        ) {
-                                            fetch_target = Some(t.clone());
-                                        }
-                                        ui.label(format!("{}   ·  {}", t.name, t.source));
-                                    });
-                                }
-                                if shown == 0 {
-                                    ui.weak(
-                                        "no target curves — enable more sources below, or Refresh",
-                                    );
-                                }
+                                Self::manage_targets_tab(ui, reference, catalog, &mut acts);
                             }
                             ManageTab::Measurements => {
-                                let q = reference.manage_mquery.to_lowercase();
-                                let Some(cat) = catalog else {
-                                    ui.weak("loading catalog…");
-                                    return;
-                                };
-                                let mut shown = 0usize;
-                                for m in &cat.models {
-                                    if !q.is_empty() && !m.display.to_lowercase().contains(&q) {
-                                        continue;
-                                    }
-                                    shown += 1;
-                                    if shown > 400 {
-                                        continue;
-                                    }
-                                    ui.horizontal(|ui| {
-                                        if kit::icon_text_btn(
-                                            ui,
-                                            Icon::Plus,
-                                            "Add",
-                                            false,
-                                            true,
-                                            "Add this measurement (L+R averaged) as a target",
-                                        ) {
-                                            add_meas = Some(m.clone());
-                                        }
-                                        ui.label(format!(
-                                            "{}  ·  {} · {}",
-                                            m.display, m.source, m.kind
-                                        ));
-                                    });
-                                }
-                                if shown == 0 {
-                                    ui.weak("type to search, or enable more sources below");
-                                }
+                                Self::manage_measurements_tab(ui, reference, catalog, &mut acts);
                             }
                             ManageTab::Yours => {
-                                ui.horizontal(|ui| {
-                                    let label = if hidden == 0 {
-                                        "Reset to defaults".to_string()
-                                    } else {
-                                        format!("Reset to defaults ({hidden} hidden)")
-                                    };
-                                    if kit::button_tip(
-                                        ui,
-                                        &label,
-                                        false,
-                                        true,
-                                        "Un-hide every built-in / generated target",
-                                    ) {
-                                        do_reset = true;
-                                    }
-                                });
-                                ui.add_space(kit::SP_XS);
-                                if lib.is_empty() {
-                                    ui.weak("no targets — add some from the other tabs");
-                                }
-                                for e in &lib {
-                                    ui.horizontal(|ui| {
-                                        let tip = if e.builtin {
-                                            "Hide this built-in / generated target"
-                                        } else {
-                                            "Delete this user target file"
-                                        };
-                                        if kit::icon_btn(ui, Icon::Close, 22.0, tip) {
-                                            remove_label = Some(e.label.clone());
-                                        }
-                                        let suffix = if e.builtin { "" } else { "  (added)" };
-                                        ui.label(format!("{}{}", e.label, suffix));
-                                    });
-                                }
+                                Self::manage_yours_tab(ui, &lib, hidden, &mut acts);
                             }
                         });
                 });
             });
 
-        // Apply collected actions once the borrows above are released.
-        if let Some(t) = fetch_target {
-            let _ = self.dl_tx.send(DlCmd::FetchTarget(t));
-        }
-        if let Some(m) = add_meas {
-            let _ = self.dl_tx.send(DlCmd::AddMeasurementTarget(m));
-        }
-        if let Some(label) = remove_label {
-            self.reference.remove_target_label(&label);
-        }
-        if do_reset {
-            self.reference.reset_targets_to_defaults();
-        }
-        if refresh {
-            let _ = self.dl_tx.send(DlCmd::Refresh);
-        }
-        if let Some((id, on)) = toggle {
-            let _ = self.dl_tx.send(DlCmd::SetEnabled(id, on));
-        }
-        if let Some(on) = set_all {
-            let _ = self.dl_tx.send(DlCmd::SetAll(on));
-        }
-        if set_default {
-            let _ = self.dl_tx.send(DlCmd::SetDefault);
-        }
-        if !open || close {
+        self.apply_manage_actions(acts);
+        self.apply_source_actions(&sources);
+        if !open {
             self.reference.show_manage = false;
         }
     }
 
-    /// Auto-EQ: fit a parametric bank (peqdb's AutoEQ, ported to Rust in
+    /// Top panel of the manage dialog: tab buttons plus the per-tab search row.
+    /// Sets `refresh` when the Refresh button is pressed.
+    fn manage_top_panel(
+        ui: &mut egui::Ui,
+        reference: &mut resonance_reference::reference::ReferenceState,
+        dl_status: &str,
+        dl_busy: bool,
+        refresh: &mut bool,
+    ) {
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = kit::SP_S;
+            let tabs = [
+                (
+                    ManageTab::Targets,
+                    "Target curves",
+                    "Browse squig.link target curves to add to your library",
+                ),
+                (
+                    ManageTab::Measurements,
+                    "Measurements",
+                    "Add a headphone/IEM measurement as a target (L+R averaged)",
+                ),
+                (
+                    ManageTab::Yours,
+                    "Your targets",
+                    "Your current library — remove targets or reset to defaults",
+                ),
+            ];
+            for (t, label, tip) in tabs {
+                if kit::button_tip(ui, label, reference.manage_tab == t, true, tip) {
+                    reference.manage_tab = t;
+                }
+            }
+        });
+        // The "Your targets" tab is the library itself, so it needs no search.
+        if reference.manage_tab != ManageTab::Yours {
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("search").size(kit::T_CAPTION).weak());
+                let (id, buf, hint) = if reference.manage_tab == ManageTab::Targets {
+                    (
+                        "manage_tq",
+                        &mut reference.manage_tquery,
+                        "target curve name…",
+                    )
+                } else {
+                    (
+                        "manage_mq",
+                        &mut reference.manage_mquery,
+                        "headphone or IEM…",
+                    )
+                };
+                kit::text_field(ui, 240.0, egui::Id::new(id), buf, hint, false);
+                if kit::icon_text_btn(
+                    ui,
+                    Icon::Refresh,
+                    "Refresh",
+                    false,
+                    true,
+                    "Re-fetch source indexes from squig.link",
+                ) {
+                    *refresh = true;
+                }
+                if dl_busy {
+                    ui.label(egui::RichText::new("loading…").weak());
+                }
+            });
+        }
+        if !dl_status.is_empty() {
+            ui.label(egui::RichText::new(dl_status).size(kit::T_CAPTION).weak());
+        }
+        ui.add_space(2.0);
+    }
+
+    /// "Target curves" tab: filtered squig.link target list with an Add button
+    /// per row. Capped to `MANAGE_LIST_CAP` visible rows.
+    fn manage_targets_tab(
+        ui: &mut egui::Ui,
+        reference: &resonance_reference::reference::ReferenceState,
+        catalog: Option<&resonance_reference::download::Catalog>,
+        acts: &mut ManageActions,
+    ) {
+        let q = reference.manage_tquery.to_lowercase();
+        let Some(cat) = catalog else {
+            ui.weak("loading catalog…");
+            return;
+        };
+        let mut shown = 0usize;
+        for t in &cat.targets {
+            if !q.is_empty() && !t.name.to_lowercase().contains(&q) {
+                continue;
+            }
+            shown += 1;
+            if shown > MANAGE_LIST_CAP {
+                continue;
+            }
+            ui.horizontal(|ui| {
+                if kit::icon_text_btn(
+                    ui,
+                    Icon::Plus,
+                    "Add",
+                    false,
+                    true,
+                    "Add this target curve to your library",
+                ) {
+                    acts.fetch_target = Some(t.clone());
+                }
+                ui.label(format!("{}   ·  {}", t.name, t.source));
+            });
+        }
+        if shown == 0 {
+            ui.weak("no target curves — enable more sources below, or Refresh");
+        }
+    }
+
+    /// "Measurements" tab: filtered squig.link model list; each Add installs the
+    /// model (L+R averaged) as a target. Capped to `MANAGE_LIST_CAP` rows.
+    fn manage_measurements_tab(
+        ui: &mut egui::Ui,
+        reference: &resonance_reference::reference::ReferenceState,
+        catalog: Option<&resonance_reference::download::Catalog>,
+        acts: &mut ManageActions,
+    ) {
+        let q = reference.manage_mquery.to_lowercase();
+        let Some(cat) = catalog else {
+            ui.weak("loading catalog…");
+            return;
+        };
+        let mut shown = 0usize;
+        for m in &cat.models {
+            if !q.is_empty() && !m.display.to_lowercase().contains(&q) {
+                continue;
+            }
+            shown += 1;
+            if shown > MANAGE_LIST_CAP {
+                continue;
+            }
+            ui.horizontal(|ui| {
+                if kit::icon_text_btn(
+                    ui,
+                    Icon::Plus,
+                    "Add",
+                    false,
+                    true,
+                    "Add this measurement (L+R averaged) as a target",
+                ) {
+                    acts.add_meas = Some(m.clone());
+                }
+                ui.label(format!("{}  ·  {} · {}", m.display, m.source, m.kind));
+            });
+        }
+        if shown == 0 {
+            ui.weak("type to search, or enable more sources below");
+        }
+    }
+
+    /// "Your targets" tab: the current library with a per-row remove button and a
+    /// "Reset to defaults" action that un-hides every built-in target.
+    fn manage_yours_tab(
+        ui: &mut egui::Ui,
+        lib: &[resonance_reference::reference::LibEntry],
+        hidden: usize,
+        acts: &mut ManageActions,
+    ) {
+        ui.horizontal(|ui| {
+            let label = if hidden == 0 {
+                "Reset to defaults".to_string()
+            } else {
+                format!("Reset to defaults ({hidden} hidden)")
+            };
+            if kit::button_tip(
+                ui,
+                &label,
+                false,
+                true,
+                "Un-hide every built-in / generated target",
+            ) {
+                acts.do_reset = true;
+            }
+        });
+        ui.add_space(kit::SP_XS);
+        if lib.is_empty() {
+            ui.weak("no targets — add some from the other tabs");
+        }
+        for e in lib {
+            ui.horizontal(|ui| {
+                let tip = if e.builtin {
+                    "Hide this built-in / generated target"
+                } else {
+                    "Delete this user target file"
+                };
+                if kit::icon_btn(ui, Icon::Close, 22.0, tip) {
+                    acts.remove_label = Some(e.label.clone());
+                }
+                let suffix = if e.builtin { "" } else { "  (added)" };
+                ui.label(format!("{}{}", e.label, suffix));
+            });
+        }
+    }
+
+    /// Apply the actions collected while the manage dialog was open.
+    fn apply_manage_actions(&mut self, acts: ManageActions) {
+        if let Some(t) = acts.fetch_target {
+            let _ = self.dl_tx.send(DlCmd::FetchTarget(t));
+        }
+        if let Some(m) = acts.add_meas {
+            let _ = self.dl_tx.send(DlCmd::AddMeasurementTarget(m));
+        }
+        if let Some(label) = acts.remove_label {
+            self.reference.remove_target_label(&label);
+        }
+        if acts.do_reset {
+            self.reference.reset_targets_to_defaults();
+        }
+        if acts.close {
+            self.reference.show_manage = false;
+        }
+    }
+
+    /// Auto-EQ: fit a parametric bank (peqdb's `AutoEQ`, ported to Rust in
     /// `resonance-autoeq`) so the measurement, once EQ'd, matches the target.
     /// The 3000-step optimize runs on a background thread; [`Self::pump_autoeq`]
     /// applies the result (with a clip-safe headroom preamp) when it lands.
@@ -1091,8 +1146,14 @@ impl GuiApp {
         };
         // Sample both curves onto AutoEQ's fixed log grid (dB).
         let f = resonance_autoeq::log_freqs();
-        let target: Vec<f32> = f.iter().map(|&hz| tgt.interp(hz as f64) as f32).collect();
-        let measured: Vec<f32> = f.iter().map(|&hz| meas.interp(hz as f64) as f32).collect();
+        let target: Vec<f32> = f
+            .iter()
+            .map(|&hz| tgt.interp(f64::from(hz)) as f32)
+            .collect();
+        let measured: Vec<f32> = f
+            .iter()
+            .map(|&hz| meas.interp(f64::from(hz)) as f32)
+            .collect();
         let smoothing = if self.reference.measurement_iem {
             Smoothing::InEar
         } else {
@@ -1151,10 +1212,7 @@ impl GuiApp {
         let mut open = true;
         let mut close = false;
         let mut to_fetch: Option<ModelEntry> = None;
-        let mut refresh = false;
-        let mut toggle: Option<(String, bool)> = None;
-        let mut set_all: Option<bool> = None;
-        let mut set_default = false;
+        let mut sources = SourceActions::default();
 
         // Disjoint field borrows so the closure can read the catalog and edit the
         // query without going through `self`.
@@ -1174,127 +1232,21 @@ impl GuiApp {
             .default_height(def_h)
             .open(&mut open)
             .show(ctx, |ui| {
-                // Search row (top). Top + bottom panels fix the window's chrome so
-                // the model list fills the middle without the window auto-growing.
+                // Top + bottom panels fix the window's chrome so the model list
+                // fills the middle without the window auto-growing.
                 egui::Panel::top("browse_top").show_inside(ui, |ui| {
-                    ui.add_space(2.0);
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("search").size(kit::T_CAPTION).weak());
-                        kit::text_field(
-                            ui,
-                            220.0,
-                            ui.make_persistent_id("browse_query"),
-                            query,
-                            "headphone or IEM name…",
-                            false,
-                        );
-                        if kit::icon_text_btn(
-                            ui,
-                            Icon::Refresh,
-                            "Refresh",
-                            false,
-                            true,
-                            "Re-fetch source indexes from squig.link",
-                        ) {
-                            refresh = true;
-                        }
-                        if dl_busy {
-                            ui.label(egui::RichText::new("loading…").weak());
-                        }
-                    });
-                    if !dl_status.is_empty() {
-                        ui.label(egui::RichText::new(dl_status).size(kit::T_CAPTION).weak());
-                    }
-                    ui.add_space(2.0);
+                    Self::browse_top_panel(ui, query, dl_status, dl_busy, &mut sources.refresh);
                 });
-
-                // Sources + Close (bottom, fixed).
                 egui::Panel::bottom("browse_bottom").show_inside(ui, |ui| {
-                    ui.add_space(2.0);
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("sources").size(kit::T_CAPTION).weak());
-                        if kit::button_tip(ui, "All", false, true, "Enable every squig.link source")
-                        {
-                            set_all = Some(true);
-                        }
-                        if kit::button_tip(ui, "None", false, true, "Disable every source") {
-                            set_all = Some(false);
-                        }
-                        if kit::button_tip(
-                            ui,
-                            "Default",
-                            false,
-                            true,
-                            "Restore the built-in default source selection",
-                        ) {
-                            set_default = true;
-                        }
-                    });
-                    egui::ScrollArea::vertical()
-                        .id_salt("browse_sources")
-                        .max_height(80.0)
-                        .show(ui, |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.spacing_mut().item_spacing = egui::vec2(kit::SP_XS, kit::SP_XS);
-                                if let Some(cat) = catalog {
-                                    for s in &cat.sources {
-                                        let lbl = if s.enabled && !s.loaded {
-                                            format!("{}…", s.name)
-                                        } else {
-                                            s.name.clone()
-                                        };
-                                        if kit::button_tip(
-                                            ui,
-                                            &lbl,
-                                            s.enabled,
-                                            true,
-                                            "Toggle this squig.link source on/off",
-                                        ) {
-                                            toggle = Some((s.id.clone(), !s.enabled));
-                                        }
-                                    }
-                                }
-                            });
-                        });
+                    Self::ref_sources_panel(ui, catalog, "browse_sources", 80.0, &mut sources);
                     ui.separator();
                     if kit::button_tip(ui, "Close", false, true, "Close this dialog") {
                         close = true;
                     }
                     ui.add_space(2.0);
                 });
-
-                // Model list fills the central area (and grows when the window is
-                // dragged taller); capped to 300 visible rows.
                 egui::CentralPanel::default().show_inside(ui, |ui| {
-                    let matches =
-                        |m: &ModelEntry| q.is_empty() || m.display.to_lowercase().contains(&q);
-                    egui::ScrollArea::vertical()
-                        .id_salt("browse_models")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            let Some(cat) = catalog else {
-                                ui.weak("loading catalog…");
-                                return;
-                            };
-                            if cat.models.is_empty() {
-                                ui.weak("no models — enable a source below, or Refresh");
-                            }
-                            let mut shown = 0usize;
-                            for m in cat.models.iter().filter(|m| matches(m)) {
-                                shown += 1;
-                                if shown > 300 {
-                                    continue;
-                                }
-                                let label = format!("{}   ·  {} · {}", m.display, m.source, m.kind);
-                                if kit::list_row(ui, false, &label).clicked() {
-                                    to_fetch = Some(m.clone());
-                                }
-                            }
-                            let total = cat.models.iter().filter(|m| matches(m)).count();
-                            if total > 300 {
-                                ui.weak(format!("+{} more — refine your search", total - 300));
-                            }
-                        });
+                    Self::browse_models_list(ui, catalog, &q, &mut to_fetch);
                 });
             });
 
@@ -1302,20 +1254,162 @@ impl GuiApp {
         if let Some(m) = to_fetch {
             let _ = self.dl_tx.send(DlCmd::Fetch(m));
         }
-        if refresh {
-            let _ = self.dl_tx.send(DlCmd::Refresh);
-        }
-        if let Some((id, on)) = toggle {
-            let _ = self.dl_tx.send(DlCmd::SetEnabled(id, on));
-        }
-        if let Some(on) = set_all {
-            let _ = self.dl_tx.send(DlCmd::SetAll(on));
-        }
-        if set_default {
-            let _ = self.dl_tx.send(DlCmd::SetDefault);
-        }
+        self.apply_source_actions(&sources);
         if !open || close {
             self.reference.show_browser = false;
+        }
+    }
+
+    /// Search row (top) of the browse dialog: query field + Refresh + a loading
+    /// hint + the download status line. Sets `refresh` when Refresh is pressed.
+    fn browse_top_panel(
+        ui: &mut egui::Ui,
+        query: &mut String,
+        dl_status: &str,
+        dl_busy: bool,
+        refresh: &mut bool,
+    ) {
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("search").size(kit::T_CAPTION).weak());
+            kit::text_field(
+                ui,
+                220.0,
+                ui.make_persistent_id("browse_query"),
+                query,
+                "headphone or IEM name…",
+                false,
+            );
+            if kit::icon_text_btn(
+                ui,
+                Icon::Refresh,
+                "Refresh",
+                false,
+                true,
+                "Re-fetch source indexes from squig.link",
+            ) {
+                *refresh = true;
+            }
+            if dl_busy {
+                ui.label(egui::RichText::new("loading…").weak());
+            }
+        });
+        if !dl_status.is_empty() {
+            ui.label(egui::RichText::new(dl_status).size(kit::T_CAPTION).weak());
+        }
+        ui.add_space(2.0);
+    }
+
+    /// The central model list: every catalog model matching the lowercased query
+    /// `q`, capped to `BROWSE_LIST_CAP` rows with a "+N more" hint. Clicking a row
+    /// sets `to_fetch`.
+    fn browse_models_list(
+        ui: &mut egui::Ui,
+        catalog: Option<&resonance_reference::download::Catalog>,
+        q: &str,
+        to_fetch: &mut Option<ModelEntry>,
+    ) {
+        let matches = |m: &ModelEntry| q.is_empty() || m.display.to_lowercase().contains(q);
+        egui::ScrollArea::vertical()
+            .id_salt("browse_models")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let Some(cat) = catalog else {
+                    ui.weak("loading catalog…");
+                    return;
+                };
+                if cat.models.is_empty() {
+                    ui.weak("no models — enable a source below, or Refresh");
+                }
+                let mut shown = 0usize;
+                for m in cat.models.iter().filter(|m| matches(m)) {
+                    shown += 1;
+                    if shown > BROWSE_LIST_CAP {
+                        continue;
+                    }
+                    let label = format!("{}   ·  {} · {}", m.display, m.source, m.kind);
+                    if kit::list_row(ui, false, &label).clicked() {
+                        *to_fetch = Some(m.clone());
+                    }
+                }
+                let total = cat.models.iter().filter(|m| matches(m)).count();
+                if total > BROWSE_LIST_CAP {
+                    ui.weak(format!(
+                        "+{} more — refine your search",
+                        total - BROWSE_LIST_CAP
+                    ));
+                }
+            });
+    }
+
+    /// The shared "sources" footer used by both the browse and manage dialogs: an
+    /// All / None / Default row plus a wrapping grid of per-source toggle chips.
+    /// `salt` and `max_h` differ per dialog; everything else is identical.
+    /// Collects toggles into `out` for the caller to apply after borrows release.
+    fn ref_sources_panel(
+        ui: &mut egui::Ui,
+        catalog: Option<&resonance_reference::download::Catalog>,
+        salt: &str,
+        max_h: f32,
+        out: &mut SourceActions,
+    ) {
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("sources").size(kit::T_CAPTION).weak());
+            if kit::button_tip(ui, "All", false, true, "Enable every squig.link source") {
+                out.set_all = Some(true);
+            }
+            if kit::button_tip(ui, "None", false, true, "Disable every source") {
+                out.set_all = Some(false);
+            }
+            if kit::button_tip(
+                ui,
+                "Default",
+                false,
+                true,
+                "Restore the built-in default source selection",
+            ) {
+                out.set_default = true;
+            }
+        });
+        egui::ScrollArea::vertical()
+            .id_salt(salt)
+            .max_height(max_h)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(kit::SP_XS, kit::SP_XS);
+                    if let Some(cat) = catalog {
+                        for s in &cat.sources {
+                            let lbl = source_chip_label(&s.name, s.enabled, s.loaded);
+                            if kit::button_tip(
+                                ui,
+                                &lbl,
+                                s.enabled,
+                                true,
+                                "Toggle this squig.link source on/off",
+                            ) {
+                                out.toggle = Some((s.id.clone(), !s.enabled));
+                            }
+                        }
+                    }
+                });
+            });
+    }
+
+    /// Dispatch the source-toggle actions collected by [`Self::ref_sources_panel`]
+    /// to the download worker. Shared by both squig.link dialogs.
+    fn apply_source_actions(&mut self, acts: &SourceActions) {
+        if acts.refresh {
+            let _ = self.dl_tx.send(DlCmd::Refresh);
+        }
+        if let Some((id, on)) = &acts.toggle {
+            let _ = self.dl_tx.send(DlCmd::SetEnabled(id.clone(), *on));
+        }
+        if let Some(on) = acts.set_all {
+            let _ = self.dl_tx.send(DlCmd::SetAll(on));
+        }
+        if acts.set_default {
+            let _ = self.dl_tx.send(DlCmd::SetDefault);
         }
     }
 
@@ -1416,7 +1510,7 @@ impl GuiApp {
                 });
                 ui.separator();
                 ui.horizontal(|ui| {
-                    let is_file = browser.selected().map(|it| !it.is_dir).unwrap_or(false);
+                    let is_file = browser.selected().is_some_and(|it| !it.is_dir);
                     if kit::button(ui, "Load", true, is_file) {
                         if let Some(p) = browser.activate(browser.cursor) {
                             picked = Some(p);
@@ -1469,7 +1563,17 @@ fn ctl_present(c: RefCtl, has_meas: bool, has_stereo: bool) -> bool {
     }
 }
 
-/// A labelled customizer slider with a value chip. Returns true on change.
+/// The label for a source toggle chip: append an ellipsis while an enabled
+/// source is still loading (`enabled && !loaded`) so the user sees it is in
+/// flight; otherwise just the plain name.
+fn source_chip_label(name: &str, enabled: bool, loaded: bool) -> String {
+    if enabled && !loaded {
+        format!("{name}…")
+    } else {
+        name.to_string()
+    }
+}
+
 /// A center-zero customizer slider: label · divergence track (the fill grows out
 /// of the param's *true* 0 mark — green above 0, red below) · colour-signed value
 /// chip, with a min / 0 / max scale strip aligned beneath the track. Double-click
@@ -1492,7 +1596,7 @@ fn cust_slider(
     let sw = (ui.available_width() - label_w - chip_w - gap * 2.0).max(60.0);
     // The 0 mark sits at the value's true fraction — NOT the geometric centre, so
     // the asymmetric ranges (Tilt −2..+1, Bass −12..+18) read honestly.
-    let zero_frac = ((0.0 - lo) / (hi - lo)).clamp(0.0, 1.0) as f32;
+    let zero_frac = range_fraction(0.0, lo, hi);
     let t = kit::tokens(ui);
     let mut changed = false;
 
@@ -1516,8 +1620,8 @@ fn cust_slider(
             }
         } else if resp.dragged() || resp.clicked() {
             if let Some(pp) = resp.interact_pointer_pos() {
-                let f = ((pp.x - x0) / tw).clamp(0.0, 1.0) as f64;
-                let nv = lo + f * (hi - lo);
+                let f = f64::from(((pp.x - x0) / tw).clamp(0.0, 1.0));
+                let nv = fraction_to_value(f, lo, hi);
                 if (nv - *value).abs() > f64::EPSILON {
                     *value = nv;
                     changed = true;
@@ -1525,7 +1629,7 @@ fn cust_slider(
             }
         }
 
-        let frac = ((*value - lo) / (hi - lo)).clamp(0.0, 1.0) as f32;
+        let frac = range_fraction(*value, lo, hi);
         let hx = x0 + frac * tw;
         let zx = x0 + zero_frac * tw;
         let signed = |up, dn, neu| {
@@ -1624,4 +1728,90 @@ fn elide(ui: &egui::Ui, text: &str, size: f32, max_w: f32) -> String {
         s.pop();
     }
     format!("{}…", s.trim_end())
+}
+
+/// Where `value` sits within `lo..=hi` as a 0..=1 fraction, clamped to the ends.
+/// Positions the customizer slider handle and its "true 0" tick — computed in
+/// f64 then narrowed so asymmetric ranges map exactly. Returns 0 for a
+/// degenerate `lo == hi` range.
+fn range_fraction(value: f64, lo: f64, hi: f64) -> f32 {
+    let span = hi - lo;
+    if span == 0.0 {
+        return 0.0;
+    }
+    ((value - lo) / span).clamp(0.0, 1.0) as f32
+}
+
+/// The inverse of [`range_fraction`]: the value at fraction `f` of `lo..=hi`.
+/// Used when a drag picks a new slider value from the pointer position.
+fn fraction_to_value(f: f64, lo: f64, hi: f64) -> f64 {
+    lo + f * (hi - lo)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_chip_label_marks_loading() {
+        // Enabled but not yet loaded → loading ellipsis.
+        assert_eq!(source_chip_label("Crinacle", true, false), "Crinacle…");
+        // Enabled and loaded, disabled, or disabled-and-unloaded → plain name.
+        assert_eq!(source_chip_label("Crinacle", true, true), "Crinacle");
+        assert_eq!(source_chip_label("Crinacle", false, false), "Crinacle");
+        assert_eq!(source_chip_label("Crinacle", false, true), "Crinacle");
+    }
+
+    #[test]
+    fn ctl_present_gates_on_measurement_and_stereo() {
+        // Always-present controls don't need a measurement.
+        for c in [
+            RefCtl::TargetDd,
+            RefCtl::Customize,
+            RefCtl::Manage,
+            RefCtl::MeasChip,
+            RefCtl::MeasFile,
+            RefCtl::AutoEq,
+        ] {
+            assert!(ctl_present(c, false, false));
+        }
+        // Measurement-only controls appear once a measurement is loaded.
+        for c in [
+            RefCtl::Clear,
+            RefCtl::ToTarget,
+            RefCtl::Raw,
+            RefCtl::Bounds,
+            RefCtl::Normalize,
+        ] {
+            assert!(!ctl_present(c, false, true));
+            assert!(ctl_present(c, true, false));
+        }
+        // Channel cycle additionally needs a stereo measurement.
+        assert!(!ctl_present(RefCtl::Channel, true, false));
+        assert!(ctl_present(RefCtl::Channel, true, true));
+        assert!(!ctl_present(RefCtl::Channel, false, true));
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // exact assert on clamped range-fraction endpoints
+    fn range_fraction_handles_asymmetric_and_degenerate() {
+        // Symmetric range: 0 maps to the geometric centre.
+        assert!((range_fraction(0.0, -12.0, 12.0) - 0.5).abs() < 1e-6);
+        // Asymmetric range (Tilt −2..+1): 0 is two-thirds of the way up.
+        assert!((range_fraction(0.0, -2.0, 1.0) - (2.0 / 3.0)).abs() < 1e-6);
+        // Out-of-range values clamp to the ends.
+        assert_eq!(range_fraction(-5.0, -2.0, 1.0), 0.0);
+        assert_eq!(range_fraction(5.0, -2.0, 1.0), 1.0);
+        // Degenerate range can't divide by zero.
+        assert_eq!(range_fraction(0.0, 3.0, 3.0), 0.0);
+    }
+
+    #[test]
+    fn fraction_to_value_round_trips_range_fraction() {
+        let (lo, hi) = (-12.0, 18.0);
+        for &v in &[-12.0, -3.0, 0.0, 7.5, 18.0] {
+            let f = f64::from(range_fraction(v, lo, hi));
+            assert!((fraction_to_value(f, lo, hi) - v).abs() < 1e-4);
+        }
+    }
 }

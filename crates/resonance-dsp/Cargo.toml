@@ -20,3 +20,6 @@ criterion = { workspace = true }
 [[bench]]
 name = "chain"
 harness = false
+
+[lints]
+workspace = true

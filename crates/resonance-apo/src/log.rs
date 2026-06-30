@@ -14,9 +14,10 @@ fn log_path() -> std::path::PathBuf {
     if let Some(p) = std::env::var_os("RESONANCE_APO_LOG") {
         return std::path::PathBuf::from(p);
     }
-    let base = std::env::var_os("ProgramData")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\ProgramData"));
+    let base = std::env::var_os("ProgramData").map_or_else(
+        || std::path::PathBuf::from(r"C:\ProgramData"),
+        std::path::PathBuf::from,
+    );
     base.join("Resonance").join("apo.log")
 }
 

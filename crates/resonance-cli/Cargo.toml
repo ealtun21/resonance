@@ -17,3 +17,6 @@ clap = { workspace = true }
 clap_complete = { workspace = true }
 anyhow = { workspace = true }
 ureq = { workspace = true }
+
+[lints]
+workspace = true

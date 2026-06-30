@@ -1,7 +1,7 @@
 //! Reference & measurement overlays for the FR graph.
 //!
 //! Holds the user-facing state for: a *target* curve to EQ toward (a built-in
-//! like Diffuse Field / Harman, a generated PEQdB target, or any of those with
+//! like Diffuse Field / Harman, a generated `PEQdB` target, or any of those with
 //! the customizer's tilt/bass/ear/treble adjustments stacked on top), an
 //! optional headphone/IEM *measurement*, an optional *compare* target, and two
 //! view toggles (show the raw measurement; normalise against the target). All
@@ -17,6 +17,7 @@ use resonance_ipc::curve::{self, RefCurve};
 use resonance_ipc::fr::{LOG_MAX, LOG_MIN, response_db};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 
 /// A measurement saved alongside a profile (per-profile, client-side). Loading
 /// the profile restores it so profiles can be A/B-compared visually. The *target*
@@ -50,7 +51,7 @@ pub struct PersistedReference {
     /// Raw per-channel measurement curves (None = no measurement loaded).
     meas_left: Option<RefCurve>,
     meas_right: Option<RefCurve>,
-    /// 0 = None, 1 = File(name), 2 = DiamondBeta, 3 = Ultra.
+    /// 0 = None, 1 = File(name), 2 = `DiamondBeta`, 3 = Ultra.
     target_kind: u8,
     target_name: String,
     adj: [f64; 4],
@@ -59,7 +60,7 @@ pub struct PersistedReference {
     profile_meas: HashMap<String, MeasurementBundle>,
 }
 
-/// Built-in target curves embedded at build time (from AutoEq, MIT-licensed).
+/// Built-in target curves embedded at build time (from `AutoEq`, MIT-licensed).
 /// Users add more by dropping `.txt`/`.csv` curves into `user_curve_dir()`.
 const BUILTIN_TARGETS: &[(&str, &str)] = &[
     (
@@ -91,17 +92,18 @@ const DF_NAME: &str = "Diffuse Field";
 /// preference research, so the band widens broadly above ~2.5 kHz. These are a
 /// shaped approximation (no proprietary preference dataset is reproduced), safe
 /// to ship.
+#[must_use]
 pub fn preference_bounds(f: f64) -> (f64, f64) {
     // smoothstep between edges `e0`→`e1` (works in either direction).
     let ss = |e0: f64, e1: f64, x: f64| {
         let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
     };
-    let base = 1.0;
+    let baseline = 1.0;
     let bass = ss(200.0, 40.0, f); // 0 above 200 Hz → 1 at/below 40 Hz
     let treble = ss(2500.0, 12000.0, f); // widen from ear-gain up through air
-    let below = base + 2.4 * bass + 3.6 * treble;
-    let above = base + 5.2 * bass + 3.6 * treble; // bass skews toward boost
+    let below = baseline + 2.4 * bass + 3.6 * treble;
+    let above = baseline + 5.2 * bass + 3.6 * treble; // bass skews toward boost
     (below, above)
 }
 
@@ -113,6 +115,7 @@ pub enum Channel {
 }
 
 impl Channel {
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Channel::Avg => "L+R",
@@ -130,7 +133,7 @@ pub enum TargetSel {
     None,
     /// A named curve from `targets` (built-in or user file).
     File(String),
-    /// Diffuse Field + the PEQdB "Optimized Target" paper filters.
+    /// Diffuse Field + the `PEQdB` "Optimized Target" paper filters.
     DiamondBeta,
     Ultra,
 }
@@ -150,7 +153,7 @@ pub enum ManageTab {
 /// remove it (delete a user file, or hide a built-in/generated one).
 pub struct LibEntry {
     pub label: String,
-    /// `true` for the embedded defaults / generated PEQdB targets (removed by
+    /// `true` for the embedded defaults / generated `PEQdB` targets (removed by
     /// hiding, restorable via "Reset to defaults"); `false` for user files.
     pub builtin: bool,
 }
@@ -209,7 +212,7 @@ pub struct ReferenceState {
     /// Loaded measurement channels: `(left/mono, optional right)`.
     pub measurement_lr: Option<(RefCurve, Option<RefCurve>)>,
     pub measurement_name: String,
-    /// True if the measurement is from an in-ear rig (picks AutoEQ smoothing).
+    /// True if the measurement is from an in-ear rig (picks `AutoEQ` smoothing).
     pub measurement_iem: bool,
     pub channel: Channel,
     /// 1/N-octave smoothing for the displayed measurement (0 = none).
@@ -278,6 +281,7 @@ impl Default for ReferenceState {
 
 impl ReferenceState {
     /// True when overlays should be drawn (enabled + something to show).
+    #[must_use]
     pub fn active(&self) -> bool {
         // Overlays only make sense against a measurement — comparing the bare EQ
         // curve to a target tells you nothing.
@@ -285,6 +289,7 @@ impl ReferenceState {
     }
 
     /// The normalised view only applies with a measurement to deviate.
+    #[must_use]
     pub fn norm_view(&self) -> bool {
         self.normalized && self.measurement.is_some()
     }
@@ -307,6 +312,7 @@ impl ReferenceState {
     /// Selectable targets for the dropdown — only the *visible* library, i.e.
     /// everything except entries the user has removed (`hidden`). Defaults
     /// (built-ins + generated) first, then user/added curves.
+    #[must_use]
     pub fn target_options(&self) -> Vec<(String, TargetSel)> {
         let visible = |name: &str| !self.hidden.contains(name);
         let mut opts = vec![("None".to_string(), TargetSel::None)];
@@ -336,6 +342,7 @@ impl ReferenceState {
     /// The visible target library as removable rows ("Your targets" tab). Built
     /// from [`target_options`] minus the `None` entry, tagging each as a
     /// built-in/generated default (hidden to remove) or a user file (deleted).
+    #[must_use]
     pub fn library_entries(&self) -> Vec<LibEntry> {
         self.target_options()
             .into_iter()
@@ -353,15 +360,18 @@ impl ReferenceState {
 
     /// Count of currently-hidden defaults (shown in the manage dialog so the
     /// "Reset to defaults" button reads as actionable).
+    #[must_use]
     pub fn hidden_count(&self) -> usize {
         self.hidden.len()
     }
 
     /// Whether the active target can be removed (anything but "None").
+    #[must_use]
     pub fn active_target_removable(&self) -> bool {
         !matches!(self.target_sel, TargetSel::None)
     }
 
+    #[must_use]
     pub fn label_for(sel: &TargetSel) -> String {
         match sel {
             TargetSel::None => "None".to_string(),
@@ -371,12 +381,14 @@ impl ReferenceState {
         }
     }
 
+    #[must_use]
     pub fn target_label(&self) -> String {
         Self::label_for(&self.target_sel)
     }
 
     /// The selected target *before* customizer adjustments — for drawing the
     /// base curve behind the adjusted one in the customizer thumbnail.
+    #[must_use]
     pub fn base_curve(&self) -> Option<RefCurve> {
         self.resolve(&self.target_sel.clone())
     }
@@ -435,6 +447,7 @@ impl ReferenceState {
     /// Un-hides the name (adding implies showing it). Returns the sanitized name
     /// on success. Does **not** change the active selection.
     pub fn write_target(&mut self, name: &str, curve: &RefCurve) -> Option<String> {
+        const GENERATED: [&str; 2] = ["PEQdB Diamond β", "PEQdB Ultra"];
         let dir = resonance_ipc::paths::user_curve_dir();
         if std::fs::create_dir_all(&dir).is_err() {
             return None;
@@ -444,7 +457,6 @@ impl ReferenceState {
         // writing "Diffuse Field" verbatim would be silently shadowed (the added
         // curve never appears). Suffix "(added)" so it shows as its own entry.
         let mut name = sanitize_name(name);
-        const GENERATED: [&str; 2] = ["PEQdB Diamond β", "PEQdB Ultra"];
         let collides = GENERATED.contains(&name.as_str())
             || self.targets.iter().any(|t| t.builtin && t.name == name);
         if collides {
@@ -452,7 +464,7 @@ impl ReferenceState {
         }
         let mut body = String::from("frequency,raw\n");
         for &(f, db) in &curve.points {
-            body.push_str(&format!("{f:.2},{db:.3}\n"));
+            writeln!(body, "{f:.2},{db:.3}").unwrap();
         }
         if std::fs::write(dir.join(format!("{name}.txt")), body).is_err() {
             return None;
@@ -482,14 +494,11 @@ impl ReferenceState {
             .iter()
             .find(|t| t.name == label && !t.builtin)
             .and_then(|t| t.path.clone());
-        match user_path {
-            Some(path) => {
-                let _ = std::fs::remove_file(path);
-            }
-            None => {
-                self.hidden.insert(label.to_string());
-                self.save_hidden();
-            }
+        if let Some(path) = user_path {
+            let _ = std::fs::remove_file(path);
+        } else {
+            self.hidden.insert(label.to_string());
+            self.save_hidden();
         }
         self.reload_targets();
         if self.target_label() == label {
@@ -508,11 +517,15 @@ impl ReferenceState {
     fn save_hidden(&self) {
         let dir = resonance_ipc::paths::config_dir();
         let _ = std::fs::create_dir_all(&dir);
-        let body: String = self.hidden.iter().map(|n| format!("{n}\n")).collect();
+        let body = self.hidden.iter().fold(String::new(), |mut acc, n| {
+            let _ = writeln!(acc, "{n}");
+            acc
+        });
         let _ = std::fs::write(dir.join("hidden_targets.txt"), body);
     }
 
     /// Snapshot the overlay for cross-session persistence.
+    #[must_use]
     pub fn to_persisted(&self) -> PersistedReference {
         let (left, right) = match &self.measurement_lr {
             Some((l, r)) => (Some(l.clone()), r.clone()),
@@ -636,6 +649,7 @@ impl ReferenceState {
     // measurement is bundled — the target is never stored per profile.
 
     /// The current measurement as a portable bundle (`None` if none is loaded).
+    #[must_use]
     pub fn measurement_bundle(&self) -> Option<MeasurementBundle> {
         let (left, right) = self.measurement_lr.clone()?;
         Some(MeasurementBundle {
@@ -682,6 +696,7 @@ impl ReferenceState {
     }
 
     /// Whether `profile` has a stored measurement.
+    #[must_use]
     pub fn has_profile_measurement(&self, profile: &str) -> bool {
         self.profile_meas.contains_key(profile)
     }
@@ -864,7 +879,7 @@ fn load_targets() -> Vec<TargetItem> {
                 .extension()
                 .and_then(|e| e.to_str())
                 .map(str::to_ascii_lowercase);
-            if !matches!(ext.as_deref(), Some("txt") | Some("csv")) {
+            if !matches!(ext.as_deref(), Some("txt" | "csv")) {
                 continue;
             }
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
@@ -923,6 +938,8 @@ mod tests {
     }
 
     #[test]
+    // exact-value round-trip: restored customizer floats must equal the stored ones
+    #[allow(clippy::float_cmp)]
     fn persist_round_trip_preserves_toggles_and_customizer() {
         let s = ReferenceState {
             enabled: true,
