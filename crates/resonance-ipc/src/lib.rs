@@ -274,17 +274,19 @@ pub enum FxEffectId {
     Surround,
     DynamicBoost,
     Bass,
+    Loudness,
 }
 
 impl FxEffectId {
     /// Every effect, in chain order. Adding a variant forces the array to be
     /// updated, which propagates exhaustively to every `ALL` iteration.
-    pub const ALL: [FxEffectId; 5] = [
+    pub const ALL: [FxEffectId; 6] = [
         FxEffectId::Fidelity,
         FxEffectId::Ambience,
         FxEffectId::Surround,
         FxEffectId::DynamicBoost,
         FxEffectId::Bass,
+        FxEffectId::Loudness,
     ];
 
     /// Full display name. (The TUI keeps its own narrower labels for the effects
@@ -297,6 +299,7 @@ impl FxEffectId {
             FxEffectId::Surround => "Surround",
             FxEffectId::DynamicBoost => "Dynamic Boost",
             FxEffectId::Bass => "Bass",
+            FxEffectId::Loudness => "Loudness",
         }
     }
 
@@ -323,6 +326,7 @@ impl From<FxEffectId> for FxEffect {
             FxEffectId::Surround => FxEffect::Surround,
             FxEffectId::DynamicBoost => FxEffect::DynamicBoost,
             FxEffectId::Bass => FxEffect::Bass,
+            FxEffectId::Loudness => FxEffect::Loudness,
         }
     }
 }
@@ -548,6 +552,13 @@ pub struct EffectsState {
     pub dynamic_boost_enabled: bool,
     pub bass_intensity: f64,
     pub bass_enabled: bool,
+    // `#[serde(default)]` so self-describing profiles written before Loudness
+    // existed still load (default off). The postcard IPC wire is version-locked
+    // regardless — clients + daemon ship together.
+    #[serde(default)]
+    pub loudness_intensity: f64,
+    #[serde(default)]
+    pub loudness_enabled: bool,
 }
 
 impl EffectsState {
@@ -561,6 +572,7 @@ impl EffectsState {
             FxEffectId::Surround => (self.surround_intensity, self.surround_enabled),
             FxEffectId::DynamicBoost => (self.dynamic_boost_intensity, self.dynamic_boost_enabled),
             FxEffectId::Bass => (self.bass_intensity, self.bass_enabled),
+            FxEffectId::Loudness => (self.loudness_intensity, self.loudness_enabled),
         }
     }
 
@@ -581,6 +593,10 @@ impl EffectsState {
             FxEffectId::DynamicBoost => {
                 self.dynamic_boost_intensity = intensity;
                 self.dynamic_boost_enabled = enabled;
+            }
+            FxEffectId::Loudness => {
+                self.loudness_intensity = intensity;
+                self.loudness_enabled = enabled;
             }
             FxEffectId::Bass => {
                 self.bass_intensity = intensity;
@@ -657,6 +673,8 @@ mod tests {
                 dynamic_boost_enabled: false,
                 bass_intensity: 0.0,
                 bass_enabled: false,
+                loudness_intensity: 0.0,
+                loudness_enabled: false,
             },
         });
         command_round_trip(&Command::SetBandChannels {
@@ -784,6 +802,8 @@ mod tests {
                 dynamic_boost_enabled: false,
                 bass_intensity: -1.0,
                 bass_enabled: true,
+                loudness_intensity: 0.6,
+                loudness_enabled: true,
             },
             current_preset: Some("x.fac".into()),
             sample_rate: 48000.0,

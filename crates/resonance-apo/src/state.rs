@@ -35,7 +35,8 @@ pub const MAX_ROUTE: usize = 16;
 pub const STATE_MAGIC: u32 = 0x4F50_4152;
 /// Layout version; bump on any `#[repr(C)]` change below.
 /// v3: per-band channel mask + square routing matrix.
-pub const STATE_VERSION: u32 = 3;
+/// v4: + Loudness effect snapshot.
+pub const STATE_VERSION: u32 = 4;
 
 /// Number of spectrum bins carried in telemetry (matches the daemon's display).
 pub const TELEMETRY_BINS: usize = 64;
@@ -76,6 +77,7 @@ pub struct ChainSnapshot {
     pub surround: EffectSnapshot,
     pub dynamic_boost: EffectSnapshot,
     pub bass: EffectSnapshot,
+    pub loudness: EffectSnapshot,
     pub num_filters: u32,
     pub filters: [FilterSnapshot; MAX_FILTERS],
     /// Square output routing matrix dimension: `0` = none/identity (passthrough);
@@ -97,6 +99,7 @@ impl Default for ChainSnapshot {
             surround: EffectSnapshot::default(),
             dynamic_boost: EffectSnapshot::default(),
             bass: EffectSnapshot::default(),
+            loudness: EffectSnapshot::default(),
             num_filters: 0,
             filters: [FilterSnapshot::default(); MAX_FILTERS],
             route_channels: 0,
@@ -198,6 +201,7 @@ fn effect(chain: &ProcessorChain, e: FxEffect) -> EffectSnapshot {
             chain.dynamic_boost.enabled(),
         ),
         FxEffect::Bass => (chain.bass.intensity(), chain.bass.enabled()),
+        FxEffect::Loudness => (chain.loudness.intensity(), chain.loudness.enabled()),
     };
     EffectSnapshot {
         enabled: u32::from(enabled),
@@ -230,6 +234,7 @@ impl ChainSnapshot {
             surround: effect(chain, FxEffect::Surround),
             dynamic_boost: effect(chain, FxEffect::DynamicBoost),
             bass: effect(chain, FxEffect::Bass),
+            loudness: effect(chain, FxEffect::Loudness),
             num_filters: n as u32,
             filters,
             route_channels,
@@ -280,6 +285,8 @@ impl ChainSnapshot {
         chain.set_effect_enabled(FxEffect::DynamicBoost, self.dynamic_boost.enabled != 0);
         chain.set_effect_intensity(FxEffect::Bass, self.bass.intensity);
         chain.set_effect_enabled(FxEffect::Bass, self.bass.enabled != 0);
+        chain.set_effect_intensity(FxEffect::Loudness, self.loudness.intensity);
+        chain.set_effect_enabled(FxEffect::Loudness, self.loudness.enabled != 0);
         chain
     }
 
@@ -300,6 +307,8 @@ impl ChainSnapshot {
         chain.set_effect_enabled(FxEffect::DynamicBoost, self.dynamic_boost.enabled != 0);
         chain.set_effect_intensity(FxEffect::Bass, self.bass.intensity);
         chain.set_effect_enabled(FxEffect::Bass, self.bass.enabled != 0);
+        chain.set_effect_intensity(FxEffect::Loudness, self.loudness.intensity);
+        chain.set_effect_enabled(FxEffect::Loudness, self.loudness.enabled != 0);
 
         // Routing is format-independent state on the chain; apply it in place at
         // the chain's live width (square-only; mismatched/absent → passthrough).
