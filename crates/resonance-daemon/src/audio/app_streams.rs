@@ -47,6 +47,29 @@ pub fn exe_basename_from_session_id(instance_id: &str) -> Option<String> {
     }
 }
 
+/// A human-friendly name from a macOS bundle identifier, e.g.
+/// `com.spotify.client` → `Spotify`, `com.apple.Music` → `Music`. Drops common
+/// reverse-DNS prefixes/suffixes and capitalises the most distinctive segment;
+/// falls back to the raw bundle id. Pure, so it's unit-tested on every platform.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[must_use]
+pub fn friendly_name_from_bundle(bundle: &str) -> String {
+    const STOP: [&str; 8] = ["com", "org", "io", "net", "app", "client", "desktop", "inc"];
+    let pick = bundle
+        .split('.')
+        .rfind(|s| !s.is_empty() && !STOP.contains(&s.to_ascii_lowercase().as_str()));
+    match pick {
+        Some(seg) => {
+            let mut chars = seg.chars();
+            chars.next().map_or_else(
+                || bundle.to_owned(),
+                |first| first.to_uppercase().collect::<String>() + chars.as_str(),
+            )
+        }
+        None => bundle.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +110,13 @@ mod tests {
     fn exe_basename_rejects_non_path_ids() {
         assert_eq!(exe_basename_from_session_id(""), None);
         assert_eq!(exe_basename_from_session_id("{0.0.0}.{guid}"), None);
+    }
+
+    #[test]
+    fn friendly_name_picks_the_distinctive_segment() {
+        assert_eq!(friendly_name_from_bundle("com.spotify.client"), "Spotify");
+        assert_eq!(friendly_name_from_bundle("com.apple.Music"), "Music");
+        assert_eq!(friendly_name_from_bundle("com.google.Chrome"), "Chrome");
+        assert_eq!(friendly_name_from_bundle("org.mozilla.firefox"), "Firefox");
     }
 }

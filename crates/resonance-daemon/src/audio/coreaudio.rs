@@ -56,6 +56,25 @@ const RING_CAPACITY_SAMPLES: usize = 32_768;
 /// unbounded backlog when the output device runs faster than input briefly.
 const DRAIN_SLACK_FRAMES: usize = 4096;
 
+/// Publish the live per-application stream list (~1 Hz) on a dedicated thread.
+/// Read-only Core Audio process enumeration — no taps, no TCC. Exits when the
+/// daemon drops the receiver.
+fn spawn_app_enumeration(
+    apps_tx: tokio::sync::mpsc::UnboundedSender<Vec<resonance_ipc::AppStream>>,
+) {
+    thread::Builder::new()
+        .name("resonance-mac-apps".into())
+        .spawn(move || {
+            loop {
+                if apps_tx.send(mac_apps::enumerate()).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(1000));
+            }
+        })
+        .ok();
+}
+
 pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
     let super::BackendCtx {
         cmd_rx,
@@ -68,9 +87,11 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
         apps_tx,
         app_ctl_rx,
     } = ctx;
-    // Per-app volume on macOS needs per-process taps (Phase 4, Tasks 8–9);
-    // keep the channels alive until then.
-    let _ = (&apps_tx, &app_ctl_rx);
+    // Per-app enumeration (read-only): publish the live app list ~every second
+    // on a dedicated thread. Per-app volume control (the muted-tap mixer) drains
+    // `app_ctl_rx` in a later increment.
+    spawn_app_enumeration(apps_tx);
+    let _ = &app_ctl_rx;
     // Shared chain + RT state lives in an Arc<Mutex<…>>. The output callback
     // locks for the duration of each block — bounded, brief, never contended
     // against another high-priority thread. Reconnect rebuilds the streams but
