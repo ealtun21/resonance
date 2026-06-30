@@ -116,19 +116,30 @@ done
 # call gets silently denied — we hit exactly that bug before.
 ENT="$REPO_DIR/contrib/macos/entitlements.plist"
 echo ">> codesigning with identity: $SIGN_IDENTITY (entitlements: $ENT)"
-# Sign the embedded TUI + CLI (they don't need TCC entitlements, but must
-# be signed so the bundle's seal is valid).
+# Pin a STABLE --identifier on every binary. TCC keys a permission grant on the
+# code's *designated requirement*, which embeds the signing identifier. Without
+# an explicit one, codesign derives an unstable "<name>-<hash>" that changes on
+# every rebuild — so the Audio Capture grant no longer matches and macOS
+# re-prompts (or, for a non-interactive/daemon launch, silently returns
+# zero-filled buffers from the Process Tap). The persistent signing cert keeps
+# the requirement's *anchor* stable but NOT the identifier; both must be pinned.
+# These identifiers match the bundle's first-grant identities so the existing
+# grant survives every subsequent rebuild/reinstall.
+# Sign the embedded TUI + CLI (no TCC entitlements, but must be signed so the
+# bundle's seal is valid).
 for extra in resonance resonance-tui; do
     bin="$APP_OUT/Contents/MacOS/$extra"
-    [[ -x "$bin" ]] && codesign --force --sign "$SIGN_IDENTITY" "$bin"
+    [[ -x "$bin" ]] && codesign --force --sign "$SIGN_IDENTITY" --identifier "$extra" "$bin"
 done
-# Daemon AND GUI both get entitlements so TCC sees the same identity
-# whether the user launches via CLI, GUI, or the daemon-only path.
-codesign --force --sign "$SIGN_IDENTITY" --entitlements "$ENT" \
+# Daemon AND GUI both get entitlements so TCC sees the same identity whether the
+# user launches via CLI, GUI, or the daemon-only path. The daemon's identifier
+# is `resonanced`; the GUI (the bundle's main executable and TCC "responsible
+# process") takes the bundle id `com.ealtun21.resonance`.
+codesign --force --sign "$SIGN_IDENTITY" --identifier resonanced --entitlements "$ENT" \
     "$APP_OUT/Contents/MacOS/resonanced"
-codesign --force --sign "$SIGN_IDENTITY" --entitlements "$ENT" \
+codesign --force --sign "$SIGN_IDENTITY" --identifier com.ealtun21.resonance --entitlements "$ENT" \
     "$APP_OUT/Contents/MacOS/resonance-gui"
-codesign --force --sign "$SIGN_IDENTITY" --entitlements "$ENT" "$APP_OUT"
+codesign --force --sign "$SIGN_IDENTITY" --identifier com.ealtun21.resonance --entitlements "$ENT" "$APP_OUT"
 
 # ── Install CLI symlinks so `resonance` + `resonance-tui` work in the
 #    terminal without typing the bundle path each time. We prefer

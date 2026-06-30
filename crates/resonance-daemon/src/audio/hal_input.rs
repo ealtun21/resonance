@@ -88,20 +88,27 @@ impl HalInputStream {
         output_rate: f64,
     ) -> Result<Self> {
         let format = query_input_format(device_id)?;
+
+        // Stereo resampler: the IOProc always emits L/R pairs into the ring. It
+        // is a bypass (zero cost) when the tap already runs at the output rate —
+        // the common case, since CoreAudio drives the system mixer at the
+        // default output device's rate. Resampling only engages when they differ.
+        let resampler = StreamResampler::<f32>::new(format.mSampleRate, output_rate, 2);
         info!(
-            "tap aggregate input format: {} Hz, {} ch, {} bytes/frame, flags=0x{:x}; \
-             resampling capture → {output_rate} Hz",
+            "tap aggregate input format: {} Hz, {} ch, {} bytes/frame, flags=0x{:x}; {}",
             format.mSampleRate,
             format.mChannelsPerFrame,
             format.mBytesPerFrame,
-            format.mFormatFlags
+            format.mFormatFlags,
+            if resampler.is_bypass() {
+                format!("capture matches output ({output_rate} Hz) — no resampling")
+            } else {
+                format!("resampling {} Hz → {output_rate} Hz", format.mSampleRate)
+            }
         );
 
         let callback_count = Arc::new(AtomicU64::new(0));
         let nonzero_blocks = Arc::new(AtomicU64::new(0));
-
-        // Stereo resampler: the IOProc always emits L/R pairs into the ring.
-        let resampler = StreamResampler::<f32>::new(format.mSampleRate, output_rate, 2);
         let state = Box::new(IoState {
             ring_tx,
             format,
