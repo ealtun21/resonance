@@ -32,11 +32,12 @@ use super::system_tap::{
 };
 use super::{CHANNELS, apply_command};
 use crate::meters::{AtomicMeters, Sample, peak_rms, peak_rms_f32};
-use crate::state::AudioCommand;
+use crate::state::{AppControl, AudioCommand};
 use anyhow::{Context, Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, Host, StreamConfig};
 use resonance_dsp::chain::ProcessorChain;
+use std::collections::HashMap;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -57,19 +58,47 @@ const RING_CAPACITY_SAMPLES: usize = 32_768;
 const DRAIN_SLACK_FRAMES: usize = 4096;
 
 /// Publish the live per-application stream list (~1 Hz) on a dedicated thread.
-/// Read-only Core Audio process enumeration — no taps, no TCC. Exits when the
-/// daemon drops the receiver.
+/// Read-only Core Audio process enumeration — no taps, no TCC — with the user's
+/// per-app volume/mute overlaid. Exits when the daemon drops the receiver.
 fn spawn_app_enumeration(
     apps_tx: tokio::sync::mpsc::UnboundedSender<Vec<resonance_ipc::AppStream>>,
+    gains: Arc<Mutex<HashMap<String, (f64, bool)>>>,
 ) {
     thread::Builder::new()
         .name("resonance-mac-apps".into())
         .spawn(move || {
             loop {
-                if apps_tx.send(super::mac_apps::enumerate()).is_err() {
+                let mut apps = super::mac_apps::enumerate();
+                super::app_streams::overlay_control_state(&mut apps, &gains.lock().unwrap());
+                if apps_tx.send(apps).is_err() {
                     break;
                 }
                 thread::sleep(Duration::from_millis(1000));
+            }
+        })
+        .ok();
+}
+
+/// Drain per-app volume/mute requests into the shared gain map on a dedicated
+/// thread. The mixer increment will read this map to apply gains to the per-app
+/// taps; for now it backs the published-list overlay. Exits on sender drop.
+fn spawn_app_control(
+    app_ctl_rx: std_mpsc::Receiver<AppControl>,
+    gains: Arc<Mutex<HashMap<String, (f64, bool)>>>,
+) {
+    thread::Builder::new()
+        .name("resonance-mac-appctl".into())
+        .spawn(move || {
+            while let Ok(ctl) = app_ctl_rx.recv() {
+                let mut map = gains.lock().unwrap();
+                match ctl {
+                    AppControl::SetVolume { key, volume } => {
+                        map.entry(key).or_insert((1.0, false)).0 = volume.clamp(0.0, 4.0);
+                    }
+                    AppControl::SetMute { key, muted } => {
+                        map.entry(key).or_insert((1.0, false)).1 = muted;
+                    }
+                }
             }
         })
         .ok();
@@ -87,11 +116,13 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
         apps_tx,
         app_ctl_rx,
     } = ctx;
-    // Per-app enumeration (read-only): publish the live app list ~every second
-    // on a dedicated thread. Per-app volume control (the muted-tap mixer) drains
-    // `app_ctl_rx` in a later increment.
-    spawn_app_enumeration(apps_tx);
-    let _ = &app_ctl_rx;
+    // Per-app control state: `key -> (volume, muted)`, set via `app_ctl_rx` and
+    // overlaid onto the enumerated list so the published volume reflects what the
+    // user set. The muted-tap mixer (next increment) reads this same map to apply
+    // the gains to audio; until then it is display-only.
+    let app_gains: Arc<Mutex<HashMap<String, (f64, bool)>>> = Arc::new(Mutex::new(HashMap::new()));
+    spawn_app_control(app_ctl_rx, Arc::clone(&app_gains));
+    spawn_app_enumeration(apps_tx, app_gains);
     // Shared chain + RT state lives in an Arc<Mutex<…>>. The output callback
     // locks for the duration of each block — bounded, brief, never contended
     // against another high-priority thread. Reconnect rebuilds the streams but

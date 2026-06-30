@@ -1,8 +1,25 @@
 //! Pure, platform-agnostic helpers for the per-application stream model.
 //!
-//! Kept free of any backend types so the key/identity logic is unit-testable in
-//! `make check` on every platform (the PipeWire/CoreAudio/WASAPI glue lives in
-//! the respective backend modules).
+//! Kept free of any backend types (beyond `AppStream` itself) so the key /
+//! identity / overlay logic is unit-testable in `make check` on every platform
+//! (the PipeWire/CoreAudio/WASAPI glue lives in the respective backend modules).
+
+use resonance_ipc::AppStream;
+use std::collections::HashMap;
+
+/// Overlay daemon-side per-app control state (`key → (volume, muted)`) onto a
+/// freshly-enumerated app list. Used where the OS has no per-app volume to read
+/// back (macOS): enumeration reports defaults, and the values the user has set
+/// are layered on so the published list reflects them.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn overlay_control_state(apps: &mut [AppStream], state: &HashMap<String, (f64, bool)>) {
+    for app in apps.iter_mut() {
+        if let Some(&(volume, muted)) = state.get(&app.key) {
+            app.volume = volume;
+            app.muted = muted;
+        }
+    }
+}
 
 /// Build a stable per-application key from the process binary (preferred) or a
 /// fallback stream/node name, suffixed with a backend serial so two streams of
@@ -118,5 +135,33 @@ mod tests {
         assert_eq!(friendly_name_from_bundle("com.apple.Music"), "Music");
         assert_eq!(friendly_name_from_bundle("com.google.Chrome"), "Chrome");
         assert_eq!(friendly_name_from_bundle("org.mozilla.firefox"), "Firefox");
+    }
+
+    #[test]
+    fn overlay_applies_stored_volume_and_mute() {
+        let mut apps = vec![
+            AppStream {
+                key: "a".into(),
+                display_name: "A".into(),
+                pid: None,
+                volume: 1.0,
+                muted: false,
+                active: true,
+            },
+            AppStream {
+                key: "b".into(),
+                display_name: "B".into(),
+                pid: None,
+                volume: 1.0,
+                muted: false,
+                active: true,
+            },
+        ];
+        let mut state = HashMap::new();
+        state.insert("a".to_string(), (0.5, true));
+        overlay_control_state(&mut apps, &state);
+        assert!((apps[0].volume - 0.5).abs() < f64::EPSILON && apps[0].muted);
+        // 'b' has no stored state → unchanged.
+        assert!((apps[1].volume - 1.0).abs() < f64::EPSILON && !apps[1].muted);
     }
 }
