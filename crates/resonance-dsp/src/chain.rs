@@ -1,6 +1,7 @@
 use crate::channel::ChannelMatrix;
 use crate::effects::{
-    AmbienceEffect, BassBoostEffect, DynamicBoostEffect, Effect, FidelityEffect, SurroundEffect,
+    AmbienceEffect, BassBoostEffect, DynamicBoostEffect, Effect, FidelityEffect, LoudnessEffect,
+    SurroundEffect,
 };
 use crate::filter::ApoFilter;
 
@@ -11,17 +12,19 @@ pub enum FxEffect {
     Surround,
     DynamicBoost,
     Bass,
+    Loudness,
 }
 
 impl FxEffect {
     /// Every effect, in chain order. Adding a variant forces this array to be
     /// updated, propagating to every `ALL` iteration.
-    pub const ALL: [FxEffect; 5] = [
+    pub const ALL: [FxEffect; 6] = [
         FxEffect::Fidelity,
         FxEffect::Ambience,
         FxEffect::Surround,
         FxEffect::DynamicBoost,
         FxEffect::Bass,
+        FxEffect::Loudness,
     ];
 }
 
@@ -37,6 +40,7 @@ pub struct ProcessorChain {
     pub surround: SurroundEffect,
     pub dynamic_boost: DynamicBoostEffect,
     pub bass: BassBoostEffect,
+    pub loudness: LoudnessEffect,
     /// Optional output remap applied *after* EQ + effects, mapping the `channels`
     /// processed channels to a (possibly different) output channel count: swap,
     /// permutation, duplication, drop, up/downmix. `None` (or a square identity)
@@ -91,6 +95,7 @@ impl ProcessorChain {
         self.surround.process(buf, channels);
         self.dynamic_boost.process(buf, channels);
         self.bass.process(buf, channels);
+        self.loudness.process(buf, channels);
     }
 
     pub fn set_effect_intensity(&mut self, effect: FxEffect, value: f64) {
@@ -100,6 +105,7 @@ impl ProcessorChain {
             FxEffect::Surround => self.surround.set_intensity(value),
             FxEffect::DynamicBoost => self.dynamic_boost.set_intensity(value),
             FxEffect::Bass => self.bass.set_intensity(value),
+            FxEffect::Loudness => self.loudness.set_intensity(value),
         }
     }
 
@@ -116,6 +122,7 @@ impl ProcessorChain {
                 (self.dynamic_boost.intensity(), self.dynamic_boost.enabled())
             }
             FxEffect::Bass => (self.bass.intensity(), self.bass.enabled()),
+            FxEffect::Loudness => (self.loudness.intensity(), self.loudness.enabled()),
         }
     }
 
@@ -126,6 +133,7 @@ impl ProcessorChain {
             FxEffect::Surround => self.surround.set_enabled(on),
             FxEffect::DynamicBoost => self.dynamic_boost.set_enabled(on),
             FxEffect::Bass => self.bass.set_enabled(on),
+            FxEffect::Loudness => self.loudness.set_enabled(on),
         }
     }
 
@@ -138,6 +146,7 @@ impl ProcessorChain {
         self.surround.reset();
         self.dynamic_boost.reset();
         self.bass.reset();
+        self.loudness.reset();
     }
 
     /// Rebind every sample-rate-dependent coefficient to a new output rate.
@@ -170,6 +179,7 @@ impl ProcessorChain {
         self.dynamic_boost =
             carry_settings(&self.dynamic_boost, DynamicBoostEffect::new(sample_rate));
         self.bass = carry_settings(&self.bass, BassBoostEffect::new(ch, sample_rate));
+        self.loudness = carry_settings(&self.loudness, LoudnessEffect::new(ch, sample_rate));
     }
 
     /// Rebind every channel-count-dependent buffer to a new processing channel
@@ -194,6 +204,7 @@ impl ProcessorChain {
         self.surround = carry_settings(&self.surround, SurroundEffect::new(sr));
         self.dynamic_boost = carry_settings(&self.dynamic_boost, DynamicBoostEffect::new(sr));
         self.bass = carry_settings(&self.bass, BassBoostEffect::new(channels, sr));
+        self.loudness = carry_settings(&self.loudness, LoudnessEffect::new(channels, sr));
     }
 
     /// The channel count the chain emits: the routing matrix's output width when
@@ -290,6 +301,7 @@ impl ProcessorChainBuilder {
             surround: SurroundEffect::new(sr),
             dynamic_boost: DynamicBoostEffect::new(sr),
             bass: BassBoostEffect::new(channels, sr),
+            loudness: LoudnessEffect::new(channels, sr),
             routing: None,
         }
     }

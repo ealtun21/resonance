@@ -1,5 +1,6 @@
 use crate::effects::{
-    AmbienceEffect, BassBoostEffect, DynamicBoostEffect, Effect, FidelityEffect, SurroundEffect,
+    AmbienceEffect, BassBoostEffect, DynamicBoostEffect, Effect, FidelityEffect, LoudnessEffect,
+    SurroundEffect,
 };
 use rustfft::{FftPlanner, num_complex::Complex};
 use std::f64::consts::PI;
@@ -531,4 +532,57 @@ fn bass_boost_zero_intensity_passthrough() {
     let mut buf = input.clone();
     fx.process(&mut buf, 1);
     assert_eq!(buf, input);
+}
+
+// ── Loudness compensation ──────────────────────────────────────────────────────
+
+/// Measured gain (dB) of the loudness effect at `freq` for a given `intensity`.
+fn loudness_gain_db_at(intensity: f64, freq: f64) -> f64 {
+    let mut e = LoudnessEffect::new(1, SR);
+    e.set_intensity(intensity);
+    let n = 16384;
+    let input = sine(freq, n, 0.4);
+    let mut out = input.clone();
+    e.process(&mut out, 1);
+    let skip = n / 4; // drop the biquad warm-up transient
+    20.0 * (rms(&out[skip..]) / rms(&input[skip..])).log10()
+}
+
+#[test]
+fn loudness_zero_intensity_passthrough() {
+    for &f in &[60.0, 1000.0, 10000.0] {
+        assert!(
+            loudness_gain_db_at(0.0, f).abs() < 0.01,
+            "loudness off must pass through at {f} Hz"
+        );
+    }
+}
+
+#[test]
+fn loudness_boosts_bass_and_treble_relative_to_mid() {
+    let bass = loudness_gain_db_at(1.0, 60.0);
+    let mid = loudness_gain_db_at(1.0, 1000.0);
+    let treble = loudness_gain_db_at(1.0, 12000.0);
+    assert!(
+        bass > 3.0,
+        "bass should boost at full intensity, got {bass:.1} dB"
+    );
+    assert!(
+        treble > 3.0,
+        "treble should boost at full intensity, got {treble:.1} dB"
+    );
+    assert!(
+        bass > mid + 2.0 && treble > mid + 2.0,
+        "equal-loudness smile: bass {bass:.1} & treble {treble:.1} dB should exceed mid {mid:.1} dB"
+    );
+}
+
+#[test]
+fn loudness_gain_grows_with_intensity() {
+    let low = loudness_gain_db_at(0.3, 60.0);
+    let high = loudness_gain_db_at(1.0, 60.0);
+    assert!(
+        high > low && low > 0.0,
+        "more intensity = more bass boost ({low:.1} → {high:.1} dB)"
+    );
 }

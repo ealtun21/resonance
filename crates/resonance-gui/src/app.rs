@@ -1081,6 +1081,8 @@ fn demo_state() -> DaemonState {
             dynamic_boost_enabled: true,
             bass_intensity: 0.71,
             bass_enabled: true,
+            loudness_intensity: 0.4,
+            loudness_enabled: true,
         },
         current_preset: Some("Reference".into()),
         sample_rate: 48000.0,
