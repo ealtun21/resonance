@@ -318,7 +318,10 @@ fn build_and_run(fd_ptr: *mut FilterData, gs: &Arc<Mutex<GraphState>>) -> Result
     add_filter_ports(filter, fd, &names);
     connect_filter(filter)?;
 
-    create_null_sink(&core, &position)?;
+    // Keep the sink proxy alive for the whole connection: `_null_sink` lives
+    // until `build_and_run` returns (after `mainloop.run` exits). Dropping it
+    // would destroy the "Resonance EQ" sink (see `create_null_sink`).
+    let _null_sink = create_null_sink(&core, &position)?;
 
     // ── Registry listener (high-level, 'static closure via Arc) ──────────
     let registry = core.get_registry()?;
@@ -463,8 +466,16 @@ fn connect_filter(filter: *mut pw_sys::pw_filter) -> Result<()> {
 
 /// Create the routable "Resonance EQ" null-audio-sink that apps play into.
 /// `position` is the comma-joined SPA channel layout (e.g. `FL,FR`).
-fn create_null_sink(core: &pw::core::Core, position: &str) -> Result<()> {
-    let _sink: pw::node::Node = core.create_object(
+/// Create the "Resonance EQ" null-audio-sink that apps route into.
+///
+/// CRITICAL: the returned `Node` proxy OWNS the sink — a `create_object` object
+/// lives only as long as its proxy. The caller MUST keep it alive for the whole
+/// connection (bind it in `build_and_run`'s scope, which spans `mainloop.run`).
+/// Dropping it destroys the sink (apps then route straight to the real device
+/// with no EQ, and "Resonance EQ" disappears from the mixer).
+#[must_use = "the sink proxy must be kept alive or the null-sink is destroyed"]
+fn create_null_sink(core: &pw::core::Core, position: &str) -> Result<pw::node::Node> {
+    let sink: pw::node::Node = core.create_object(
         "adapter",
         &properties! {
             "factory.name"           => "support.null-audio-sink",
@@ -477,7 +488,7 @@ fn create_null_sink(core: &pw::core::Core, position: &str) -> Result<()> {
             "node.virtual"           => "true",
         },
     )?;
-    Ok(())
+    Ok(sink)
 }
 
 /// Register the registry global / global-remove listener that drives node + port
