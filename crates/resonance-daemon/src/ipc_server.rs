@@ -1,5 +1,5 @@
 use crate::config::{self, KnownSinks, Mappings, Profile};
-use crate::state::{AudioCommand, SharedState};
+use crate::state::{AppControl, AudioCommand, SharedState};
 use anyhow::Result;
 use resonance_dsp::chain::ProcessorChain;
 use resonance_dsp::channel::{ChannelMask as DspMask, ChannelMatrix};
@@ -180,6 +180,8 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
         Command::ExportProfile { path } => handle_export_profile(state, &path),
         Command::StoreSlot { slot } => handle_store_slot(state, slot),
         Command::RecallSlot { slot } => handle_recall_slot(state, slot),
+        Command::SetAppVolume { key, volume } => handle_set_app_volume(state, key, volume),
+        Command::SetAppMute { key, muted } => handle_set_app_mute(state, key, muted),
         // The actual cleanup + exit happens in `handle_client` after this Ok is
         // flushed to the client (see the `is_shutdown` branch there).
         Command::Shutdown => Response::Ok,
@@ -194,6 +196,24 @@ fn result_to_response(r: Result<(), String>) -> Response {
         Ok(()) => Response::Ok,
         Err(e) => Response::Error(e),
     }
+}
+
+/// Forward a per-app volume request to whichever component owns app control
+/// (backend main-loop thread, or the Windows WASAPI control task). The volume
+/// is clamped to the model's `0.0..=4.0`; backends further clamp to what they
+/// support. Control-plane only — never touches the RT DSP chain.
+fn handle_set_app_volume(state: &SharedState, key: String, volume: f64) -> Response {
+    state.forward_app_ctl(AppControl::SetVolume {
+        key,
+        volume: volume.clamp(0.0, 4.0),
+    });
+    Response::Ok
+}
+
+/// Forward a per-app mute request (see [`handle_set_app_volume`]).
+fn handle_set_app_mute(state: &SharedState, key: String, muted: bool) -> Response {
+    state.forward_app_ctl(AppControl::SetMute { key, muted });
+    Response::Ok
 }
 
 /// Toggle the master power (bypass) flag.

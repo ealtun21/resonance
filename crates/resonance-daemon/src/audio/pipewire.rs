@@ -7,16 +7,25 @@
 //!      filter-out → real device, paired by channel label (positional fallback).
 //!   4. `WirePlumber` metadata sets "Resonance EQ" as system default sink.
 
-use super::{SAMPLE_RATE, apply_command, target_channels};
+use super::{SAMPLE_RATE, app_streams, apply_command, target_channels};
 use crate::meters::{AtomicMeters, Sample, peak_rms, peak_rms_f32};
-use crate::state::AudioCommand;
+use crate::state::{AppControl, AudioCommand};
 use anyhow::Result;
 use pipewire as pw;
 use pipewire::properties::properties;
 use pipewire_sys as pw_sys;
 use pw::spa;
+use pw::spa::param::ParamType;
+use pw::spa::pod::{
+    Object, Pod, Property, PropertyFlags, Value, ValueArray, serialize::PodSerializer,
+};
+use pw::spa::utils::SpaTypes;
 use resonance_dsp::chain::ProcessorChain;
-use spa_sys::{SPA_DIRECTION_INPUT, SPA_DIRECTION_OUTPUT, spa_hook, spa_io_position};
+use resonance_ipc::AppStream;
+use spa_sys::{
+    SPA_DIRECTION_INPUT, SPA_DIRECTION_OUTPUT, SPA_PROP_channelVolumes, SPA_PROP_mute, spa_hook,
+    spa_io_position,
+};
 use std::{
     collections::HashMap,
     os::raw::c_void,
@@ -46,12 +55,33 @@ struct NodeMeta {
     description: String,
 }
 
+/// A per-application playback stream (`media.class = Stream/Output/Audio`) the
+/// daemon can volume/mute. Holds a bound `Node` proxy so volume/mute can be set
+/// from the pw main-loop thread via a `Props` param. `volume`/`muted` track the
+/// values *we* last set (optimistic); external changes (pavucontrol) aren't read
+/// back yet (a documented v1 limitation).
+struct AppNode {
+    node_id: u32,
+    key: String,
+    display_name: String,
+    pid: Option<u32>,
+    volume: f64,
+    muted: bool,
+    node: pw::node::Node,
+}
+
 struct GraphState {
     raw_core: usize, // *mut pw_sys::pw_core stored as usize for Send
     sink_node_id: u32,
     filter_node_id: u32,
     nodes: HashMap<u32, NodeMeta>,
     ports: HashMap<u32, PortMeta>,
+    /// Per-application playback streams, keyed by their registry global id.
+    app_nodes: HashMap<u32, AppNode>,
+    /// Backend → IPC: the live per-application stream list (control-plane).
+    apps_tx: tokio::sync::mpsc::UnboundedSender<Vec<AppStream>>,
+    /// IPC → backend: per-application volume/mute requests, drained in the timer.
+    app_ctl_rx: std::sync::mpsc::Receiver<AppControl>,
     out_links: Vec<pw::link::Link>,
     monitor_links: Vec<pw::link::Link>,
     metadata_obj: Option<pw::metadata::Metadata>,
@@ -138,6 +168,8 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
         route_rx,
         sinks_tx,
         meters,
+        apps_tx,
+        app_ctl_rx,
     } = ctx;
     // Channel count is fixed for the daemon's lifetime (env override or stereo).
     // The chain may arrive built at a different width; force it to match the ports.
@@ -165,6 +197,9 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
         filter_node_id: u32::MAX,
         nodes: HashMap::new(),
         ports: HashMap::new(),
+        app_nodes: HashMap::new(),
+        apps_tx,
+        app_ctl_rx,
         out_links: Vec::new(),
         monitor_links: Vec::new(),
         metadata_obj: None,
@@ -214,6 +249,10 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
                     g.filter_node_id = u32::MAX;
                     g.nodes.clear();
                     g.ports.clear();
+                    // Drop stale Node proxies (tied to the old core); re-enumerated
+                    // on reconnect. Publish empty so clients don't show ghosts.
+                    g.app_nodes.clear();
+                    let _ = g.apps_tx.send(Vec::new());
                     g.out_links.clear();
                     g.monitor_links.clear();
                     g.metadata_obj = None;
@@ -500,6 +539,10 @@ fn on_graph_timer_tick(g: &mut GraphState, node_id: u32, quit_ptr: usize) {
         g.filter_node_id = node_id;
         reroute(g);
     }
+    // Apply any pending per-application volume/mute requests from the IPC thread.
+    while let Ok(ctl) = g.app_ctl_rx.try_recv() {
+        apply_app_ctl(g, &ctl);
+    }
     // Apply any pending preferred-output changes from the IPC thread.
     let mut reroute_needed = false;
     while let Ok(name) = g.route_rx.try_recv() {
@@ -630,6 +673,35 @@ fn on_global(
                 try_set_default(g);
             } else if mc == "Audio/Sink" {
                 reroute(g);
+            } else if mc == "Stream/Output/Audio" {
+                // An application playback stream — bind a Node proxy so we can
+                // set its volume/mute, and add it to the per-app list.
+                let display_name = props
+                    .get("application.name")
+                    .or_else(|| props.get("node.description"))
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(name.as_str())
+                    .to_owned();
+                let pid = props
+                    .get("application.process.id")
+                    .and_then(|s| s.parse::<u32>().ok());
+                let key =
+                    app_streams::app_key(props.get("application.process.binary"), &name, obj.id);
+                if let Ok(node) = registry.bind::<pw::node::Node, _>(obj) {
+                    g.app_nodes.insert(
+                        obj.id,
+                        AppNode {
+                            node_id: obj.id,
+                            key,
+                            display_name,
+                            pid,
+                            volume: 1.0,
+                            muted: false,
+                            node,
+                        },
+                    );
+                    publish_apps(g);
+                }
             }
         }
         ObjectType::Port => {
@@ -703,9 +775,118 @@ fn on_global_remove(g: &mut GraphState, id: u32) {
         .remove(&id)
         .is_some_and(|n| n.media_class == "Audio/Sink" && n.name != "resonance");
     g.ports.remove(&id);
+    // An application closed its stream — drop it and refresh the per-app list.
+    if g.app_nodes.remove(&id).is_some() {
+        publish_apps(g);
+    }
     if was_real_sink {
         reroute(g);
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-application volume / mute
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Push the current per-application stream list to the daemon, sorted by display
+/// name then key for a stable UI order.
+fn publish_apps(g: &GraphState) {
+    let mut apps: Vec<AppStream> = g
+        .app_nodes
+        .values()
+        .map(|a| AppStream {
+            key: a.key.clone(),
+            display_name: a.display_name.clone(),
+            pid: a.pid,
+            volume: a.volume,
+            muted: a.muted,
+            // A bound Stream/Output/Audio node means the app has a live stream.
+            active: true,
+        })
+        .collect();
+    apps.sort_by(|a, b| {
+        a.display_name
+            .cmp(&b.display_name)
+            .then_with(|| a.key.cmp(&b.key))
+    });
+    let _ = g.apps_tx.send(apps);
+}
+
+/// Apply one per-app volume/mute request by setting the target stream node's
+/// `Props` param, then refresh the published list with our optimistic value.
+fn apply_app_ctl(g: &mut GraphState, ctl: &AppControl) {
+    let key = match ctl {
+        AppControl::SetVolume { key, .. } | AppControl::SetMute { key, .. } => key.as_str(),
+    };
+    let Some(node_id) = g
+        .app_nodes
+        .values()
+        .find(|a| a.key == key)
+        .map(|a| a.node_id)
+    else {
+        return;
+    };
+    // Match the volume array to the stream's output-port (channel) count so
+    // PipeWire applies it across all channels; default to stereo if not yet seen.
+    let channels = g
+        .ports
+        .values()
+        .filter(|p| p.node_id == node_id && p.is_output)
+        .count()
+        .clamp(1, MAX_CH);
+    let channels = if channels == 0 { 2 } else { channels };
+    let Some(app) = g.app_nodes.get_mut(&node_id) else {
+        return;
+    };
+    match *ctl {
+        AppControl::SetVolume { volume, .. } => {
+            let v = volume.clamp(0.0, 4.0);
+            if let Some(bytes) = pod_channel_volumes(channels, v as f32) {
+                if let Some(pod) = Pod::from_bytes(&bytes) {
+                    app.node.set_param(ParamType::Props, 0, pod);
+                    app.volume = v;
+                }
+            }
+        }
+        AppControl::SetMute { muted, .. } => {
+            if let Some(bytes) = pod_mute(muted) {
+                if let Some(pod) = Pod::from_bytes(&bytes) {
+                    app.node.set_param(ParamType::Props, 0, pod);
+                    app.muted = muted;
+                }
+            }
+        }
+    }
+    publish_apps(g);
+}
+
+/// Serialize a `Props` object Pod carrying the given properties to raw bytes.
+fn pod_props(properties: Vec<Property>) -> Option<Vec<u8>> {
+    let value = Value::Object(Object {
+        type_: SpaTypes::ObjectParamProps.as_raw(),
+        id: ParamType::Props.as_raw(),
+        properties,
+    });
+    let cursor = PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &value).ok()?;
+    Some(cursor.0.into_inner())
+}
+
+/// A `Props` Pod setting `channelVolumes` (linear gain per channel).
+fn pod_channel_volumes(channels: usize, volume: f32) -> Option<Vec<u8>> {
+    pod_props(vec![Property {
+        key: SPA_PROP_channelVolumes,
+        flags: PropertyFlags::empty(),
+        value: Value::ValueArray(ValueArray::Float(vec![volume; channels])),
+    }])
+}
+
+/// A `Props` Pod setting the `mute` flag.
+fn pod_mute(muted: bool) -> Option<Vec<u8>> {
+    pod_props(vec![Property {
+        key: SPA_PROP_mute,
+        flags: PropertyFlags::empty(),
+        value: Value::Bool(muted),
+    }])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

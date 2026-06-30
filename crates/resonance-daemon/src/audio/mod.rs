@@ -52,6 +52,9 @@ pub const SPECTRUM_BUF: usize = 8192;
 
 // ── Platform backends ────────────────────────────────────────────────────────
 
+/// Pure per-application stream helpers (key/identity), shared by all backends.
+mod app_streams;
+
 #[cfg(target_os = "linux")]
 mod pipewire;
 #[cfg(target_os = "linux")]
@@ -105,6 +108,11 @@ pub struct BackendCtx {
     pub sinks_tx: tokio::sync::mpsc::UnboundedSender<Vec<(String, String)>>,
     /// Shared peak/RMS/clip meters published from the RT thread.
     pub meters: Arc<AtomicMeters>,
+    /// Backend → IPC: the live per-application stream list (control-plane).
+    pub apps_tx: tokio::sync::mpsc::UnboundedSender<Vec<resonance_ipc::AppStream>>,
+    /// IPC → backend: per-application volume/mute requests (control-plane, not
+    /// the RT path). Drained on the backend's main-loop/control thread.
+    pub app_ctl_rx: std::sync::mpsc::Receiver<crate::state::AppControl>,
 }
 
 /// Spawn the audio backend on its own dedicated real-time thread.

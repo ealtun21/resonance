@@ -2,7 +2,7 @@ use crate::meters::AtomicMeters;
 use resonance_dsp::channel::{ChannelMask, ChannelMatrix};
 use resonance_dsp::{chain::FxEffect, chain::ProcessorChain};
 use resonance_ipc::{
-    BandState, BandType, DaemonState, EffectsState, FxEffectId, RoutingMatrix,
+    AppStream, BandState, BandType, DaemonState, EffectsState, FxEffectId, RoutingMatrix,
     default_channel_layout,
 };
 use rtrb::Producer;
@@ -60,6 +60,16 @@ pub enum AudioCommand {
     },
 }
 
+/// Per-application volume/mute requests, forwarded from the IPC thread to
+/// whichever component owns app control: the backend main-loop thread
+/// (Linux/PipeWire, macOS taps) or a Windows WASAPI control task. Unlike
+/// [`AudioCommand`] this never touches the RT DSP path — it's control-plane.
+#[derive(Debug, Clone)]
+pub enum AppControl {
+    SetVolume { key: String, volume: f64 },
+    SetMute { key: String, muted: bool },
+}
+
 pub struct Inner {
     pub chain: ProcessorChain,
     pub current_preset: Option<String>,
@@ -82,6 +92,12 @@ pub struct Inner {
     pub preferred_output: Option<String>,
     /// Send a preferred-output name to the `pw_node` main-loop thread.
     pub route_tx: std::sync::mpsc::Sender<String>,
+    /// Latest per-application stream list (pushed by the backend / a platform
+    /// app-enumeration task, read on snapshot).
+    pub apps: Vec<AppStream>,
+    /// Forward per-app volume/mute to the component that owns app control
+    /// (backend thread or Windows control task).
+    pub app_ctl_tx: std::sync::mpsc::Sender<AppControl>,
     /// In-memory A/B comparison slots ([A, B]); filled by `StoreSlot`.
     pub ab_slots: [Option<crate::config::Profile>; 2],
     /// Live meters written by the RT thread, read on snapshot.
@@ -103,6 +119,7 @@ impl SharedState {
         audio_tx: Producer<AudioCommand>,
         route_tx: std::sync::mpsc::Sender<String>,
         meters: Arc<AtomicMeters>,
+        app_ctl_tx: std::sync::mpsc::Sender<AppControl>,
     ) -> Self {
         let chain = ProcessorChain::builder()
             .channels(crate::audio::target_channels())
@@ -120,6 +137,8 @@ impl SharedState {
             sink_descriptions: Vec::new(),
             preferred_output: None,
             route_tx,
+            apps: Vec::new(),
+            app_ctl_tx,
             ab_slots: [None, None],
             meters,
             apo_writer: None,
@@ -273,12 +292,25 @@ impl SharedState {
             sink_descriptions: inner.sink_descriptions.clone(),
             preferred_output: inner.preferred_output.clone(),
             meters: inner.meters.snapshot(),
+            apps: inner.apps.clone(),
         }
     }
 
     /// Update spectrum bins (called from the spectrum computation task).
     pub fn update_spectrum(&self, bins: [f32; SPECTRUM_BINS]) {
         self.0.lock().unwrap().spectrum = bins;
+    }
+
+    /// Replace the per-application stream list (called by the backend / a
+    /// platform app-enumeration task whenever the set of streams changes).
+    pub fn set_apps(&self, apps: Vec<AppStream>) {
+        self.0.lock().unwrap().apps = apps;
+    }
+
+    /// Forward a per-app volume/mute request to the owning component. Best
+    /// effort: a dropped receiver (e.g. no backend) is ignored.
+    pub fn forward_app_ctl(&self, ctl: AppControl) {
+        let _ = self.0.lock().unwrap().app_ctl_tx.send(ctl);
     }
 
     /// Swap the whole chain: hand `rt` to the RT thread and mirror `shadow` so
@@ -329,7 +361,8 @@ mod tests {
     fn shared() -> SharedState {
         let (tx, _rx) = rtrb::RingBuffer::<AudioCommand>::new(16);
         let (route_tx, _route_rx) = std::sync::mpsc::channel();
-        SharedState::new(tx, route_tx, Arc::new(AtomicMeters::default()))
+        let (app_ctl_tx, _app_ctl_rx) = std::sync::mpsc::channel();
+        SharedState::new(tx, route_tx, Arc::new(AtomicMeters::default()), app_ctl_tx)
     }
 
     #[test]

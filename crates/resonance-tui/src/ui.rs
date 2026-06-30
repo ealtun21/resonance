@@ -2344,6 +2344,7 @@ mod tests {
             sink_descriptions: vec![],
             preferred_output: None,
             meters: Meters::default(),
+            apps: vec![],
         }
     }
 

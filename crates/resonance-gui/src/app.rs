@@ -1028,7 +1028,7 @@ fn demo_measurement() -> Vec<(f64, f64)> {
 /// UI render (graph, bands, effects, devices, per-channel curves) with no daemon,
 /// for the screenshot harness and design iteration. Values mirror the design mock.
 fn demo_state() -> DaemonState {
-    use resonance_ipc::{BandState, BandType, ChannelMask, EffectsState, Meters};
+    use resonance_ipc::{AppStream, BandState, BandType, ChannelMask, EffectsState, Meters};
     let band = |band_type, freq, gain_db, q, enabled, channels| BandState {
         band_type,
         freq,
@@ -1119,6 +1119,32 @@ fn demo_state() -> DaemonState {
             dsp_load: 0.14,
             dsp_frame_us: 140,
         },
+        apps: vec![
+            AppStream {
+                key: "firefox.41".into(),
+                display_name: "Firefox".into(),
+                pid: Some(4141),
+                volume: 1.0,
+                muted: false,
+                active: true,
+            },
+            AppStream {
+                key: "spotify.88".into(),
+                display_name: "Spotify".into(),
+                pid: Some(8800),
+                volume: 0.7,
+                muted: false,
+                active: true,
+            },
+            AppStream {
+                key: "discord.12".into(),
+                display_name: "Discord".into(),
+                pid: Some(1200),
+                volume: 1.0,
+                muted: true,
+                active: false,
+            },
+        ],
     }
 }
 

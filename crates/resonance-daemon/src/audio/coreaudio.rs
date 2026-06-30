@@ -65,7 +65,12 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
         route_rx,
         sinks_tx,
         meters,
+        apps_tx,
+        app_ctl_rx,
     } = ctx;
+    // Per-app volume on macOS needs per-process taps (Phase 4, Tasks 8–9);
+    // keep the channels alive until then.
+    let _ = (&apps_tx, &app_ctl_rx);
     // Shared chain + RT state lives in an Arc<Mutex<…>>. The output callback
     // locks for the duration of each block — bounded, brief, never contended
     // against another high-priority thread. Reconnect rebuilds the streams but
