@@ -66,7 +66,7 @@ fn spawn_app_enumeration(
         .name("resonance-mac-apps".into())
         .spawn(move || {
             loop {
-                if apps_tx.send(mac_apps::enumerate()).is_err() {
+                if apps_tx.send(super::mac_apps::enumerate()).is_err() {
                     break;
                 }
                 thread::sleep(Duration::from_millis(1000));
