@@ -27,7 +27,8 @@
 
 use super::hal_input::HalInputStream;
 use super::system_tap::{
-    SystemAudioTap, TAP_DEVICE_NAME, default_output_uid, set_aggregate_nominal_rate,
+    SystemAudioTap, TAP_DEVICE_NAME, default_output_rate, default_output_uid,
+    set_aggregate_nominal_rate,
 };
 use super::{CHANNELS, apply_command};
 use crate::meters::{AtomicMeters, Sample, peak_rms, peak_rms_f32};
@@ -92,6 +93,7 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
             // before the daemon is fully up).
             let mut tap: Option<SystemAudioTap> = None;
             let mut tap_uid: Option<String> = None;
+            let mut tap_rate: Option<f64> = None;
 
             loop {
                 while let Ok(name) = route_rx.try_recv() {
@@ -99,19 +101,33 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
                     preferred_output = if name.is_empty() { None } else { Some(name) };
                 }
 
-                // (Re)create the tap when missing or bound to a now-stale device.
+                // (Re)create the tap when missing, bound to a now-stale device, or
+                // bound at a stale rate. The device-bound tap inherits the
+                // device's rate at creation, so a rate change (Audio MIDI Setup,
+                // BT codec) needs a fresh tap to keep capture == output and the
+                // resampler bypassed.
                 let want_uid = default_output_uid().ok();
-                if tap.is_none() || tap_uid != want_uid {
+                let want_rate = default_output_rate();
+                let rate_stale =
+                    matches!((tap_rate, want_rate), (Some(a), Some(b)) if (a - b).abs() > 1.0);
+                if tap.is_none() || tap_uid != want_uid || rate_stale {
                     let Some(uid) = want_uid.clone() else {
                         warn!("CoreAudio: no default output device yet; retrying…");
                         thread::sleep(backoff);
                         backoff = (backoff * 2).min(Duration::from_secs(5));
                         continue;
                     };
+                    // Destroy the existing tap before creating the new one so the
+                    // old aggregate is gone (resources freed) before we bind a
+                    // fresh tap at the current device/rate.
+                    tap = None;
+                    tap_uid = None;
+                    tap_rate = None;
                     match SystemAudioTap::create(&uid) {
                         Ok(t) => {
                             tap = Some(t);
                             tap_uid = Some(uid);
+                            tap_rate = want_rate;
                         }
                         Err(e) => {
                             warn!("CoreAudio: tap setup failed: {e:#}; retrying…");
