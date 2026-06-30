@@ -77,7 +77,9 @@ static AGGREGATE_SEQ: AtomicU64 = AtomicU64::new(0);
 /// Owns the Core Audio objects backing the system tap. Drops them on scope
 /// exit so the system goes back to normal routing even on panic.
 pub struct SystemAudioTap {
-    tap_id: AudioObjectID,
+    /// One or more Process Tap object ids. The system tap holds a single
+    /// device-bound tap; the per-app mixer holds one mixdown tap per application.
+    tap_ids: Vec<AudioObjectID>,
     aggregate_id: AudioObjectID,
     native_rate: f64,
 }
@@ -179,7 +181,7 @@ impl SystemAudioTap {
         // treated the speakers as the primary stream and the tap as a
         // secondary input that never received samples. Leaving main_sub
         // unset lets the tap be the source.
-        let dict = build_aggregate_dict(&tap_uid_string, None);
+        let dict = build_aggregate_dict(&[&*tap_uid_string], None);
 
         let mut agg_id: AudioObjectID = 0;
         let agg_ptr = NonNull::new(std::ptr::from_mut(&mut agg_id)).unwrap();
@@ -212,10 +214,115 @@ impl SystemAudioTap {
              aggregate_name='{TAP_DEVICE_NAME}', native_rate={native_rate} Hz)"
         );
         Ok(Self {
-            tap_id,
+            tap_ids: vec![tap_id],
             aggregate_id: agg_id,
             native_rate,
         })
+    }
+
+    /// Create a **per-application mixer** tap: one muted stereo-mixdown Process
+    /// Tap per application (each capturing only that app's audio, with the app's
+    /// own output muted), all gathered into a single aggregate device. The
+    /// aggregate's IOProc then delivers `apps.len() * 2` interleaved channels —
+    /// channels `[2i, 2i+1]` are application `i`'s stereo audio, in the returned
+    /// key order. The backend gains each pair by the app's volume and sums to
+    /// stereo. `apps` is `(key, process_object_id)` pairs.
+    ///
+    /// Returns the tap + the ordered list of keys (matching the channel-pair
+    /// order). Apps whose tap fails to create are skipped (and omitted from the
+    /// key list). Errors only if no tap could be created at all.
+    pub fn create_app_mixer(apps: &[(String, u32)]) -> Result<(Self, Vec<String>)> {
+        request_audio_capture_permission();
+        let mut tap_ids: Vec<AudioObjectID> = Vec::new();
+        let mut tap_uids: Vec<CFRetained<CFString>> = Vec::new();
+        let mut keys: Vec<String> = Vec::new();
+
+        for (key, proc_obj) in apps {
+            // Include-list mixdown tap: captures ONLY this process object.
+            let include = NSNumber::new_u32(*proc_obj);
+            let include_arr: Retained<NSArray<NSNumber>> =
+                NSArray::from_slice(&[include.as_ref()]);
+            // SAFETY: normal ObjC alloc/init; include_arr outlives the call.
+            let desc: Retained<CATapDescription> = unsafe {
+                CATapDescription::initStereoMixdownOfProcesses(
+                    CATapDescription::alloc(),
+                    &include_arr,
+                )
+            };
+            unsafe {
+                desc.setName(&NSString::from_str(&format!("Resonance App Tap {key}")));
+                desc.setPrivate(true);
+                // Muted: suppress the app's own output; we re-render its gained
+                // signal through the mixer → chain → output.
+                desc.setMuteBehavior(CATapMuteBehavior::Muted);
+            }
+            let mut tap_id: AudioObjectID = 0;
+            // SAFETY: tap_id is a valid stack pointer; desc lives across the call.
+            let status = unsafe {
+                AudioHardwareCreateProcessTap(Some(&desc), std::ptr::from_mut(&mut tap_id))
+            };
+            if status != 0 || tap_id == 0 {
+                warn!("per-app tap for {key} failed (status={status}); skipping");
+                continue;
+            }
+            match get_tap_uid(tap_id) {
+                Ok(uid) => {
+                    tap_ids.push(tap_id);
+                    tap_uids.push(uid);
+                    keys.push(key.clone());
+                }
+                Err(e) => {
+                    warn!("per-app tap uid for {key} failed: {e}; skipping");
+                    // SAFETY: tap_id was just created and isn't tracked yet.
+                    unsafe {
+                        let _ = AudioHardwareDestroyProcessTap(tap_id);
+                    }
+                }
+            }
+        }
+
+        if tap_ids.is_empty() {
+            return Err(anyhow!(
+                "no per-app taps could be created (no apps producing audio, or \
+                 System Audio Capture not granted)"
+            ));
+        }
+
+        let uid_refs: Vec<&CFString> = tap_uids.iter().map(|u| &**u).collect();
+        let dict = build_aggregate_dict(&uid_refs, None);
+        let mut agg_id: AudioObjectID = 0;
+        let agg_ptr = NonNull::new(std::ptr::from_mut(&mut agg_id)).unwrap();
+        // SAFETY: dict is a valid aggregate-spec CFDictionary; agg_ptr is valid.
+        let status = unsafe {
+            let dict_ptr = CFRetained::as_ptr(&dict).cast::<CFDictionary>();
+            AudioHardwareCreateAggregateDevice(dict_ptr.as_ref(), agg_ptr)
+        };
+        if status != 0 || agg_id == 0 {
+            for &t in &tap_ids {
+                // SAFETY: each id came from a successful create above.
+                unsafe {
+                    let _ = AudioHardwareDestroyProcessTap(t);
+                }
+            }
+            return Err(anyhow!(
+                "AudioHardwareCreateAggregateDevice (app mixer) failed (status={status})"
+            ));
+        }
+
+        let native_rate = read_nominal_rate(agg_id).unwrap_or(48_000.0);
+        info!(
+            "Per-app mixer tap ready ({} app taps, aggregate_id={agg_id}, \
+             native_rate={native_rate} Hz): {keys:?}",
+            tap_ids.len()
+        );
+        Ok((
+            Self {
+                tap_ids,
+                aggregate_id: agg_id,
+                native_rate,
+            },
+            keys,
+        ))
     }
 
     /// Aggregate device name — what cpal sees when enumerating inputs.
@@ -256,13 +363,14 @@ impl Drop for SystemAudioTap {
                     );
                 }
             }
-            if self.tap_id != 0 {
-                let status = AudioHardwareDestroyProcessTap(self.tap_id);
-                if status != 0 {
-                    warn!(
-                        "AudioHardwareDestroyProcessTap failed (id={}, status={status})",
-                        self.tap_id
-                    );
+            for &tap_id in &self.tap_ids {
+                if tap_id != 0 {
+                    let status = AudioHardwareDestroyProcessTap(tap_id);
+                    if status != 0 {
+                        warn!(
+                            "AudioHardwareDestroyProcessTap failed (id={tap_id}, status={status})"
+                        );
+                    }
                 }
             }
         }
@@ -577,13 +685,13 @@ pub fn default_output_rate() -> Option<f64> {
 /// real audio device used purely as the clock source; without it a
 /// tap-only aggregate has no time base and produces silence.
 fn build_aggregate_dict(
-    tap_uid: &CFString,
+    tap_uids: &[&CFString],
     main_sub_uid: Option<&CFString>,
 ) -> CFRetained<CFMutableDictionary<CFString, CFType>> {
     let dict: CFRetained<CFMutableDictionary<CFString, CFType>> =
         CFMutableDictionary::<CFString, CFType>::with_capacity(5);
 
-    // Sub-tap entry:
+    // One sub-tap entry per tap UID:
     //   { kAudioSubTapUIDKey: tap_uid,
     //     kAudioSubTapDriftCompensationKey: true }
     //
@@ -593,27 +701,38 @@ fn build_aggregate_dict(
     // the right rate but every sample is 0.0). Apple's WWDC23
     // CapturingSystemAudio sample sets this true; we hit exactly the
     // silent-buffer bug when it was missing.
-    let sub_tap_dict: CFRetained<CFMutableDictionary<CFString, CFType>> =
-        CFMutableDictionary::<CFString, CFType>::with_capacity(2);
+    //
+    // The sub-tap dicts must outlive the array build below, so keep them owned.
     let sub_uid_key = cf_key(kAudioSubTapUIDKey);
     let sub_drift_key = cf_key(kAudioSubTapDriftCompensationKey);
     let drift_true = unsafe { kCFBooleanTrue }.expect("kCFBooleanTrue exists");
-    unsafe {
-        dict_set(
-            &sub_tap_dict,
-            CFRetained::as_ptr(&sub_uid_key).as_ptr() as *const c_void,
-            std::ptr::from_ref(tap_uid).cast::<c_void>(),
-        );
-        dict_set(
-            &sub_tap_dict,
-            CFRetained::as_ptr(&sub_drift_key).as_ptr() as *const c_void,
-            std::ptr::from_ref(drift_true).cast::<c_void>(),
-        );
-    }
+    let sub_dicts: Vec<CFRetained<CFMutableDictionary<CFString, CFType>>> = tap_uids
+        .iter()
+        .map(|tap_uid| {
+            let sub: CFRetained<CFMutableDictionary<CFString, CFType>> =
+                CFMutableDictionary::<CFString, CFType>::with_capacity(2);
+            unsafe {
+                dict_set(
+                    &sub,
+                    CFRetained::as_ptr(&sub_uid_key).as_ptr() as *const c_void,
+                    std::ptr::from_ref(*tap_uid).cast::<c_void>(),
+                );
+                dict_set(
+                    &sub,
+                    CFRetained::as_ptr(&sub_drift_key).as_ptr() as *const c_void,
+                    std::ptr::from_ref(drift_true).cast::<c_void>(),
+                );
+            }
+            sub
+        })
+        .collect();
 
-    // Tap list: a CFArray of one dict (CFType element type).
-    let sub_as_cf: &CFType = unsafe { &*std::ptr::from_ref(&*sub_tap_dict).cast::<CFType>() };
-    let tap_list: CFRetained<CFArray<CFType>> = CFArray::from_objects(&[sub_as_cf]);
+    // Tap list: a CFArray of the sub-tap dicts (CFType element type), in order.
+    let sub_refs: Vec<&CFType> = sub_dicts
+        .iter()
+        .map(|d| unsafe { &*std::ptr::from_ref(&**d).cast::<CFType>() })
+        .collect();
+    let tap_list: CFRetained<CFArray<CFType>> = CFArray::from_objects(&sub_refs);
 
     let agg_name = CFString::from_str(TAP_DEVICE_NAME);
     // Per-process, per-creation-unique UID so recreating the tap never collides
