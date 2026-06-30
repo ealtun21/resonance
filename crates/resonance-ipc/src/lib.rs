@@ -257,6 +257,14 @@ pub enum Command {
     SwapChannels { a: usize, b: usize },
     /// Clear routing: straight passthrough at the processing channel count.
     ClearRouting,
+    // ── Per-app commands (append-only, see the N-channel note above) ──────────
+    /// Set a per-application stream's linear volume (0.0–4.0; 1.0 = unity,
+    /// values above 1.0 = boost). Backends clamp to what they support (e.g.
+    /// Windows caps at 1.0). `key` matches an `AppStream::key` from
+    /// `DaemonState::apps`.
+    SetAppVolume { key: String, volume: f64 },
+    /// Mute or unmute a per-application stream by its `AppStream::key`.
+    SetAppMute { key: String, muted: bool },
 }
 
 /// One of the two in-memory comparison slots for quick A/B auditioning.
@@ -485,6 +493,12 @@ pub struct DaemonState {
     pub preferred_output: Option<String>,
     /// Live level + DSP-load meters.
     pub meters: Meters,
+    /// Per-application audio streams the daemon can control (volume/mute).
+    /// Empty when the backend doesn't enumerate apps. Appended LAST + `serde`
+    /// default so self-describing profiles/older readers stay compatible; the
+    /// postcard IPC wire is version-locked regardless (clients ship together).
+    #[serde(default)]
+    pub apps: Vec<AppStream>,
 }
 
 impl DaemonState {
@@ -538,6 +552,23 @@ pub struct BandState {
     /// (clients + daemon ship together).
     #[serde(default)]
     pub channels: ChannelMask,
+}
+
+/// One application's audio stream that the daemon can volume/mute independently.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppStream {
+    /// Stable identity across polls; backend-specific (`PipeWire` binary+serial,
+    /// Windows session id, macOS bundle id / pid). Commands key off this.
+    pub key: String,
+    /// Human-facing name (`application.name`, session display name, app name).
+    pub display_name: String,
+    /// OS process id, when the backend knows it.
+    pub pid: Option<u32>,
+    /// Linear gain, `0.0..=4.0` (`1.0` = unity, `>1` = boost where supported).
+    pub volume: f64,
+    pub muted: bool,
+    /// Currently producing audio (vs. listed but idle).
+    pub active: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -686,6 +717,14 @@ mod tests {
         });
         command_round_trip(&Command::SwapChannels { a: 0, b: 1 });
         command_round_trip(&Command::ClearRouting);
+        command_round_trip(&Command::SetAppVolume {
+            key: "firefox.42".into(),
+            volume: 1.5,
+        });
+        command_round_trip(&Command::SetAppMute {
+            key: "firefox.42".into(),
+            muted: true,
+        });
         command_round_trip(&Command::SaveProfile {
             name: "night".into(),
         });
@@ -819,9 +858,32 @@ mod tests {
             sink_descriptions: vec![("alsa_output.pci".into(), "Built-in Audio".into())],
             preferred_output: None,
             meters: Meters::default(),
+            apps: vec![AppStream {
+                key: "firefox.42".into(),
+                display_name: "Firefox".into(),
+                pid: Some(4242),
+                volume: 1.5,
+                muted: false,
+                active: true,
+            }],
         };
         let bytes = to_stdvec(&Response::State(st)).expect("encode");
         let _: Response = from_bytes(&bytes).expect("decode");
+    }
+
+    #[test]
+    fn app_stream_round_trips_through_postcard() {
+        let app = AppStream {
+            key: "firefox.0".into(),
+            display_name: "Firefox".into(),
+            pid: Some(4242),
+            volume: 1.5,
+            muted: false,
+            active: true,
+        };
+        let bytes = to_stdvec(&app).unwrap();
+        let back: AppStream = from_bytes(&bytes).unwrap();
+        assert_eq!(app, back);
     }
 
     #[test]
