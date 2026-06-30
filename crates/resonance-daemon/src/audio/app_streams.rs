@@ -27,6 +27,10 @@ pub fn overlay_control_state(apps: &mut [AppStream], state: &HashMap<String, (f6
 ///
 /// The binary is reduced to its basename so a full path
 /// (`/usr/lib/firefox/firefox`) and a bare name (`firefox`) key identically.
+///
+/// Used by the Linux (`PipeWire`) and Windows (`WASAPI`) backends; macOS keys
+/// off the stable bundle id directly, so it's unused there.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 #[must_use]
 pub fn app_key(binary: Option<&str>, fallback_name: &str, serial: u32) -> String {
     let base = binary
@@ -37,6 +41,7 @@ pub fn app_key(binary: Option<&str>, fallback_name: &str, serial: u32) -> String
 }
 
 /// Last path segment of `path`, handling both `/` and `\` separators.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn basename(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
