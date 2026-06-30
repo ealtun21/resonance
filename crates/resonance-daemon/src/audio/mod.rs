@@ -129,7 +129,19 @@ pub fn apply_command(chain: &mut ProcessorChain, cmd: AudioCommand) {
             chain.set_effect_intensity(effect, value);
         }
         AudioCommand::SetEffectEnabled { effect, on } => chain.set_effect_enabled(effect, on),
-        AudioCommand::ReplaceChain(c) => *chain = *c,
+        AudioCommand::ReplaceChain(c) => {
+            // The incoming chain carries the shadow/preset construction rate
+            // (often 48 kHz), but the RT thread may be running at the live
+            // device rate (e.g. 44.1/96 kHz, set by the backend at stream
+            // setup). Adopt the new bands and effects, then re-bind to the live
+            // rate so the EQ coefficients stay correct and `status` reports the
+            // true rate — the sample-rate analog of the channel-count guarantee
+            // the daemon makes for ReplaceChain. `rebind_sample_rate` no-ops
+            // when the rates already match.
+            let live_rate = chain.sample_rate;
+            *chain = *c;
+            chain.rebind_sample_rate(live_rate);
+        }
         AudioCommand::Reset => chain.reset(),
         AudioCommand::SetBand {
             index,
@@ -341,5 +353,30 @@ mod tests {
         assert!(c.routing.as_ref().is_some_and(|m| !m.is_identity()));
         apply_command(&mut c, AudioCommand::SetRouting { matrix: None });
         assert!(c.routing.is_none());
+    }
+
+    #[test]
+    fn replace_chain_preserves_the_live_sample_rate() {
+        // The RT thread runs at the live device rate (here 96 kHz); a
+        // ReplaceChain carrying a chain built at the 48 kHz construction default
+        // (the frozen shadow, or a preset/profile built before the live rate is
+        // known) must not drag the live rate back down. The bands/effects are
+        // adopted but re-bound to the live rate. Guards the macOS device-rate
+        // follow path — and any non-48k backend — against the resync/profile
+        // clobber that otherwise mis-set the EQ coefficients and `status` rate.
+        let mut live = ProcessorChain::builder()
+            .channels(CHANNELS)
+            .sample_rate(96_000.0)
+            .build();
+        let replacement = ProcessorChain::builder()
+            .channels(CHANNELS)
+            .sample_rate(48_000.0)
+            .build();
+        apply_command(&mut live, AudioCommand::ReplaceChain(Box::new(replacement)));
+        assert!(
+            (live.sample_rate - 96_000.0).abs() < 1e-9,
+            "ReplaceChain kept {} Hz; must stay at the live 96 kHz device rate",
+            live.sample_rate
+        );
     }
 }
