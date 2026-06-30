@@ -3,7 +3,7 @@
 //! Apple introduced [`CATapDescription`] + [`AudioHardwareCreateProcessTap`]
 //! in macOS 14.2. They let an unprivileged user-space process *tap* the
 //! audio that other processes send to the system mixer, without installing
-//! a kernel extension or an `AudioServerPlugIn` (which is what BlackHole or
+//! a kernel extension or an `AudioServerPlugIn` (which is what `BlackHole` or
 //! Loopback ship). Apple Music, browsers, games, calls — everything that
 //! plays through the system goes through the tap.
 //!
@@ -456,7 +456,7 @@ fn build_aggregate_dict(
         dict_set(
             &sub_tap_dict,
             CFRetained::as_ptr(&sub_uid_key).as_ptr() as *const c_void,
-            (tap_uid as *const CFString).cast::<c_void>(),
+            std::ptr::from_ref(tap_uid).cast::<c_void>(),
         );
         dict_set(
             &sub_tap_dict,
@@ -521,7 +521,7 @@ fn build_aggregate_dict(
             dict_set(
                 &dict,
                 CFRetained::as_ptr(&main_k).as_ptr() as *const c_void,
-                (uid as *const CFString).cast::<c_void>(),
+                std::ptr::from_ref(uid).cast::<c_void>(),
             );
         }
     }
@@ -575,7 +575,7 @@ fn request_audio_capture_permission() {
         }
         let preflight: TccPreflightFn = std::mem::transmute(pre);
         let service = TccCFString::from_static_str("kTCCServiceAudioCapture");
-        let status = preflight(&*service, std::ptr::null());
+        let status = preflight(std::ptr::from_ref(&*service), std::ptr::null());
         match status {
             0 => info!("kTCCServiceAudioCapture: ALLOWED (tap will deliver audio)"),
             1 => warn!(
