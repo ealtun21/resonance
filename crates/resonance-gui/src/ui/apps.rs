@@ -42,7 +42,9 @@ impl GuiApp {
             // The toggle reads as "audible": on = not muted.
             let mut audible = !app.muted;
             if kit::toggle(ui, &mut audible) {
-                self.queue_edit(Command::SetAppMute {
+                // `queue`, not `queue_edit`: per-app volume/mute isn't part of the
+                // EQ profile, so it must not mark the profile dirty or push undo.
+                self.queue(Command::SetAppMute {
                     key: app.key.clone(),
                     muted: !audible,
                 });
@@ -87,7 +89,7 @@ impl GuiApp {
         ui.add_space(2.0);
         let mut vol = app.volume.min(VOL_MAX);
         if kit::slider_h(ui, ui.available_width(), 12.0, &mut vol, 0.0..=VOL_MAX) {
-            self.queue_edit(Command::SetAppVolume {
+            self.queue(Command::SetAppVolume {
                 key: app.key.clone(),
                 volume: vol,
             });

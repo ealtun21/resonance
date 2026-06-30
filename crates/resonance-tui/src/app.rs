@@ -682,7 +682,7 @@ impl App {
                 };
                 let new_vol = ((cur + delta).clamp(0.0, 1.0) * 100.0).round() / 100.0;
                 if (new_vol - cur).abs() > 0.001 {
-                    self.push_undo();
+                    // Per-app volume isn't part of the EQ profile — no undo snapshot.
                     self.send(Command::SetAppVolume {
                         key,
                         volume: new_vol,
@@ -865,7 +865,7 @@ impl App {
                 else {
                     return;
                 };
-                self.push_undo();
+                // Per-app mute isn't part of the EQ profile — no undo snapshot.
                 self.send(Command::SetAppMute { key, muted: !muted });
                 self.refresh_state();
             }

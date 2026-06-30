@@ -17,7 +17,8 @@ use pipewire_sys as pw_sys;
 use pw::spa;
 use pw::spa::param::ParamType;
 use pw::spa::pod::{
-    Object, Pod, Property, PropertyFlags, Value, ValueArray, serialize::PodSerializer,
+    Object, Pod, Property, PropertyFlags, Value, ValueArray, deserialize::PodDeserializer,
+    serialize::PodSerializer,
 };
 use pw::spa::utils::SpaTypes;
 use resonance_dsp::chain::ProcessorChain;
@@ -55,11 +56,15 @@ struct NodeMeta {
     description: String,
 }
 
+/// Live read-back of an app node's `(volume, muted)` from a `Props` event;
+/// either field is `None` when that event didn't carry it (events can be partial).
+type AppVolRead = (Option<f64>, Option<bool>);
+
 /// A per-application playback stream (`media.class = Stream/Output/Audio`) the
-/// daemon can volume/mute. Holds a bound `Node` proxy so volume/mute can be set
-/// from the pw main-loop thread via a `Props` param. `volume`/`muted` track the
-/// values *we* last set (optimistic); external changes (pavucontrol) aren't read
-/// back yet (a documented v1 limitation).
+/// daemon can volume/mute. Holds a bound `Node` proxy (to set `Props`) and a
+/// param listener that reads the node's live `channelVolumes`/`mute` back, so
+/// `volume`/`muted` reflect the real values — including external changes made in
+/// pavucontrol/wpctl — rather than an optimistic local guess.
 struct AppNode {
     node_id: u32,
     key: String,
@@ -68,6 +73,8 @@ struct AppNode {
     volume: f64,
     muted: bool,
     node: pw::node::Node,
+    /// Kept alive so the node keeps emitting `Props` param events (read-back).
+    _param_listener: pw::node::NodeListener,
 }
 
 struct GraphState {
@@ -78,6 +85,11 @@ struct GraphState {
     ports: HashMap<u32, PortMeta>,
     /// Per-application playback streams, keyed by their registry global id.
     app_nodes: HashMap<u32, AppNode>,
+    /// Read-back inbox: per-app `Props` param listeners write the node's live
+    /// `(volume, mute)` here (either field absent if unchanged); the 50 ms timer
+    /// applies it to `app_nodes` + republishes. A separate `Arc` (not `gs`) so
+    /// the param callbacks never re-lock the graph mutex from the main loop.
+    app_volumes: Arc<Mutex<HashMap<u32, AppVolRead>>>,
     /// Backend → IPC: the live per-application stream list (control-plane).
     apps_tx: tokio::sync::mpsc::UnboundedSender<Vec<AppStream>>,
     /// IPC → backend: per-application volume/mute requests, drained in the timer.
@@ -198,6 +210,7 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
         nodes: HashMap::new(),
         ports: HashMap::new(),
         app_nodes: HashMap::new(),
+        app_volumes: Arc::new(Mutex::new(HashMap::new())),
         apps_tx,
         app_ctl_rx,
         out_links: Vec::new(),
@@ -554,6 +567,9 @@ fn on_graph_timer_tick(g: &mut GraphState, node_id: u32, quit_ptr: usize) {
     while let Ok(ctl) = g.app_ctl_rx.try_recv() {
         apply_app_ctl(g, &ctl);
     }
+    // Fold in any read-back the per-app `Props` listeners recorded (real volumes,
+    // external pavucontrol/wpctl changes) and republish if they moved.
+    apply_app_volumes(g);
     // Apply any pending preferred-output changes from the IPC thread.
     let mut reroute_needed = false;
     while let Ok(name) = g.route_rx.try_recv() {
@@ -699,6 +715,32 @@ fn on_global(
                 let key =
                     app_streams::app_key(props.get("application.process.binary"), &name, obj.id);
                 if let Ok(node) = registry.bind::<pw::node::Node, _>(obj) {
+                    // Read-back: listen for the node's `Props` and record its live
+                    // volume/mute into the side inbox (applied by the timer). The
+                    // callback writes `app_volumes` only — never `gs` — so it can't
+                    // re-lock the graph mutex from the main loop. Register before
+                    // subscribing so the initial value isn't missed.
+                    let id = obj.id;
+                    let inbox = Arc::clone(&g.app_volumes);
+                    let listener = node
+                        .add_listener_local()
+                        .param(move |_seq, _ty, _idx, _next, pod| {
+                            if let Some(pod) = pod {
+                                let (vol, muted) = parse_node_props(pod);
+                                if vol.is_some() || muted.is_some() {
+                                    let mut map = inbox.lock().unwrap();
+                                    let entry = map.entry(id).or_insert((None, None));
+                                    if vol.is_some() {
+                                        entry.0 = vol;
+                                    }
+                                    if muted.is_some() {
+                                        entry.1 = muted;
+                                    }
+                                }
+                            }
+                        })
+                        .register();
+                    node.subscribe_params(&[ParamType::Props]);
                     g.app_nodes.insert(
                         obj.id,
                         AppNode {
@@ -709,6 +751,7 @@ fn on_global(
                             volume: 1.0,
                             muted: false,
                             node,
+                            _param_listener: listener,
                         },
                     );
                     publish_apps(g);
@@ -851,8 +894,11 @@ fn apply_app_ctl(g: &mut GraphState, ctl: &AppControl) {
     };
     match *ctl {
         AppControl::SetVolume { volume, .. } => {
+            // `volume` is the perceptual fraction (matches the system mixer);
+            // PipeWire `channelVolumes` is linear amplitude = perceptual³.
             let v = volume.clamp(0.0, 4.0);
-            if let Some(bytes) = pod_channel_volumes(channels, v as f32) {
+            let linear = (v * v * v) as f32;
+            if let Some(bytes) = pod_channel_volumes(channels, linear) {
                 if let Some(pod) = Pod::from_bytes(&bytes) {
                     app.node.set_param(ParamType::Props, 0, pod);
                     app.volume = v;
@@ -898,6 +944,70 @@ fn pod_mute(muted: bool) -> Option<Vec<u8>> {
         flags: PropertyFlags::empty(),
         value: Value::Bool(muted),
     }])
+}
+
+/// Parse a node `Props` Pod → the `(volume, muted)` it carries. Volume is the
+/// max of `channelVolumes` (per-channel, normally uniform). Either field is
+/// `None` when the event didn't include it (Props events can be partial).
+fn parse_node_props(pod: &Pod) -> AppVolRead {
+    let Ok((_, Value::Object(obj))) = PodDeserializer::deserialize_from::<Value>(pod.as_bytes())
+    else {
+        return (None, None);
+    };
+    let mut volume = None;
+    let mut muted = None;
+    for prop in obj.properties {
+        if prop.key == SPA_PROP_channelVolumes {
+            if let Value::ValueArray(ValueArray::Float(vs)) = prop.value {
+                let max = vs.into_iter().fold(f32::NEG_INFINITY, f32::max);
+                if max.is_finite() {
+                    // `channelVolumes` is linear amplitude; pavucontrol/wpctl show
+                    // the cube root (the perceptual "volume %"). Match them so our
+                    // % == the system mixer's %.
+                    volume = Some(f64::from(max.max(0.0)).cbrt());
+                }
+            }
+        } else if prop.key == SPA_PROP_mute {
+            if let Value::Bool(m) = prop.value {
+                muted = Some(m);
+            }
+        }
+    }
+    (volume, muted)
+}
+
+/// Drain the read-back inbox (`app_volumes`) into `app_nodes` and republish if
+/// anything changed — so the per-app list reflects the nodes' real volume/mute,
+/// including changes made externally (pavucontrol / wpctl). Called each timer tick.
+fn apply_app_volumes(g: &mut GraphState) {
+    let updates: Vec<(u32, AppVolRead)> = {
+        let mut map = g.app_volumes.lock().unwrap();
+        if map.is_empty() {
+            return;
+        }
+        map.drain().collect()
+    };
+    let mut changed = false;
+    for (id, (vol, muted)) in updates {
+        if let Some(app) = g.app_nodes.get_mut(&id) {
+            if let Some(v) = vol {
+                let v = v.clamp(0.0, 4.0);
+                if (app.volume - v).abs() > 0.0005 {
+                    app.volume = v;
+                    changed = true;
+                }
+            }
+            if let Some(m) = muted {
+                if app.muted != m {
+                    app.muted = m;
+                    changed = true;
+                }
+            }
+        }
+    }
+    if changed {
+        publish_apps(g);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
