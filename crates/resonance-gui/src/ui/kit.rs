@@ -147,19 +147,20 @@ pub(crate) fn card(
     fill_override: Option<Color32>,
     body: impl FnOnce(&mut egui::Ui),
 ) {
-    card_impl(ui, title, hint, fill_override, CARD_PAD_X, body);
+    card_impl(ui, title, hint, fill_override, CARD_PAD_X, true, body);
 }
 
 /// A [`card`] whose body has **no horizontal padding** — for a full-bleed table
 /// (mockup `.bandscard`): the rows' tint, rules and selection bar run edge-to-edge
-/// while the table itself insets its cells. The head keeps its padding.
+/// while the table itself insets its cells. The head keeps its padding. Not
+/// collapsible (it's the central hero content).
 pub(crate) fn card_flush(
     ui: &mut egui::Ui,
     title: &str,
     hint: &str,
     body: impl FnOnce(&mut egui::Ui),
 ) {
-    card_impl(ui, title, hint, None, 0.0, body);
+    card_impl(ui, title, hint, None, 0.0, false, body);
 }
 
 fn card_impl(
@@ -168,10 +169,16 @@ fn card_impl(
     hint: &str,
     fill_override: Option<Color32>,
     body_pad_x: f32,
+    collapsible: bool,
     body: impl FnOnce(&mut egui::Ui),
 ) {
     let t = tokens(ui);
     let fill = fill_override.unwrap_or_else(|| ui.visuals().faint_bg_color);
+    // Per-title collapsed state. Clicking the head toggles it; collapsed cards
+    // shrink to just the rounded title bar (handy now that several stack up).
+    let collapse_id = egui::Id::new(("card_collapsed", title));
+    let mut collapsed =
+        collapsible && ui.data(|d| d.get_temp::<bool>(collapse_id).unwrap_or(false));
     egui::Frame::default()
         .fill(fill)
         .stroke(egui::Stroke::new(1.0, t.line))
@@ -181,15 +188,35 @@ fn card_impl(
             // Head bar: the content area spans the full card width (Frame adds no
             // margin), so the divider can run edge-to-edge under the caption.
             let full_w = ui.available_width();
-            let (head, _) =
-                ui.allocate_exact_size(egui::vec2(full_w, CARD_HEAD_H), egui::Sense::hover());
+            let sense = if collapsible {
+                egui::Sense::click()
+            } else {
+                egui::Sense::hover()
+            };
+            let (head, head_resp) = ui.allocate_exact_size(egui::vec2(full_w, CARD_HEAD_H), sense);
+            if head_resp.clicked() {
+                collapsed = !collapsed;
+                ui.data_mut(|d| d.insert_temp(collapse_id, collapsed));
+            }
+            if collapsible && head_resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
             let p = ui.painter();
-            caption(
-                p,
-                egui::pos2(head.left() + CARD_PAD_X, head.center().y),
-                title,
-                t.dim,
-            );
+            // Disclosure chevron (collapsible cards only); the title sits after it.
+            let title_x = if collapsible {
+                let arrow = if collapsed { "▸" } else { "▾" };
+                p.text(
+                    egui::pos2(head.left() + CARD_PAD_X, head.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    arrow,
+                    egui::FontId::proportional(T_CAPTION),
+                    if head_resp.hovered() { t.text } else { t.dim },
+                );
+                head.left() + CARD_PAD_X + 14.0
+            } else {
+                head.left() + CARD_PAD_X
+            };
+            caption(p, egui::pos2(title_x, head.center().y), title, t.dim);
             if !hint.is_empty() {
                 p.text(
                     egui::pos2(head.right() - CARD_PAD_X, head.center().y),
@@ -199,23 +226,25 @@ fn card_impl(
                     t.faint,
                 );
             }
-            p.hline(
-                head.x_range(),
-                head.bottom() - 0.5,
-                egui::Stroke::new(1.0, t.line),
-            );
-            // Body: its own padding inside the same content width.
-            egui::Frame::default()
-                .inner_margin(egui::Margin {
-                    left: body_pad_x as i8,
-                    right: body_pad_x as i8,
-                    top: CARD_PAD_Y as i8,
-                    bottom: CARD_PAD_Y as i8,
-                })
-                .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    body(ui);
-                });
+            // Divider + body only when expanded; collapsed = clean rounded title bar.
+            if !collapsed {
+                p.hline(
+                    head.x_range(),
+                    head.bottom() - 0.5,
+                    egui::Stroke::new(1.0, t.line),
+                );
+                egui::Frame::default()
+                    .inner_margin(egui::Margin {
+                        left: body_pad_x as i8,
+                        right: body_pad_x as i8,
+                        top: CARD_PAD_Y as i8,
+                        bottom: CARD_PAD_Y as i8,
+                    })
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        body(ui);
+                    });
+            }
         });
 }
 
