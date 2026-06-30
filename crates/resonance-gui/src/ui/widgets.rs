@@ -51,19 +51,6 @@ pub(crate) fn section_hint(
     crate::ui::kit::card(ui, title, hint, None, add);
 }
 
-/// A flat collapsible section for the narrow accordion layout: a native
-/// disclosure header, no surrounding box. `id` keys the persisted open/closed
-/// state; `default_open` applies only the first time the id is seen.
-pub(crate) fn accordion(
-    ui: &mut egui::Ui,
-    id: &str,
-    title: &str,
-    default_open: bool,
-    body: impl FnOnce(&mut egui::Ui),
-) {
-    crate::ui::kit::accordion(ui, id, title, default_open, body);
-}
-
 /// A modal dialog window sized to fit the current viewport: centred, resizable,
 /// capped at 90% of the window (floor 320×240) so it never overflows a small
 /// window, and opening at a comfortable default width. Replaces the old

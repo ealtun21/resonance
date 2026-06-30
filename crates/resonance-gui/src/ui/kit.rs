@@ -440,57 +440,6 @@ pub(crate) fn checkbox(ui: &mut egui::Ui, on: &mut bool, label: &str) -> bool {
     changed
 }
 
-/// A bespoke collapsible section header (mockup accordion): a clickable row with
-/// an animated caret and a bold title, persisting its open/closed state. Replaces
-/// `egui::CollapsingHeader` so the narrow-layout accordion wears the kit look.
-/// `default_open` applies only the first time `id` is seen.
-pub(crate) fn accordion(
-    ui: &mut egui::Ui,
-    id: &str,
-    title: &str,
-    default_open: bool,
-    body: impl FnOnce(&mut egui::Ui),
-) {
-    let t = tokens(ui);
-    let state_id = egui::Id::new(("kit_accordion", id));
-    let mut open = ui
-        .ctx()
-        .data_mut(|d| *d.get_persisted_mut_or(state_id, default_open));
-    let (rect, resp) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::click());
-    if resp.clicked() {
-        open = !open;
-        ui.ctx().data_mut(|d| d.insert_persisted(state_id, open));
-    }
-    let how = ui.ctx().animate_bool(state_id, open);
-    let cy = rect.center().y;
-    let fg = if resp.hovered() { t.text } else { t.dim };
-    // Caret: a small triangle that rotates from ▶ (closed) to ▼ (open).
-    let cx = rect.left() + 7.0;
-    let ang = how * std::f32::consts::FRAC_PI_2;
-    let (s, c) = ang.sin_cos();
-    let rot = |dx: f32, dy: f32| egui::pos2(cx + dx * c - dy * s, cy + dx * s + dy * c);
-    ui.painter().add(egui::Shape::convex_polygon(
-        vec![rot(-3.0, -4.0), rot(4.0, 0.0), rot(-3.0, 4.0)],
-        fg,
-        egui::Stroke::NONE,
-    ));
-    ui.painter().text(
-        egui::pos2(rect.left() + 20.0, cy),
-        egui::Align2::LEFT_CENTER,
-        title,
-        egui::FontId::proportional(T_BODY + 0.5),
-        fg,
-    );
-    if how > 0.001 {
-        ui.add_space(2.0);
-        // Fully open → draw normally; mid-animation egui still lays it out (a
-        // simple reveal; no clip needed for these short control stacks).
-        body(ui);
-        ui.add_space(SP_XS);
-    }
-}
-
 // ── Pills (reference bar) ─────────────────────────────────────────────────────
 
 /// Fully-rounded pill height (mockup `.pill`).

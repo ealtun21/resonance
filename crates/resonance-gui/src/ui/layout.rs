@@ -4,7 +4,7 @@
 
 use crate::app::{GuiApp, ServiceAction, ServiceFn};
 use crate::ui::kit;
-use crate::ui::widgets::{accordion, padded_scroll, section, section_hint};
+use crate::ui::widgets::{padded_scroll, section, section_hint};
 use eframe::egui;
 use resonance_ipc::{DaemonState, service};
 
@@ -249,44 +249,38 @@ impl GuiApp {
             });
     }
 
-    /// Narrow layout: the lower sections stacked as collapsible cards. No scroll
-    /// area of its own — the caller wraps it in one (sized so the controls panel
-    /// hugs this content and the graph fills the rest).
+    /// Narrow layout: the lower sections stacked as the same collapsible cards
+    /// the wide layout uses (the titlebar view) rather than plain-text accordion
+    /// headers. Same titles ⇒ collapse state is shared with the wide layout. No
+    /// scroll area of its own — the caller wraps it in one.
     fn accordion_stack(&mut self, ui: &mut egui::Ui, state: Option<&DaemonState>) {
+        const GAP: f32 = 8.0;
         egui::Frame::default()
             .inner_margin(egui::Margin::symmetric(8, 6))
             .show(ui, |ui| {
-                accordion(ui, "acc_fx_v3", "Effects", true, |ui| {
-                    if let Some(s) = state {
-                        self.effects_section(ui, s);
-                    }
-                });
                 if let Some(s) = state {
+                    section_hint(ui, "Effects", "DSP sound effects", |ui| {
+                        self.effects_section(ui, s);
+                    });
                     if !s.apps.is_empty() {
-                        accordion(ui, "acc_apps_v1", "Applications", false, |ui| {
+                        ui.add_space(GAP);
+                        section_hint(ui, "Applications", "per-app volume", |ui| {
                             self.apps_section(ui, s);
                         });
                     }
-                }
-                accordion(ui, "acc_bands_v3", "EQ bands", true, |ui| {
-                    if let Some(s) = state {
-                        self.bands_section(ui, s);
+                    ui.add_space(GAP);
+                    section(ui, "EQ bands", |ui| self.bands_section(ui, s));
+                    if s.channels >= 2 {
+                        ui.add_space(GAP);
+                        section(ui, "Channels", |ui| self.channels_section(ui, s));
                     }
-                });
-                accordion(ui, "acc_map_v3", "Device mapping", false, |ui| {
+                }
+                ui.add_space(GAP);
+                section_hint(ui, "Device → Profile", "auto-switch", |ui| {
                     self.device_mapping_section(ui);
                 });
-                accordion(ui, "acc_prof_v3", "Profiles", false, |ui| {
-                    self.profiles_panel(ui);
-                });
-                // Channels below Profiles (matches the wide layout).
-                if let Some(s) = state {
-                    if s.channels >= 2 {
-                        accordion(ui, "acc_ch_v3", "Channels", false, |ui| {
-                            self.channels_section(ui, s);
-                        });
-                    }
-                }
+                ui.add_space(GAP);
+                section(ui, "Profiles", |ui| self.profiles_panel(ui));
             });
     }
 }
