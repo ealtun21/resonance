@@ -38,6 +38,7 @@
   </provides>
 
   <releases>
+    <release version="0.7.3" date="2026-06-30"/>
     <release version="0.7.2" date="2026-06-29"/>
     <release version="0.7.1" date="2026-06-29"/>
     <release version="0.7.0" date="2026-06-29"/>

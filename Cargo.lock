@@ -4113,7 +4113,7 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "resonance-apo"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "memmap2",
  "resonance-dsp",
@@ -4122,11 +4122,11 @@ dependencies = [
 
 [[package]]
 name = "resonance-autoeq"
-version = "0.7.2"
+version = "0.7.3"
 
 [[package]]
 name = "resonance-cli"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -4137,7 +4137,7 @@ dependencies = [
 
 [[package]]
 name = "resonance-daemon"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "anyhow",
  "cpal",
@@ -4171,7 +4171,7 @@ dependencies = [
 
 [[package]]
 name = "resonance-dsp"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "approx",
  "biquad",
@@ -4183,7 +4183,7 @@ dependencies = [
 
 [[package]]
 name = "resonance-gui"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "anyhow",
  "eframe",
@@ -4205,7 +4205,7 @@ dependencies = [
 
 [[package]]
 name = "resonance-ipc"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "libc",
  "postcard",
@@ -4216,7 +4216,7 @@ dependencies = [
 
 [[package]]
 name = "resonance-preset"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "resonance-dsp",
  "serde",
@@ -4225,7 +4225,7 @@ dependencies = [
 
 [[package]]
 name = "resonance-reference"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "resonance-ipc",
  "serde",
@@ -4235,7 +4235,7 @@ dependencies = [
 
 [[package]]
 name = "resonance-tui"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "anyhow",
  "crossterm",
