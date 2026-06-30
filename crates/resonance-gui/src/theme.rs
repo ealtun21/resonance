@@ -316,6 +316,10 @@ fn native_palette_for(dark: bool) -> Palette {
 }
 
 /// The host desktop's accent colour, if discoverable.
+// Returns Option for the cross-platform contract: the Linux/Windows accent
+// lookups can fail (None). The macOS branch always resolves to Some, which trips
+// unnecessary_wraps only on the macOS build — the Option is still required.
+#[allow(clippy::unnecessary_wraps)]
 fn system_accent() -> Option<Color32> {
     #[cfg(target_os = "linux")]
     {
@@ -478,7 +482,7 @@ fn macos_accent() -> Color32 {
 
 #[cfg(target_os = "macos")]
 fn macos_is_dark() -> bool {
-    defaults_global("AppleInterfaceStyle").map_or(false, |s| s.eq_ignore_ascii_case("Dark"))
+    defaults_global("AppleInterfaceStyle").is_some_and(|s| s.eq_ignore_ascii_case("Dark"))
 }
 
 // ── matugen / pywal palette loading ─────────────────────────────────────────

@@ -460,7 +460,7 @@ fn build_aggregate_dict(
         dict_set(
             &sub_tap_dict,
             CFRetained::as_ptr(&sub_drift_key).as_ptr() as *const c_void,
-            (drift_true as *const _).cast::<c_void>(),
+            std::ptr::from_ref(drift_true).cast::<c_void>(),
         );
     }
 
