@@ -26,7 +26,9 @@
 //! "Microphone" TCC permission (prompted on first run).
 
 use super::hal_input::HalInputStream;
-use super::system_tap::{SystemAudioTap, TAP_DEVICE_NAME, set_aggregate_nominal_rate};
+use super::system_tap::{
+    SystemAudioTap, TAP_DEVICE_NAME, default_output_uid, set_aggregate_nominal_rate,
+};
 use super::{CHANNELS, apply_command};
 use crate::meters::{AtomicMeters, Sample, peak_rms, peak_rms_f32};
 use crate::state::AudioCommand;
@@ -82,13 +84,14 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
             let mut preferred_output: Option<String> = None;
             let mut last_active_output: Option<String> = None;
             let mut backoff = Duration::from_millis(200);
-            // The tap is reusable across stream reconnects — keep it alive
-            // for the whole supervisor lifetime so we don't churn the
-            // system-audio routing on every device hotplug. Lazily created
-            // on the first successful setup (avoids prompting for the
-            // System Audio Capture permission before the daemon has fully
-            // come up).
+            // The tap binds to the current default output device so it inherits
+            // that device's channel layout + sample rate. It is kept alive across
+            // stream reconnects and recreated only when the bound device changes,
+            // so we don't churn the system-audio routing on every hotplug. Lazily
+            // created on first setup (avoids prompting for System Audio Capture
+            // before the daemon is fully up).
             let mut tap: Option<SystemAudioTap> = None;
+            let mut tap_uid: Option<String> = None;
 
             loop {
                 while let Ok(name) = route_rx.try_recv() {
@@ -96,9 +99,20 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
                     preferred_output = if name.is_empty() { None } else { Some(name) };
                 }
 
-                if tap.is_none() {
-                    match SystemAudioTap::create() {
-                        Ok(t) => tap = Some(t),
+                // (Re)create the tap when missing or bound to a now-stale device.
+                let want_uid = default_output_uid().ok();
+                if tap.is_none() || tap_uid != want_uid {
+                    let Some(uid) = want_uid.clone() else {
+                        warn!("CoreAudio: no default output device yet; retrying…");
+                        thread::sleep(backoff);
+                        backoff = (backoff * 2).min(Duration::from_secs(5));
+                        continue;
+                    };
+                    match SystemAudioTap::create(&uid) {
+                        Ok(t) => {
+                            tap = Some(t);
+                            tap_uid = Some(uid);
+                        }
                         Err(e) => {
                             warn!("CoreAudio: tap setup failed: {e:#}; retrying…");
                             thread::sleep(backoff);
@@ -200,19 +214,6 @@ fn run_streams(
     let tap_target = f64::from(sample_rate).min(tap_native_rate);
     set_aggregate_nominal_rate(tap_aggregate_id, tap_target);
 
-    {
-        let mut guard = shared.lock().unwrap();
-        // Re-bind the DSP chain to the output device's sample rate so the
-        // filter *and* effect coefficients are correct for the rate we render at.
-        guard.chain.rebind_sample_rate(f64::from(sample_rate));
-        // The process tap captures the stereo system mix, and the IOProc always
-        // emits L/R pairs, so the chain processes stereo regardless of
-        // RESONANCE_CHANNELS. Pin its width to the stereo buffers the callback
-        // feeds — a stray env override must not desync chain.channels from the
-        // interleaved-stereo work buffer (which would misframe every block).
-        guard.chain.set_channels(2);
-    }
-
     // Report the active output device by name (the daemon uses this to map
     // device → profile). Dedup so we don't spam the channel.
     if last_active_output.as_deref() != Some(output_name.as_str()) {
@@ -224,7 +225,13 @@ fn run_streams(
     // ── Stream construction ────────────────────────────────────────────────
     let out_channels = out_cfg.channels.max(1) as usize;
 
-    let (ring_tx, ring_rx) = rtrb::RingBuffer::<f32>::new(RING_CAPACITY_SAMPLES);
+    // Size the ring for ~340 ms of interleaved audio at the device width + rate,
+    // so it scales with channel count (a fixed stereo size would be far too small
+    // at 16ch/96k). The output callback's backlog-drain keeps steady-state
+    // latency low regardless of this ceiling.
+    let ring_capacity =
+        ((f64::from(sample_rate) * 0.34) as usize * out_channels).max(RING_CAPACITY_SAMPLES);
+    let (ring_tx, ring_rx) = rtrb::RingBuffer::<f32>::new(ring_capacity);
 
     // Stream error → flag; the supervisor sees it on the next poll and rebuilds.
     let stream_err = Arc::new(AtomicBool::new(false));
@@ -233,19 +240,29 @@ fn run_streams(
     // which doesn't reliably surface the tap stream and was reading silence.
     let hal_input = HalInputStream::open(tap_aggregate_id, ring_tx, f64::from(sample_rate))
         .with_context(|| "open HAL input on tap aggregate")?;
-    // Publish the capture rate so `status` can show whether the IOProc is
-    // resampling (tap rate ≠ output rate).
-    shared
-        .lock()
-        .unwrap()
-        .meters
-        .set_capture_rate(hal_input.capture_rate);
+    let capture_channels = hal_input.capture_channels;
+
+    {
+        let mut guard = shared.lock().unwrap();
+        // Re-bind the DSP chain to the output device's sample rate (filter +
+        // effect coefficients) and set its width to the tap's channel count: the
+        // device-bound tap delivers the device's full channel layout, so the
+        // chain processes every channel (with per-channel EQ) instead of a forced
+        // stereo mixdown.
+        guard.chain.rebind_sample_rate(f64::from(sample_rate));
+        guard.chain.set_channels(capture_channels);
+        // Publish the live capture rate + width for `status` (and whether the
+        // IOProc is resampling — it isn't, once the tap is bound to the device).
+        guard.meters.set_capture_rate(hal_input.capture_rate);
+        guard.meters.set_channels(capture_channels);
+    }
     let input_callbacks = Arc::clone(&hal_input.callback_count);
     let input_nonzero = Arc::clone(&hal_input.nonzero_blocks);
 
     let output_stream = build_output_stream(
         &output_dev,
         &out_cfg,
+        capture_channels,
         out_channels,
         ring_rx,
         Arc::clone(shared),
@@ -255,8 +272,8 @@ fn run_streams(
     output_stream.play().with_context(|| "play output stream")?;
 
     info!(
-        "CoreAudio ready — {sample_rate} Hz, HAL tap input → DSP ({CHANNELS} ch) → \
-         output {out_channels} ch"
+        "CoreAudio ready — {sample_rate} Hz, HAL tap input ({capture_channels} ch) → \
+         DSP → output {out_channels} ch"
     );
 
     // ── Supervisor loop ───────────────────────────────────────────────────
@@ -324,7 +341,8 @@ fn run_streams(
 fn build_output_stream(
     device: &Device,
     cfg: &StreamConfig,
-    channels: usize,
+    ring_channels: usize,
+    device_channels: usize,
     mut ring_rx: rtrb::Consumer<f32>,
     shared: Arc<Mutex<SharedRt>>,
     err_flag: Arc<AtomicBool>,
@@ -336,40 +354,35 @@ fn build_output_stream(
             e.store(true, Ordering::Relaxed);
         }
     };
-    // Pre-allocate a per-callback stereo scratch buffer (avoids alloc on the
-    // audio thread). Sized for one reasonable callback; grown if needed.
-    let mut stereo: Vec<f32> = Vec::with_capacity(8192 * 2);
+    let rc = ring_channels.max(1);
+    let dc = device_channels.max(1);
+    // Pre-allocate a per-callback work buffer (ring-channel-wide) — avoids alloc
+    // on the audio thread. Grown if a callback ever asks for more frames.
+    let mut work: Vec<f32> = Vec::with_capacity(8192 * rc);
 
     let data_cb = move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-        let frames = data.len() / channels.max(1);
-        let needed_stereo = frames * 2;
-        if stereo.len() < needed_stereo {
-            stereo.resize(needed_stereo, 0.0);
+        let frames = data.len() / dc;
+        let needed = frames * rc;
+        if work.len() < needed {
+            work.resize(needed, 0.0);
         }
-        let buf = &mut stereo[..needed_stereo];
+        let buf = &mut work[..needed];
 
-        // Pull `frames` stereo samples from the input ring. If short, zero-pad
-        // — better silence than xrun chaos.
-        let avail_samples = ring_rx.slots();
-        let avail_frames = avail_samples / 2;
+        // Pull `frames` ring-channel-wide frames from the input ring; zero-pad if
+        // short (silence beats xrun chaos). Drain any backlog beyond the slack so
+        // steady-state latency doesn't grow.
+        let avail_frames = ring_rx.slots() / rc;
         let copy_frames = frames.min(avail_frames);
-        // Optional backlog drain: if more than `frames + slack` is queued,
-        // discard the excess so we don't grow steady-state latency.
         let backlog_frames = avail_frames.saturating_sub(frames);
         let drop_frames = backlog_frames.saturating_sub(DRAIN_SLACK_FRAMES);
-
-        for _ in 0..drop_frames * 2 {
+        for _ in 0..drop_frames * rc {
             let _ = ring_rx.pop();
         }
-
-        for i in 0..copy_frames {
-            buf[i * 2] = ring_rx.pop().unwrap_or(0.0);
-            buf[i * 2 + 1] = ring_rx.pop().unwrap_or(0.0);
+        for s in buf.iter_mut().take(copy_frames * rc) {
+            *s = ring_rx.pop().unwrap_or(0.0);
         }
-        // Zero the tail if we ran short.
-        for i in copy_frames..frames {
-            buf[i * 2] = 0.0;
-            buf[i * 2 + 1] = 0.0;
+        for s in buf.iter_mut().skip(copy_frames * rc) {
+            *s = 0.0;
         }
 
         // ── DSP ───────────────────────────────────────────────────────────
@@ -386,7 +399,7 @@ fn build_output_stream(
         let (in_peak, in_rms) = peak_rms_f32(buf);
 
         if s.chain.enabled {
-            let need_f64 = needed_stereo;
+            let need_f64 = needed;
             if s.scratch.len() < need_f64 {
                 s.scratch.resize(need_f64, 0.0);
             }
@@ -409,9 +422,9 @@ fn build_output_stream(
                     ..
                 } = &mut *s;
                 chain.process(&mut scratch[..need_f64]);
-                // Square output routing (L/R swap / per-channel gain) on the
-                // stereo buffer — parity with the PipeWire/APO backends. `route`
-                // copies for the no-matrix / identity case.
+                // Square output routing (per-channel gain / channel swap) — parity
+                // with the PipeWire/APO backends. `route` copies for the identity
+                // / no-matrix case.
                 let out: &[f64] = if chain.routing.is_some() {
                     chain.route(&scratch[..need_f64], &mut routed[..need_f64]);
                     &routed[..need_f64]
@@ -455,21 +468,21 @@ fn build_output_stream(
             });
         }
 
-        // Feed the spectrum ring from the OUTPUT (`buf`) in both branches: the
-        // post-DSP signal when enabled, the passthrough signal when bypassed
-        // (power off) — `buf` already holds whatever we render. Doing this
-        // outside the `enabled` check keeps the analyzer tracking live audio
-        // when power is off instead of freezing on the last processed frame.
+        // Feed the spectrum ring from the OUTPUT (`buf`): per-frame mono average
+        // across the ring channels (any width). Outside the `enabled` check so
+        // the analyzer keeps tracking live audio when power is off (`buf` already
+        // holds whatever we render) instead of freezing on the last frame.
         let cap = s.spectrum_tx.slots();
         let push_n = frames.min(cap);
         for i in 0..push_n {
-            let m = (buf[i * 2] + buf[i * 2 + 1]) * 0.5;
-            let _ = s.spectrum_tx.push(m);
+            let base = i * rc;
+            let sum: f32 = buf[base..base + rc].iter().sum();
+            let _ = s.spectrum_tx.push(sum / rc as f32);
         }
         drop(s);
 
         // ── Render to output ──────────────────────────────────────────────
-        render_stereo_to_output(buf, data, channels);
+        render_to_output(buf, data, rc, dc);
 
         let _ = err_flag.load(Ordering::Relaxed);
     };
@@ -480,33 +493,23 @@ fn build_output_stream(
     Ok(stream)
 }
 
-/// Map the processed interleaved-stereo buffer (`stereo`, `frames*2`) onto the
-/// output device's `channels` layout, writing exactly `data.len()` samples. 1ch
-/// = L/R average (mono downmix); 2ch = straight copy; N>2 = stereo on ch0/ch1
-/// with the rest silent (the upmix — true surround needs a real source the system
-/// tap doesn't provide). Pure (no device/RT state) so it's unit-testable.
-fn render_stereo_to_output(stereo: &[f32], data: &mut [f32], channels: usize) {
-    match channels {
-        0 => {}
-        1 => {
-            for (i, d) in data.iter_mut().enumerate() {
-                *d = 0.5 * (stereo[i * 2] + stereo[i * 2 + 1]);
-            }
-        }
-        2 => {
-            let n = data.len().min(stereo.len());
-            data[..n].copy_from_slice(&stereo[..n]);
-        }
-        n => {
-            let frames = data.len() / n;
-            for f in 0..frames {
-                let base = f * n;
-                data[base] = stereo[f * 2];
-                data[base + 1] = stereo[f * 2 + 1];
-                for d in &mut data[base + 2..base + n] {
-                    *d = 0.0;
-                }
-            }
+/// Map the processed interleaved buffer (`processed`, `src_channels` wide) onto
+/// the output device buffer `data` (`dst_channels` wide), frame by frame: copy
+/// the first `min(src, dst)` channels, zero-pad any extra device channels, drop
+/// any extra source channels. The chain runs at the device width and the routing
+/// matrix has done any in-width remap, so the common case is an equal-width copy.
+/// Pure (no device/RT state) so it's unit-testable.
+fn render_to_output(processed: &[f32], data: &mut [f32], src_channels: usize, dst_channels: usize) {
+    if dst_channels == 0 {
+        return;
+    }
+    for (f, frame) in data.chunks_mut(dst_channels).enumerate() {
+        for (c, d) in frame.iter_mut().enumerate() {
+            *d = if c < src_channels {
+                processed.get(f * src_channels + c).copied().unwrap_or(0.0)
+            } else {
+                0.0
+            };
         }
     }
 }
@@ -598,37 +601,39 @@ mod tests {
     }
 
     #[test]
-    fn render_mono_downmix_averages_lr() {
-        let stereo = [0.4f32, 0.6, 0.2, 0.8]; // 2 frames
-        let mut data = [0.0f32; 2];
-        render_stereo_to_output(&stereo, &mut data, 1);
-        assert!((data[0] - 0.5).abs() < 1e-6 && (data[1] - 0.5).abs() < 1e-6);
-    }
-
-    #[test]
-    // The 2ch path is an exact `copy_from_slice` passthrough, so the output must
-    // equal the input bit-for-bit; the float equality here is intentional.
+    // Equal-width render is an exact copy; the float equality is intentional.
     #[allow(clippy::float_cmp)]
-    fn render_stereo_is_passthrough() {
-        let stereo = [1.0f32, 2.0, 3.0, 4.0];
-        let mut data = [0.0f32; 4];
-        render_stereo_to_output(&stereo, &mut data, 2);
-        assert_eq!(data, stereo);
+    fn render_equal_width_is_passthrough() {
+        let processed = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]; // 2 frames * 3ch
+        let mut data = [0.0f32; 6];
+        render_to_output(&processed, &mut data, 3, 3);
+        assert_eq!(data, processed);
     }
 
     #[test]
-    fn render_upmix_places_stereo_on_front_pair_rest_silent() {
-        let stereo = [1.0f32, 2.0, 3.0, 4.0]; // 2 frames
-        let mut data = [9.0f32; 12]; // 2 frames * 6ch, pre-filled to catch non-writes
-        render_stereo_to_output(&stereo, &mut data, 6);
-        assert_eq!(data[0..6], [1.0, 2.0, 0.0, 0.0, 0.0, 0.0]);
-        assert_eq!(data[6..12], [3.0, 4.0, 0.0, 0.0, 0.0, 0.0]);
+    #[allow(clippy::float_cmp)]
+    fn render_narrow_src_zero_pads_extra_device_channels() {
+        let processed = [1.0f32, 2.0, 3.0, 4.0]; // 2 frames * 2ch
+        let mut data = [9.0f32; 2 * 4]; // dst 4ch, pre-filled to catch non-writes
+        render_to_output(&processed, &mut data, 2, 4);
+        assert_eq!(data[0..4], [1.0, 2.0, 0.0, 0.0]);
+        assert_eq!(data[4..8], [3.0, 4.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn render_wide_src_drops_extra_channels() {
+        let processed = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]; // 2 frames * 3ch
+        let mut data = [0.0f32; 2 * 2]; // dst 2ch
+        render_to_output(&processed, &mut data, 3, 2);
+        assert_eq!(data[0..2], [1.0, 2.0]);
+        assert_eq!(data[2..4], [4.0, 5.0]);
     }
 
     #[test]
     fn render_zero_channels_is_noop() {
-        let stereo = [1.0f32, 2.0];
+        let processed = [1.0f32, 2.0];
         let mut data: [f32; 0] = [];
-        render_stereo_to_output(&stereo, &mut data, 0); // must not panic
+        render_to_output(&processed, &mut data, 2, 0); // must not panic
     }
 }
