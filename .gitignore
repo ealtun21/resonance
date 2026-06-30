@@ -11,6 +11,12 @@ target/
 # macOS app bundle (contrib/macos/build-app.sh output)
 /Resonance.app/
 
+# makepkg download + build artifacts in the -bin PKGBUILD dir. Its sources
+# (tarball, .desktop/.svg/.metainfo.xml/.service) are fetched per `source=()`
+# from the tagged release, not committed — only the PKGBUILD is tracked.
+/contrib/aur-bin/*
+!/contrib/aur-bin/PKGBUILD
+
 # Windows installer build artifacts (generated in CI)
 /contrib/windows/vbcable/
 /contrib/windows/resonance.ico
