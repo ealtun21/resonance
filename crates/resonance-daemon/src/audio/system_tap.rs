@@ -39,14 +39,16 @@ use objc2::rc::Retained;
 use objc2_core_audio::{
     AudioHardwareCreateAggregateDevice, AudioHardwareCreateProcessTap,
     AudioHardwareDestroyAggregateDevice, AudioHardwareDestroyProcessTap,
-    AudioObjectGetPropertyData, AudioObjectID, AudioObjectPropertyAddress, CATapDescription,
-    CATapMuteBehavior, kAudioAggregateDeviceIsPrivateKey, kAudioAggregateDeviceIsStackedKey,
+    AudioObjectGetPropertyData, AudioObjectID, AudioObjectPropertyAddress,
+    AudioObjectSetPropertyData, CATapDescription, CATapMuteBehavior,
+    kAudioAggregateDeviceIsPrivateKey, kAudioAggregateDeviceIsStackedKey,
     kAudioAggregateDeviceMainSubDeviceKey, kAudioAggregateDeviceNameKey,
     kAudioAggregateDeviceTapAutoStartKey, kAudioAggregateDeviceTapListKey,
     kAudioAggregateDeviceUIDKey, kAudioDevicePropertyDeviceUID,
-    kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyTranslatePIDToProcessObject,
-    kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal,
-    kAudioSubTapDriftCompensationKey, kAudioSubTapUIDKey, kAudioTapPropertyUID,
+    kAudioDevicePropertyNominalSampleRate, kAudioHardwarePropertyDefaultOutputDevice,
+    kAudioHardwarePropertyTranslatePIDToProcessObject, kAudioObjectPropertyElementMain,
+    kAudioObjectPropertyScopeGlobal, kAudioSubTapDriftCompensationKey, kAudioSubTapUIDKey,
+    kAudioTapPropertyUID,
 };
 use objc2_core_foundation::{
     CFArray, CFDictionary, CFMutableDictionary, CFRetained, CFString, CFType, kCFBooleanFalse,
@@ -69,6 +71,7 @@ const AGGREGATE_DEVICE_UID: &str = "com.ealtun21.resonance.tap-aggregate";
 pub struct SystemAudioTap {
     tap_id: AudioObjectID,
     aggregate_id: AudioObjectID,
+    native_rate: f64,
 }
 
 impl SystemAudioTap {
@@ -190,13 +193,21 @@ impl SystemAudioTap {
             ));
         }
 
+        // The aggregate's rate right after creation is the system-mix rate the
+        // tap natively sources (typically 48 kHz). We can retune the aggregate
+        // DOWN to a lower output rate (real content, no resample), but asking
+        // for MORE frames/sec than the mix produces makes the tap under-deliver
+        // and the output ring starves — so callers cap the forced rate here and
+        // resample up above it.
+        let native_rate = read_nominal_rate(agg_id).unwrap_or(48_000.0);
         info!(
             "Process tap ready (tap_id={tap_id}, aggregate_id={agg_id}, \
-             aggregate_name='{TAP_DEVICE_NAME}')"
+             aggregate_name='{TAP_DEVICE_NAME}', native_rate={native_rate} Hz)"
         );
         Ok(Self {
             tap_id,
             aggregate_id: agg_id,
+            native_rate,
         })
     }
 
@@ -212,6 +223,15 @@ impl SystemAudioTap {
     /// doesn't reliably expose the tap stream on aggregate devices.
     pub fn aggregate_id(&self) -> AudioObjectID {
         self.aggregate_id
+    }
+
+    /// The aggregate's native sample rate — the system-mix rate the tap sources
+    /// (typically 48 kHz). Output rates at or below this can be captured
+    /// directly (the tap downsamples internally, no resample on our side); above
+    /// it the tap can't source enough frames per second, so the backend keeps
+    /// the tap here and `hal_input` resamples up instead.
+    pub fn native_rate(&self) -> f64 {
+        self.native_rate
     }
 }
 
@@ -285,6 +305,97 @@ fn get_tap_uid(tap_id: AudioObjectID) -> Result<CFRetained<CFString>> {
     // that ownership into the CFRetained wrapper.
     let retained = unsafe { CFRetained::from_raw(uid_nn) };
     Ok(retained)
+}
+
+/// Read a device's current nominal sample rate
+/// (`kAudioDevicePropertyNominalSampleRate`). Returns `None` if the HAL rejects
+/// the query or reports a non-positive rate.
+fn read_nominal_rate(device_id: AudioObjectID) -> Option<f64> {
+    let mut addr = AudioObjectPropertyAddress {
+        mSelector: kAudioDevicePropertyNominalSampleRate,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+    let mut rate: f64 = 0.0;
+    let mut size = std::mem::size_of::<f64>() as u32;
+    // SAFETY: addr/size/rate are valid stack pointers held for the call. The
+    // selector returns a single f64 and `size` is initialised to its width.
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            device_id,
+            NonNull::new(std::ptr::from_mut(&mut addr)).unwrap(),
+            0,
+            std::ptr::null(),
+            NonNull::new(std::ptr::from_mut(&mut size)).unwrap(),
+            NonNull::new(std::ptr::from_mut(&mut rate).cast::<c_void>()).unwrap(),
+        )
+    };
+    (status == 0 && rate > 0.0).then_some(rate)
+}
+
+/// Drive the tap aggregate device to `target_hz` so the Process Tap captures at
+/// the output device's rate. This makes `hal_input`'s resampler a no-op
+/// (bypass) instead of converting the tap's default 48 kHz to the device rate on
+/// every block — the macOS path then sounds identical to the native 48 kHz one.
+///
+/// `CoreAudio` applies a nominal-rate change asynchronously, so after the set we
+/// poll the read-back until it settles: the `IOProc`'s stream-format query runs
+/// immediately afterwards and must observe the new rate. When the aggregate is
+/// already at `target_hz` (the common 48 kHz case) this is a single read with no
+/// wait. If the HAL refuses the change (older macOS, or an aggregate that pins
+/// its rate) we log it and leave the rate untouched, so `hal_input` keeps
+/// bridging the gap exactly as before — the tap never goes silent on failure.
+pub fn set_aggregate_nominal_rate(aggregate_id: AudioObjectID, target_hz: f64) {
+    // Already at the requested rate — no set, no settle wait.
+    if matches!(read_nominal_rate(aggregate_id), Some(cur) if (cur - target_hz).abs() < 1.0) {
+        return;
+    }
+
+    let mut addr = AudioObjectPropertyAddress {
+        mSelector: kAudioDevicePropertyNominalSampleRate,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+    let mut want = target_hz;
+    // SAFETY: addr + want are valid stack pointers; the selector takes a single
+    // f64 input of the size we pass. A non-zero status means the HAL declined.
+    let status = unsafe {
+        AudioObjectSetPropertyData(
+            aggregate_id,
+            NonNull::new(std::ptr::from_mut(&mut addr)).unwrap(),
+            0,
+            std::ptr::null(),
+            std::mem::size_of::<f64>() as u32,
+            NonNull::new(std::ptr::from_mut(&mut want).cast::<c_void>()).unwrap(),
+        )
+    };
+    if status != 0 {
+        warn!(
+            "set aggregate {aggregate_id} nominal rate → {target_hz} Hz failed \
+             (status={status}); tap stays at {:?} Hz and hal_input will resample",
+            read_nominal_rate(aggregate_id)
+        );
+        return;
+    }
+
+    // The change is asynchronous; wait (on this supervisor thread, never the RT
+    // audio thread) for the device to converge before the IOProc reads its
+    // format. Caps at ~500 ms; converges in a few × 10 ms in practice.
+    for _ in 0..50 {
+        if matches!(read_nominal_rate(aggregate_id), Some(now) if (now - target_hz).abs() < 1.0) {
+            info!(
+                "aggregate {aggregate_id} nominal rate now {target_hz} Hz — tap matches \
+                 output, no resampling"
+            );
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    warn!(
+        "aggregate {aggregate_id} did not reach {target_hz} Hz (now {:?} Hz); \
+         hal_input will resample the remaining gap",
+        read_nominal_rate(aggregate_id)
+    );
 }
 
 /// Convert a static C-string aggregate-device key into a `CFString`. Apple's

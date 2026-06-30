@@ -26,14 +26,13 @@
 //! "Microphone" TCC permission (prompted on first run).
 
 use super::hal_input::HalInputStream;
-use super::system_tap::{SystemAudioTap, TAP_DEVICE_NAME};
+use super::system_tap::{SystemAudioTap, TAP_DEVICE_NAME, set_aggregate_nominal_rate};
 use super::{CHANNELS, apply_command};
 use crate::meters::{AtomicMeters, Sample, peak_rms, peak_rms_f32};
 use crate::state::AudioCommand;
 use anyhow::{Context, Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, Host, StreamConfig};
-use objc2_core_audio::AudioObjectID;
 use resonance_dsp::chain::ProcessorChain;
 use std::sync::{
     Arc, Mutex,
@@ -111,7 +110,6 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
 
                 let started = Instant::now();
                 let pref_snapshot = preferred_output.clone();
-                let agg_id = tap.as_ref().unwrap().aggregate_id();
                 match run_streams(
                     &shared,
                     pref_snapshot.as_deref(),
@@ -119,7 +117,7 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
                     &sinks_tx,
                     &mut last_active_output,
                     &route_rx,
-                    agg_id,
+                    tap.as_ref().unwrap(),
                 ) {
                     Ok(StreamExit::RouteChanged(new_pref)) => {
                         preferred_output = if new_pref.is_empty() {
@@ -174,8 +172,10 @@ fn run_streams(
     sinks_tx: &tokio::sync::mpsc::UnboundedSender<Vec<(String, String)>>,
     last_active_output: &mut Option<String>,
     route_rx: &std_mpsc::Receiver<String>,
-    tap_aggregate_id: AudioObjectID,
+    tap: &SystemAudioTap,
 ) -> Result<StreamExit> {
+    let tap_aggregate_id = tap.aggregate_id();
+    let tap_native_rate = tap.native_rate();
     let host = cpal::default_host();
     let output_dev = pick_output_device(&host, preferred)?;
     let output_name = device_name(&output_dev);
@@ -190,6 +190,15 @@ fn run_streams(
         sample_rate,
         buffer_size: cpal::BufferSize::Default,
     };
+
+    // Capture at the output rate when the tap can source it (≤ its native mix
+    // rate) so hal_input bypasses the resampler — no 48 kHz → device-rate
+    // conversion. Above the native rate the tap would under-deliver and the
+    // output ring would starve, so cap the tap at native and let hal_input
+    // resample up instead. A no-op when already matched; on a HAL refusal the
+    // tap stays put and hal_input resamples, exactly as before.
+    let tap_target = f64::from(sample_rate).min(tap_native_rate);
+    set_aggregate_nominal_rate(tap_aggregate_id, tap_target);
 
     {
         let mut guard = shared.lock().unwrap();
@@ -294,6 +303,17 @@ fn run_streams(
                         info!("CoreAudio: default output changed → {cur}; rebuilding");
                         return Ok(StreamExit::Ended);
                     }
+                }
+            }
+            // Follow a sample-rate change on the SAME device (Audio MIDI Setup
+            // change, BT codec renegotiation). cpal's default config reflects
+            // the device's current nominal rate; a change means the streams and
+            // the tap rate are stale, so rebuild to re-derive both.
+            if let Ok(cfg) = output_dev.default_output_config() {
+                let new_rate = cfg.sample_rate();
+                if new_rate != sample_rate {
+                    info!("CoreAudio: output rate {sample_rate} → {new_rate} Hz; rebuilding");
+                    return Ok(StreamExit::Ended);
                 }
             }
         }
