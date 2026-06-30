@@ -3,7 +3,7 @@
 //! Apple introduced [`CATapDescription`] + [`AudioHardwareCreateProcessTap`]
 //! in macOS 14.2. They let an unprivileged user-space process *tap* the
 //! audio that other processes send to the system mixer, without installing
-//! a kernel extension or an AudioServerPlugIn (which is what BlackHole or
+//! a kernel extension or an `AudioServerPlugIn` (which is what BlackHole or
 //! Loopback ship). Apple Music, browsers, games, calls — everything that
 //! plays through the system goes through the tap.
 //!
@@ -60,7 +60,7 @@ use tracing::{info, warn};
 /// Name the aggregate device shows up as in cpal/Audio MIDI Setup. cpal
 /// enumerates devices by name; we look it up by exactly this string.
 pub const TAP_DEVICE_NAME: &str = "Resonance EQ Tap";
-/// Stable UID for the aggregate device. UID is what AudioMIDI / cpal use
+/// Stable UID for the aggregate device. UID is what `AudioMIDI` / cpal use
 /// to identify devices across reboots; keep ours unique to the app.
 const AGGREGATE_DEVICE_UID: &str = "com.ealtun21.resonance.tap-aggregate";
 
@@ -105,7 +105,7 @@ impl SystemAudioTap {
                  feedback loop possible (tap will capture our own output)"
             );
         }
-        let exclude_refs: Vec<&NSNumber> = excludes.iter().map(|n| n.as_ref()).collect();
+        let exclude_refs: Vec<&NSNumber> = excludes.iter().map(Retained::as_ref).collect();
         let exclude_arr: Retained<NSArray<NSNumber>> = NSArray::from_slice(&exclude_refs);
         // SAFETY: CATapDescription's allocator/init pair are a normal
         // Objective-C alloc/init sequence. With Exclusive=YES (set below)
@@ -150,7 +150,7 @@ impl SystemAudioTap {
             ));
         }
 
-        let tap_uid = match get_tap_uid(tap_id) {
+        let tap_uid_string = match get_tap_uid(tap_id) {
             Ok(uid) => uid,
             Err(e) => {
                 // SAFETY: tap_id was created above and not yet returned.
@@ -168,10 +168,10 @@ impl SystemAudioTap {
         // treated the speakers as the primary stream and the tap as a
         // secondary input that never received samples. Leaving main_sub
         // unset lets the tap be the source.
-        let dict = build_aggregate_dict(&tap_uid, None);
+        let dict = build_aggregate_dict(&tap_uid_string, None);
 
         let mut agg_id: AudioObjectID = 0;
-        let agg_ptr = NonNull::new(&mut agg_id as *mut AudioObjectID).unwrap();
+        let agg_ptr = NonNull::new(std::ptr::from_mut(&mut agg_id)).unwrap();
         // SAFETY: dict is a valid CFDictionary built above with the right
         // keys/value types per Apple's aggregate-device specification.
         // agg_ptr is a valid pointer to a stack u32. CFMutableDictionary
@@ -201,7 +201,7 @@ impl SystemAudioTap {
 
     /// Aggregate device name — what cpal sees when enumerating inputs.
     #[allow(dead_code)] // intended for debug logging from callers
-    pub fn device_name(&self) -> &'static str {
+    pub fn device_name() -> &'static str {
         TAP_DEVICE_NAME
     }
 
@@ -247,7 +247,7 @@ impl Drop for SystemAudioTap {
 unsafe impl Send for SystemAudioTap {}
 unsafe impl Sync for SystemAudioTap {}
 
-/// Query the tap's UID. AudioObjectGetPropertyData returns a `CFStringRef`
+/// Query the tap's UID. `AudioObjectGetPropertyData` returns a `CFStringRef`
 /// (= `*const CFString`) when the selector is `kAudioTapPropertyUID`.
 fn get_tap_uid(tap_id: AudioObjectID) -> Result<CFRetained<CFString>> {
     let mut addr = AudioObjectPropertyAddress {
@@ -270,7 +270,7 @@ fn get_tap_uid(tap_id: AudioObjectID) -> Result<CFRetained<CFString>> {
             0,
             std::ptr::null(),
             size_ptr,
-            NonNull::new(&mut uid_ptr as *mut _ as *mut c_void).unwrap(),
+            NonNull::new(std::ptr::from_mut(&mut uid_ptr).cast::<c_void>()).unwrap(),
         )
     };
     if status != 0 || uid_ptr.is_null() {
@@ -278,7 +278,7 @@ fn get_tap_uid(tap_id: AudioObjectID) -> Result<CFRetained<CFString>> {
             "AudioObjectGetPropertyData(kAudioTapPropertyUID) failed (status={status})"
         ));
     }
-    let uid_nn = NonNull::new(uid_ptr as *mut CFString)
+    let uid_nn = NonNull::new(uid_ptr.cast_mut())
         .ok_or_else(|| anyhow!("tap UID property returned null"))?;
     // SAFETY: HAL handed us a +1 retained CFString; from_raw transfers
     // that ownership into the CFRetained wrapper.
@@ -286,7 +286,7 @@ fn get_tap_uid(tap_id: AudioObjectID) -> Result<CFRetained<CFString>> {
     Ok(retained)
 }
 
-/// Convert a static C-string aggregate-device key into a CFString. Apple's
+/// Convert a static C-string aggregate-device key into a `CFString`. Apple's
 /// key constants come through objc2-core-audio as `&CStr`.
 fn cf_key(k: &CStr) -> CFRetained<CFString> {
     // Going through Rust str is the simplest path (the keys are short
@@ -295,15 +295,15 @@ fn cf_key(k: &CStr) -> CFRetained<CFString> {
     CFString::from_str(s)
 }
 
-/// Untyped CFDictionarySetValue wrapper. Bypasses the typed
-/// `CFMutableDictionary::set` so we can mix value kinds (CFString,
-/// CFBoolean, CFArray) in one dict without a generic-parameter war.
+/// Untyped `CFDictionarySetValue` wrapper. Bypasses the typed
+/// `CFMutableDictionary::set` so we can mix value kinds (`CFString`,
+/// `CFBoolean`, `CFArray`) in one dict without a generic-parameter war.
 ///
 /// # Safety
-/// `dict` must be a valid CFMutableDictionary. `key` and `value` must
-/// be CFType pointers valid for the duration of this call. CFMutableDictionary
+/// `dict` must be a valid `CFMutableDictionary`. `key` and `value` must
+/// be `CFType` pointers valid for the duration of this call. `CFMutableDictionary`
 /// retains both internally, so the caller's local references stay valid.
-/// The generic parameters on the typed CFMutableDictionary are erased here
+/// The generic parameters on the typed `CFMutableDictionary` are erased here
 /// — the underlying Core Foundation object is identical regardless of K/V.
 unsafe fn dict_set<K: ?Sized, V: ?Sized>(
     dict: &CFMutableDictionary<K, V>,
@@ -315,15 +315,15 @@ unsafe fn dict_set<K: ?Sized, V: ?Sized>(
     // C struct. The generics are a Rust-only convenience for the typed
     // accessor methods. Reinterpret to the untyped variant before calling
     // the raw setter.
-    let raw = dict as *const CFMutableDictionary<K, V> as *const CFMutableDictionary;
+    let raw = (dict as *const CFMutableDictionary<K, V>).cast::<CFMutableDictionary>();
     unsafe {
         CFMutableDictionary::set_value(Some(&*raw), key, value);
     }
 }
 
-/// Translate a POSIX pid into a Core Audio process AudioObjectID. The
+/// Translate a POSIX pid into a Core Audio process `AudioObjectID`. The
 /// HAL exposes processes as audio objects (one per running app that has
-/// touched Core Audio); CATapDescription expects these object IDs in its
+/// touched Core Audio); `CATapDescription` expects these object IDs in its
 /// exclude / include lists, not raw pids.
 ///
 /// Returns None on translation failure (process hasn't yet been seen by
@@ -346,9 +346,9 @@ fn translate_pid_to_process_object(pid: i32) -> Option<u32> {
             1,
             NonNull::new(&mut addr).unwrap(),
             std::mem::size_of::<i32>() as u32,
-            &pid_qualifier as *const i32 as *const c_void,
+            std::ptr::from_ref(&pid_qualifier).cast::<c_void>(),
             NonNull::new(&mut size).unwrap(),
-            NonNull::new(&mut object_id as *mut _ as *mut c_void).unwrap(),
+            NonNull::new(std::ptr::from_mut(&mut object_id).cast::<c_void>()).unwrap(),
         )
     };
     if status != 0 || object_id == 0 {
@@ -358,7 +358,7 @@ fn translate_pid_to_process_object(pid: i32) -> Option<u32> {
 }
 
 /// Query the system's current default output device and return its UID
-/// (e.g. "BuiltInSpeakerDevice"). Used to give the tap-only aggregate a
+/// (e.g. `"BuiltInSpeakerDevice"`). Used to give the tap-only aggregate a
 /// stable clock source. Currently unused: tests showed the aggregate
 /// produces silent buffers when a main sub-device is set, so we leave
 /// it out and let the tap clock itself. Kept here so we can re-enable
@@ -383,7 +383,7 @@ fn default_output_uid() -> Result<CFRetained<CFString>> {
             0,
             std::ptr::null(),
             size_ptr,
-            NonNull::new(&mut dev_id as *mut _ as *mut c_void).unwrap(),
+            NonNull::new(std::ptr::from_mut(&mut dev_id).cast::<c_void>()).unwrap(),
         )
     };
     if status != 0 || dev_id == 0 {
@@ -410,7 +410,7 @@ fn default_output_uid() -> Result<CFRetained<CFString>> {
             0,
             std::ptr::null(),
             uid_size_ptr,
-            NonNull::new(&mut uid_ptr as *mut _ as *mut c_void).unwrap(),
+            NonNull::new(std::ptr::from_mut(&mut uid_ptr).cast::<c_void>()).unwrap(),
         )
     };
     if status != 0 || uid_ptr.is_null() {
@@ -419,12 +419,12 @@ fn default_output_uid() -> Result<CFRetained<CFString>> {
              (status={status})"
         ));
     }
-    let nn = NonNull::new(uid_ptr as *mut CFString).unwrap();
+    let nn = NonNull::new(uid_ptr.cast_mut()).unwrap();
     // SAFETY: HAL hands us a +1 retained CFString for this property.
     Ok(unsafe { CFRetained::from_raw(nn) })
 }
 
-/// Build the CFDictionary that describes the aggregate device wrapping the
+/// Build the `CFDictionary` that describes the aggregate device wrapping the
 /// tap. Keys come from `<CoreAudio/AudioHardware.h>` — we use the constants
 /// objc2-core-audio re-exports. `main_sub_uid` is the UID of an existing
 /// real audio device used purely as the clock source; without it a
@@ -455,18 +455,18 @@ fn build_aggregate_dict(
         dict_set(
             &sub_tap_dict,
             CFRetained::as_ptr(&sub_uid_key).as_ptr() as *const c_void,
-            tap_uid as *const CFString as *const c_void,
+            (tap_uid as *const CFString).cast::<c_void>(),
         );
         dict_set(
             &sub_tap_dict,
             CFRetained::as_ptr(&sub_drift_key).as_ptr() as *const c_void,
-            drift_true as *const _ as *const c_void,
+            (drift_true as *const _).cast::<c_void>(),
         );
     }
 
     // Tap list: a CFArray of one dict (CFType element type).
     let sub_as_cf: &CFType = unsafe {
-        &*(&*sub_tap_dict as *const CFMutableDictionary<CFString, CFType> as *const CFType)
+        &*(&*sub_tap_dict as *const CFMutableDictionary<CFString, CFType>).cast::<CFType>()
     };
     let tap_list: CFRetained<CFArray<CFType>> = CFArray::from_objects(&[sub_as_cf]);
 
@@ -497,12 +497,12 @@ fn build_aggregate_dict(
         dict_set(
             &dict,
             CFRetained::as_ptr(&priv_k).as_ptr() as *const c_void,
-            priv_true as *const _ as *const c_void,
+            (priv_true as *const _).cast::<c_void>(),
         );
         dict_set(
             &dict,
             CFRetained::as_ptr(&stacked_k).as_ptr() as *const c_void,
-            priv_false as *const _ as *const c_void,
+            (priv_false as *const _).cast::<c_void>(),
         );
         dict_set(
             &dict,
@@ -516,13 +516,13 @@ fn build_aggregate_dict(
         dict_set(
             &dict,
             CFRetained::as_ptr(&autostart_k).as_ptr() as *const c_void,
-            priv_false as *const _ as *const c_void,
+            (priv_false as *const _).cast::<c_void>(),
         );
         if let Some(uid) = main_sub_uid {
             dict_set(
                 &dict,
                 CFRetained::as_ptr(&main_k).as_ptr() as *const c_void,
-                uid as *const CFString as *const c_void,
+                (uid as *const CFString).cast::<c_void>(),
             );
         }
     }

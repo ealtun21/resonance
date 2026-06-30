@@ -163,10 +163,10 @@ mod native_titlebar {
 
 /// macOS: vertically centre the window's traffic-light buttons within our
 /// toolbar. With the unified (transparent) title bar the toolbar is taller than
-/// the standard title bar AppKit lays the buttons out for, so they sit high and
+/// the standard title bar `AppKit` lays the buttons out for, so they sit high and
 /// look top-aligned; we nudge them to the toolbar's vertical centre. Re-applied
-/// each frame because AppKit re-lays them out on resize. Best-effort: any missing
-/// piece just leaves the buttons where AppKit put them.
+/// each frame because `AppKit` re-lays them out on resize. Best-effort: any missing
+/// piece just leaves the buttons where `AppKit` put them.
 #[cfg(target_os = "macos")]
 mod traffic_lights {
     use objc2::MainThreadMarker;
@@ -1316,7 +1316,7 @@ impl GuiApp {
         let toolbar = egui::Panel::top("toolbar").show_inside(ui, |ui| self.toolbar(ui));
         // macOS: keep the traffic lights centred in the toolbar (see module docs).
         #[cfg(target_os = "macos")]
-        traffic_lights::center(toolbar.response.rect.height() as f64);
+        traffic_lights::center(f64::from(toolbar.response.rect.height()));
         #[cfg(not(target_os = "macos"))]
         let _ = toolbar;
 

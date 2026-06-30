@@ -327,7 +327,7 @@ fn system_accent() -> Option<Color32> {
     }
     #[cfg(target_os = "macos")]
     {
-        macos_accent()
+        Some(macos_accent())
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
@@ -354,7 +354,7 @@ fn system_is_dark() -> bool {
     }
     #[cfg(target_os = "macos")]
     {
-        macos_is_dark().unwrap_or(true)
+        macos_is_dark()
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
@@ -458,13 +458,13 @@ fn defaults_global(key: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_accent() -> Option<Color32> {
+fn macos_accent() -> Color32 {
     // AppleAccentColor: -1 graphite, 0 red, 1 orange, 2 yellow, 3 green, 4 blue,
     // 5 purple, 6 pink. The key is absent when the user keeps the default blue.
     let idx = defaults_global("AppleAccentColor")
         .and_then(|s| s.parse::<i32>().ok())
         .unwrap_or(4);
-    Some(match idx {
+    match idx {
         -1 => rgb(140, 140, 148),
         0 => rgb(255, 82, 89),
         1 => rgb(247, 143, 42),
@@ -473,16 +473,12 @@ fn macos_accent() -> Option<Color32> {
         5 => rgb(150, 90, 225),
         6 => rgb(245, 100, 170),
         _ => rgb(10, 110, 235),
-    })
+    }
 }
 
 #[cfg(target_os = "macos")]
-fn macos_is_dark() -> Option<bool> {
-    Some(
-        defaults_global("AppleInterfaceStyle")
-            .map(|s| s.eq_ignore_ascii_case("Dark"))
-            .unwrap_or(false),
-    )
+fn macos_is_dark() -> bool {
+    defaults_global("AppleInterfaceStyle").map_or(false, |s| s.eq_ignore_ascii_case("Dark"))
 }
 
 // ── matugen / pywal palette loading ─────────────────────────────────────────

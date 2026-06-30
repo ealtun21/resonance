@@ -1,14 +1,14 @@
 //! Raw Core Audio HAL input for the tap aggregate device.
 //!
-//! cpal opens devices via AudioUnit (AUHAL). AUHAL is designed for hardware
+//! cpal opens devices via `AudioUnit` (AUHAL). AUHAL is designed for hardware
 //! input devices and does not reliably surface the tap's input stream on a
 //! private aggregate device that wraps a `kAudioSubTapUIDKey` entry: it
 //! ends up opening a real (but unused) sub-device's stream and reads
 //! silence. The fix is to skip AUHAL entirely and register an
-//! `AudioDeviceIOProcID` on the aggregate. The HAL fills the IOProc's
+//! `AudioDeviceIOProcID` on the aggregate. The HAL fills the `IOProc`'s
 //! `inInputData` `AudioBufferList` straight from the tap.
 //!
-//! This module owns the IOProc registration + start/stop lifecycle, and
+//! This module owns the `IOProc` registration + start/stop lifecycle, and
 //! routes incoming samples into an SPSC ring buffer for the DSP/output
 //! thread to consume — same contract the cpal input had before.
 
@@ -31,12 +31,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{info, warn};
 
-/// Number of stereo frames per IOProc callback we pre-allocate scratch for.
+/// Number of stereo frames per `IOProc` callback we pre-allocate scratch for.
 /// Apple's tap typically delivers 512–1024 frames; we size generously.
 const MAX_FRAMES_PER_CYCLE: usize = 8192;
 
 /// Owns an active `AudioDeviceIOProc` on the aggregate device. Drop
-/// stops the device and unregisters the IOProc so the HAL forgets us.
+/// stops the device and unregisters the `IOProc` so the HAL forgets us.
 pub struct HalInputStream {
     device_id: AudioObjectID,
     io_proc_id: AudioDeviceIOProcID,
@@ -44,13 +44,13 @@ pub struct HalInputStream {
     // receives stays valid for the stream's lifetime even if we move
     // the struct around.
     _state: Box<IoState>,
-    /// Total number of IOProc invocations — bumped from the audio thread.
+    /// Total number of `IOProc` invocations — bumped from the audio thread.
     pub callback_count: Arc<AtomicU64>,
-    /// IOProc invocations whose input buffer contained at least one
+    /// `IOProc` invocations whose input buffer contained at least one
     /// non-zero sample — distinguishes "tap silent" from "tap not firing".
     pub nonzero_blocks: Arc<AtomicU64>,
     /// The tap's capture sample rate (Hz). Surfaced so the supervisor can report
-    /// it for `status` (and tell whether the IOProc is resampling).
+    /// it for `status` (and tell whether the `IOProc` is resampling).
     pub capture_rate: f64,
 }
 
@@ -61,14 +61,14 @@ struct IoState {
     ring_tx: rtrb::Producer<f32>,
     /// Format the aggregate device reports (sample rate, channel count,
     /// interleaved vs. planar). Captured at open time and used by the
-    /// IOProc to decode the buffer layout.
+    /// `IOProc` to decode the buffer layout.
     format: AudioStreamBasicDescription,
     /// Converts the tap capture rate (`format.mSampleRate`) to the output
-    /// device rate. Bypasses when the two already match. Stereo (the IOProc
+    /// device rate. Bypasses when the two already match. Stereo (the `IOProc`
     /// always emits L/R pairs). Without this, a tap clocked differently from
     /// the output device plays back at the wrong pitch.
     resampler: StreamResampler<f32>,
-    /// Interleaved stereo f32 scratch the IOProc assembles before resampling —
+    /// Interleaved stereo f32 scratch the `IOProc` assembles before resampling —
     /// pre-allocated so the audio thread never allocates.
     in_scratch: Vec<f32>,
     callback_count: Arc<AtomicU64>,
@@ -76,10 +76,10 @@ struct IoState {
 }
 
 impl HalInputStream {
-    /// Register an IOProc on the given aggregate device and start it.
+    /// Register an `IOProc` on the given aggregate device and start it.
     ///
     /// `output_rate` is the sample rate the playback side (and the DSP chain)
-    /// runs at. The IOProc resamples the tap's capture rate to this rate before
+    /// runs at. The `IOProc` resamples the tap's capture rate to this rate before
     /// pushing into the ring, so capture/playback rate mismatches (BT codecs,
     /// 44.1 kHz DACs) don't shift pitch.
     pub fn open(
@@ -123,8 +123,8 @@ impl HalInputStream {
             AudioDeviceCreateIOProcID(
                 device_id,
                 Some(io_proc),
-                state_ptr as *mut c_void,
-                NonNull::new(&mut proc_id).unwrap(),
+                state_ptr.cast::<c_void>(),
+                NonNull::new(std::ptr::from_mut(&mut proc_id)).unwrap(),
             )
         };
         if status != 0 || proc_id.is_none() {
@@ -192,11 +192,11 @@ impl Drop for HalInputStream {
 unsafe impl Send for HalInputStream {}
 unsafe impl Sync for HalInputStream {}
 
-/// The raw HAL IOProc. Called from a real-time audio thread owned by the
+/// The raw HAL `IOProc`. Called from a real-time audio thread owned by the
 /// Core Audio HAL. Must NOT allocate, lock, or call back into Cocoa.
 ///
 /// # Safety
-/// Apple guarantees the buffer pointers, `inClientData`, and AudioBufferList
+/// Apple guarantees the buffer pointers, `inClientData`, and `AudioBufferList`
 /// memory are valid for the duration of the call. `inClientData` is the
 /// `*mut IoState` we registered via `AudioDeviceCreateIOProcID`.
 unsafe extern "C-unwind" fn io_proc(
@@ -213,7 +213,7 @@ unsafe extern "C-unwind" fn io_proc(
     }
     // SAFETY: in_client_data is our `*mut IoState`, kept alive by the
     // owning HalInputStream until AudioDeviceStop returns.
-    let state = unsafe { &mut *(in_client_data as *mut IoState) };
+    let state = unsafe { &mut *(in_client_data.cast::<IoState>()) };
     state.callback_count.fetch_add(1, Ordering::Relaxed);
 
     let bufs = unsafe { in_input_data.as_ref() };
@@ -318,7 +318,7 @@ unsafe extern "C-unwind" fn io_proc(
     0
 }
 
-/// Read the aggregate device's INPUT-scope StreamFormat so the IOProc knows
+/// Read the aggregate device's INPUT-scope `StreamFormat` so the `IOProc` knows
 /// the channel count + interleaving layout it'll receive.
 fn query_input_format(device_id: AudioObjectID) -> Result<AudioStreamBasicDescription> {
     let mut addr = AudioObjectPropertyAddress {
@@ -341,11 +341,11 @@ fn query_input_format(device_id: AudioObjectID) -> Result<AudioStreamBasicDescri
     let status = unsafe {
         AudioObjectGetPropertyData(
             device_id,
-            NonNull::new(&mut addr).unwrap(),
+            NonNull::new(std::ptr::from_mut(&mut addr)).unwrap(),
             0,
             std::ptr::null(),
-            NonNull::new(&mut size).unwrap(),
-            NonNull::new(&mut asbd as *mut _ as *mut c_void).unwrap(),
+            NonNull::new(std::ptr::from_mut(&mut size)).unwrap(),
+            NonNull::new(std::ptr::from_mut(&mut asbd).cast::<c_void>()).unwrap(),
         )
     };
     if status != 0 {
