@@ -581,7 +581,7 @@ impl GuiApp {
         let theme = cc
             .storage
             .and_then(|s| s.get_string("theme"))
-            .map_or(Theme::Resonance, |s| Theme::from_label(&s));
+            .map_or(Theme::System, |s| Theme::from_label(&s));
         cc.egui_ctx.set_visuals(theme.visuals());
         // Restore the reference overlay (measurement + target) from a previous
         // session so a loaded measurement persists across restarts.
