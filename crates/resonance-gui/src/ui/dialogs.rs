@@ -4,6 +4,7 @@
 use crate::app::GuiApp;
 use crate::browser::{Browser, Item};
 use crate::state::{Confirm, Dialog};
+use crate::theme::Theme;
 use crate::ui::icons::Icon;
 use crate::ui::kit;
 use crate::ui::widgets::dialog_window;
@@ -109,6 +110,59 @@ impl GuiApp {
             });
         if !open {
             self.show_help = false;
+        }
+    }
+
+    // ── Settings dialog ─────────────────────────────────────────────────────
+
+    /// App settings modal: advanced-feature visibility toggles, the relocated
+    /// channel controls, and the theme picker (moved out of the overflow menu).
+    pub(crate) fn settings_dialog(&mut self, ctx: &egui::Context) {
+        if !matches!(self.dialog, Dialog::Settings) {
+            return;
+        }
+        let mut open = true;
+        let state = self.state.clone();
+        dialog_window(ctx, "Settings")
+            .open(&mut open)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("Advanced features").strong());
+                    ui.weak("Hidden by default to keep the main view clean.");
+                    ui.add_space(4.0);
+                    ui.checkbox(&mut self.show_slope, "Filter slope column (12/24/48 dB/oct)");
+                    ui.checkbox(&mut self.show_scope, "Stereo scope column (Mid/Side)");
+                    ui.checkbox(&mut self.show_dither, "Output dither section");
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("Channels").strong());
+                    if let Some(s) = &state {
+                        if s.channels >= 2 {
+                            self.channels_section(ui, s);
+                        } else {
+                            ui.weak("Stereo or multichannel output required.");
+                        }
+                    } else {
+                        ui.weak("Connect the daemon to configure channels.");
+                    }
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("Theme").strong());
+                    let cctx = ui.ctx().clone();
+                    for t in Theme::ALL {
+                        if ui.selectable_label(self.theme == t, t.label()).clicked() {
+                            self.set_theme(&cctx, t);
+                        }
+                    }
+                });
+            });
+        if !open {
+            self.dialog = Dialog::None;
         }
     }
 

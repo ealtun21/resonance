@@ -1417,6 +1417,7 @@ impl GuiApp {
         self.export_dialog(ctx);
         self.confirm_dialog(ctx);
         self.help_dialog(ctx);
+        self.settings_dialog(ctx);
         self.browse_dialog(ctx);
         self.manage_dialog(ctx);
         self.curve_picker_dialog(ctx);
