@@ -5,7 +5,7 @@ use crate::state::Confirm;
 use crate::theme::Palette;
 use crate::ui::icons::Icon;
 use crate::ui::kit;
-use crate::ui::widgets::{gain_color, section_hint};
+use crate::ui::widgets::gain_color;
 use eframe::egui;
 use resonance_ipc::{Command, DaemonState, RoutingMatrix};
 
@@ -75,14 +75,12 @@ struct ProfileRow<'a> {
 impl GuiApp {
     // ── Right column: devices → profiles + profile list ─────────────────────
 
-    pub(crate) fn devices_profiles(&mut self, ui: &mut egui::Ui) {
-        section_hint(ui, "Device → Profile", "auto-switch", |ui| {
-            self.device_mapping_section(ui);
-        });
-        ui.add_space(12.0);
+    /// Right-aligned hint for the Profiles card head: "N saved", or "shown/N
+    /// saved" when the filter is active.
+    pub(crate) fn profiles_saved_hint(&self) -> String {
         let n = self.profiles.len();
         let filt = self.profile_filter.trim().to_lowercase();
-        let saved = if filt.is_empty() {
+        if filt.is_empty() {
             format!("{n} saved")
         } else {
             let shown = self
@@ -91,9 +89,7 @@ impl GuiApp {
                 .filter(|p| p.to_lowercase().contains(&filt))
                 .count();
             format!("{shown}/{n} saved")
-        };
-        section_hint(ui, "Profiles", &saved, |ui| self.profiles_panel(ui));
-        // Channels now lives under Effects (left column, matching the mock).
+        }
     }
 
     /// Channel layout + routing controls: shows the in→out channel counts +

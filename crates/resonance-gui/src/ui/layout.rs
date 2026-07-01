@@ -3,6 +3,7 @@
 //! lower area).
 
 use crate::app::{GuiApp, ServiceAction, ServiceFn};
+use crate::card_layout::{CardCol, CardId};
 use crate::ui::kit;
 use crate::ui::widgets::{padded_scroll, section, section_hint};
 use eframe::egui;
@@ -180,6 +181,68 @@ impl GuiApp {
         }
     }
 
+    /// Render one control card by id, wrapped in its section frame. Returns true
+    /// if it drew anything — absent Applications/Outputs cards draw nothing and
+    /// return false, so the caller can skip their inter-card spacing.
+    fn render_card(&mut self, ui: &mut egui::Ui, s: &DaemonState, id: CardId) -> bool {
+        match id {
+            CardId::Effects => {
+                section_hint(ui, "Effects", "DSP sound effects", |ui| {
+                    self.effects_section(ui, s);
+                });
+                // Output stage (dither) rides under Effects when enabled.
+                if self.show_dither {
+                    ui.add_space(12.0);
+                    section_hint(ui, "Output", "dither", |ui| {
+                        self.output_section(ui, s);
+                    });
+                }
+                true
+            }
+            CardId::Applications => {
+                if s.apps.is_empty() {
+                    return false;
+                }
+                section_hint(ui, "Applications", "per-app volume", |ui| {
+                    self.apps_section(ui, s);
+                });
+                true
+            }
+            CardId::Outputs => {
+                if s.sinks.is_empty() {
+                    return false;
+                }
+                section_hint(ui, "Outputs", "device volume", |ui| {
+                    self.sinks_section(ui, s);
+                });
+                true
+            }
+            CardId::DeviceMap => {
+                section_hint(ui, "Device → Profile", "auto-switch", |ui| {
+                    self.device_mapping_section(ui);
+                });
+                true
+            }
+            CardId::Profiles => {
+                let saved = self.profiles_saved_hint();
+                section_hint(ui, "Profiles", &saved, |ui| self.profiles_panel(ui));
+                true
+            }
+        }
+    }
+
+    /// Render one wide-layout side column from the persisted card order. Normal
+    /// mode draws the live cards (skipping absent ones); edit mode (Task 5) draws
+    /// compact draggable tiles with drop zones.
+    fn render_lower_column(&mut self, ui: &mut egui::Ui, s: &DaemonState, col: CardCol) {
+        let ids = self.layout.column(col).to_vec();
+        for id in &ids {
+            if self.render_card(ui, s, *id) {
+                ui.add_space(12.0);
+            }
+        }
+    }
+
     /// Wide layout: three columns — Effects | EQ bands (flexible centre) |
     /// Devices/Profiles — that FILL the width like a native desktop app's panes
     /// (thin splitter rules between them). EQ bands takes all the slack so its
@@ -198,18 +261,7 @@ impl GuiApp {
             .show_inside(ui, |ui| {
                 if let Some(s) = state {
                     padded_scroll(ui, "effects_scroll", |ui| {
-                        section_hint(ui, "Effects", "DSP sound effects", |ui| {
-                            self.effects_section(ui, s);
-                        });
-                        // Output stage (dither) — advanced, off by default. The
-                        // Channels controls now live in the Settings dialog (gear
-                        // icon) to keep the main view uncluttered.
-                        if self.show_dither {
-                            ui.add_space(12.0);
-                            section_hint(ui, "Output", "dither", |ui| {
-                                self.output_section(ui, s);
-                            });
-                        }
+                        self.render_lower_column(ui, s, CardCol::Left);
                     });
                 }
             });
@@ -219,26 +271,11 @@ impl GuiApp {
             .frame(egui::Frame::NONE)
             .show_separator_line(false)
             .show_inside(ui, |ui| {
-                padded_scroll(ui, "side", |ui| {
-                    // Applications (per-app volume) sits at the top of the right
-                    // column when the backend reports app streams — adjusted more
-                    // often than the device→profile mapping below it.
-                    if let Some(s) = state {
-                        if !s.apps.is_empty() {
-                            section_hint(ui, "Applications", "per-app volume", |ui| {
-                                self.apps_section(ui, s);
-                            });
-                            ui.add_space(12.0);
-                        }
-                        if !s.sinks.is_empty() {
-                            section_hint(ui, "Outputs", "device volume", |ui| {
-                                self.sinks_section(ui, s);
-                            });
-                            ui.add_space(12.0);
-                        }
-                    }
-                    self.devices_profiles(ui);
-                });
+                if let Some(s) = state {
+                    padded_scroll(ui, "side", |ui| {
+                        self.render_lower_column(ui, s, CardCol::Right);
+                    });
+                }
             });
         // The centre column IS the bands card: a card-styled CentralPanel (so it
         // fills the column height), with the gutter as its outer margin. Its body
@@ -268,37 +305,21 @@ impl GuiApp {
             .inner_margin(egui::Margin::symmetric(8, 6))
             .show(ui, |ui| {
                 if let Some(s) = state {
-                    section_hint(ui, "Effects", "DSP sound effects", |ui| {
-                        self.effects_section(ui, s);
-                    });
-                    if self.show_dither {
-                        ui.add_space(GAP);
-                        section_hint(ui, "Output", "dither", |ui| {
-                            self.output_section(ui, s);
-                        });
+                    // Left-column cards, then the fixed EQ Bands anchor, then the
+                    // right-column cards — reflecting the wide-layout arrangement.
+                    for id in self.layout.left.clone() {
+                        if self.render_card(ui, s, id) {
+                            ui.add_space(GAP);
+                        }
                     }
-                    if !s.apps.is_empty() {
-                        ui.add_space(GAP);
-                        section_hint(ui, "Applications", "per-app volume", |ui| {
-                            self.apps_section(ui, s);
-                        });
-                    }
-                    if !s.sinks.is_empty() {
-                        ui.add_space(GAP);
-                        section_hint(ui, "Outputs", "device volume", |ui| {
-                            self.sinks_section(ui, s);
-                        });
-                    }
-                    ui.add_space(GAP);
                     section(ui, "EQ bands", |ui| self.bands_section(ui, s));
-                    // Channels controls relocated to the Settings dialog.
+                    ui.add_space(GAP);
+                    for id in self.layout.right.clone() {
+                        if self.render_card(ui, s, id) {
+                            ui.add_space(GAP);
+                        }
+                    }
                 }
-                ui.add_space(GAP);
-                section_hint(ui, "Device → Profile", "auto-switch", |ui| {
-                    self.device_mapping_section(ui);
-                });
-                ui.add_space(GAP);
-                section(ui, "Profiles", |ui| self.profiles_panel(ui));
             });
     }
 }
