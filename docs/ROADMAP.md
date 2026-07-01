@@ -24,21 +24,11 @@ angle so it can be picked up directly.
 
 ## Medium value
 
-- **Crossfeed for headphones** (Bauer/Meier) — reduce hard L/R isolation to cut
-  listening fatigue. Already in backlog item 8. New `ProcessorChain` effect.
-
-- **Adjustable filter slopes** — selectable 12/24/48 dB/oct on shelves and
-  HP/LP (we're fixed at 2nd-order biquads). Pro-EQ standard. Angle: cascade N
-  biquads per band; extend `BandType`/`ApoFilter` with an order field.
-
 - **Dynamic EQ** — per-band gain driven by input level (de-essing,
   compression-style). Backlog item 8. Sidechain envelope follower per biquad.
 
 - **Linear-phase EQ mode** — FIR path avoiding biquad phase rotation. Backlog
   item 8; pairs with the convolution engine above. Significant latency.
-
-- **Mid/side EQ mode** — process mono sum / stereo difference independently.
-  Backlog item 8; a `BandScope` (`Stereo | Mid | Side`) per band. 
 
 - **Input-device / source selection** — eqMac lets you pick the capture source;
   we only follow the output device. Expose an input picker.
@@ -48,14 +38,15 @@ angle so it can be picked up directly.
 - **Per-band solo/listen** — audition one band in isolation while tuning. Small
   DSP + a UI affordance. ( Add eye icon or listen ear icon )
 
-- **Output dithering** — TPDF dither before F32 truncation. Backlog item 8.
-
 ## Where Resonance is already ahead
 
 Cross-platform from one codebase (Linux/PipeWire + Windows/APO + macOS/CoreAudio);
 squig.link + Auto-EQ integration with a live reference/measurement overlay;
 N-channel + per-channel EQ + routing matrix; per-application **and** per-output
 volume/mute on all three platforms; three front-ends (GUI/TUI/CLI); FxSound
-effect emulation (Fidelity/Ambience/Surround/Dynamic Boost/Bass); and
+effect emulation (Fidelity/Ambience/Surround/Dynamic Boost/Bass);
 **loudness compensation (ISO 226:2023 equal-loudness)** — the "loudness" button
-most consumer EQs have. Most competitors do a subset of these on a single OS.
+most consumer EQs have; **headphone crossfeed** (Bauer/Meier); **adjustable
+filter slopes** (12/24/48 dB/oct Butterworth on shelves + HP/LP); **mid/side
+EQ** (per-band `Stereo | Mid | Side`); and **output dithering** (TPDF). Most
+competitors do a subset of these on a single OS.
