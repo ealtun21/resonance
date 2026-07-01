@@ -31,6 +31,35 @@ const SPECTRUM_DECAY_TAU: f32 = 0.200;
 /// How long a status message stays visible after it's set.
 const STATUS_TTL: Duration = Duration::from_secs(4);
 
+/// Whether per-channel controls (the `Ch` column, the `c`/`w` keys) should be
+/// visible: always on genuinely multichannel devices (`>2`), and opt-in on
+/// stereo via the `show_channels` pref. Mono (`<2`) never shows them.
+pub(crate) fn channels_visible(show_channels: bool, channels: usize) -> bool {
+    channels > 2 || (show_channels && channels >= 2)
+}
+
+/// Build the compact status-bar hint naming hidden-but-active advanced
+/// features, or `None` when nothing hidden is doing anything.
+// `slope`/`scope` are deliberately parallel feature names.
+#[allow(clippy::similar_names)]
+pub(crate) fn advanced_hint_label(
+    dither: bool,
+    slope: bool,
+    scope: bool,
+    channels: bool,
+) -> Option<String> {
+    let parts: Vec<&str> = [
+        ("dither", dither),
+        ("slope", slope),
+        ("scope", scope),
+        ("channels", channels),
+    ]
+    .into_iter()
+    .filter_map(|(name, on)| on.then_some(name))
+    .collect();
+    (!parts.is_empty()).then(|| format!("adv: {}", parts.join(" ")))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panel {
     Effects,
@@ -1201,9 +1230,33 @@ impl App {
 
     /// Whether per-channel controls should surface. Progressive disclosure:
     /// stereo/mono users never see the channel column or the picker — only
-    /// >2-channel devices reveal per-band channel targeting.
+    /// Reveal per-band channel targeting on devices with more than 2 channels;
+    /// stereo reveals it only when the user opts in via the `show_channels` pref.
     pub(crate) fn show_ch(&self) -> bool {
-        self.state.as_ref().is_some_and(|s| s.channels > 2)
+        self.state
+            .as_ref()
+            .is_some_and(|s| channels_visible(self.prefs.show_channels, s.channels))
+    }
+
+    /// Compact hint for the status bar: names advanced features that are hidden
+    /// (their toggle off) yet hold a non-default value, so nothing runs
+    /// invisibly. `None` when every hidden feature is at its default.
+    // `slope`/`scope` are deliberately parallel feature names.
+    #[allow(clippy::similar_names)]
+    pub(crate) fn advanced_active_hint(&self) -> Option<String> {
+        let s = self.state.as_ref()?;
+        let dither = !self.prefs.show_dither && s.dither_bits.is_some();
+        let slope = !self.prefs.show_slope
+            && s.bands
+                .iter()
+                .any(|b| b.band_type.uses_slope() && b.slope_db_oct != 12);
+        let scope = !self.prefs.show_scope
+            && s.bands
+                .iter()
+                .any(|b| b.scope != resonance_ipc::BandScope::Stereo);
+        let channels = !channels_visible(self.prefs.show_channels, s.channels)
+            && (s.routing.is_some() || s.bands.iter().any(|b| !b.channels.is_global(s.channels)));
+        advanced_hint_label(dither, slope, scope, channels)
     }
 
     /// Open the per-band channel-target picker (`c`) for the selected band.
@@ -1292,6 +1345,13 @@ impl App {
             channels: mask,
         });
         self.refresh_state();
+    }
+
+    /// True when the current routing is exactly the front-L/R swap matrix.
+    pub(crate) fn is_swapped_lr(&self) -> bool {
+        self.state.as_ref().is_some_and(|s| {
+            s.channels >= 2 && s.routing.as_ref() == Some(&RoutingMatrix::swap(s.channels, 0, 1))
+        })
     }
 
     /// Toggle a front L/R swap (`w`). If the routing is already exactly the L/R
@@ -2070,6 +2130,25 @@ impl App {
                 self.prefs.show_spectrum = !self.prefs.show_spectrum;
                 self.prefs.save();
             }
+            6 => {
+                self.prefs.show_slope = !self.prefs.show_slope;
+                self.prefs.save();
+            }
+            7 => {
+                self.prefs.show_scope = !self.prefs.show_scope;
+                self.prefs.save();
+            }
+            8 => {
+                self.prefs.show_dither = !self.prefs.show_dither;
+                self.prefs.save();
+            }
+            9 => {
+                self.prefs.show_channels = !self.prefs.show_channels;
+                self.prefs.save();
+            }
+            // Swap L/R lives here too (parity with the GUI's relocated channel
+            // controls) so it's reachable even when the channels column is hidden.
+            10 => self.toggle_swap_lr(),
             _ => {}
         }
     }
@@ -2281,4 +2360,31 @@ pub(crate) fn squig_filter_targets<'a>(catalog: &'a Catalog, query: &str) -> Vec
                 || t.source.to_lowercase().contains(&q)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn channels_visible_rules() {
+        // Mono never shows channel controls.
+        assert!(!super::channels_visible(true, 1));
+        // Stereo: only when opted in.
+        assert!(!super::channels_visible(false, 2));
+        assert!(super::channels_visible(true, 2));
+        // >2ch always shows (auto-disclosure), regardless of the pref.
+        assert!(super::channels_visible(false, 6));
+    }
+
+    #[test]
+    fn advanced_hint_label_lists_active() {
+        assert_eq!(super::advanced_hint_label(false, false, false, false), None);
+        assert_eq!(
+            super::advanced_hint_label(true, false, true, false).as_deref(),
+            Some("adv: dither scope")
+        );
+        assert_eq!(
+            super::advanced_hint_label(true, true, true, true).as_deref(),
+            Some("adv: dither slope scope channels")
+        );
+    }
 }

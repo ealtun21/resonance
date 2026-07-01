@@ -31,6 +31,8 @@ pub(crate) const BAND_TYPES: [BandType; 8] = [
 
 pub(crate) enum Dialog {
     None,
+    /// App settings: advanced-feature toggles, channel controls, theme.
+    Settings,
     LoadPreset(Browser),
     /// Export the current chain: a directory navigator plus a filename field.
     ExportProfile(SaveDialog),

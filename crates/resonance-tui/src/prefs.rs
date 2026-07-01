@@ -24,6 +24,18 @@ pub struct Prefs {
     /// opt-in, so a plain launch stays uncluttered on small terminals.
     #[serde(default = "default_false")]
     pub show_sinks: bool,
+    /// Advanced-feature visibility toggles — all default off so a fresh launch
+    /// shows a clean UI. Each gates a control + its keybinding; power users opt
+    /// in from Settings → Preferences. Channels also auto-shows on >2ch devices
+    /// (see `App::show_ch`).
+    #[serde(default = "default_false")]
+    pub show_slope: bool,
+    #[serde(default = "default_false")]
+    pub show_scope: bool,
+    #[serde(default = "default_false")]
+    pub show_dither: bool,
+    #[serde(default = "default_false")]
+    pub show_channels: bool,
 }
 
 fn default_fps() -> u64 {
@@ -67,6 +79,10 @@ impl Default for Prefs {
             show_spectrum: default_show_spectrum(),
             show_apps: default_true(),
             show_sinks: default_false(),
+            show_slope: default_false(),
+            show_scope: default_false(),
+            show_dither: default_false(),
+            show_channels: default_false(),
         }
     }
 }
@@ -106,5 +122,36 @@ impl Prefs {
                 let _ = std::fs::write(p, s);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advanced_toggles_default_off() {
+        // An empty config (all serde defaults) must leave every advanced
+        // feature hidden for a clean first-run UI.
+        let p: Prefs = toml::from_str("").unwrap();
+        assert!(!p.show_slope);
+        assert!(!p.show_scope);
+        assert!(!p.show_dither);
+        assert!(!p.show_channels);
+    }
+
+    #[test]
+    fn advanced_toggles_roundtrip() {
+        let p = Prefs {
+            show_slope: true,
+            show_channels: true,
+            ..Default::default()
+        };
+        let s = toml::to_string(&p).unwrap();
+        let back: Prefs = toml::from_str(&s).unwrap();
+        assert!(back.show_slope);
+        assert!(!back.show_scope);
+        assert!(!back.show_dither);
+        assert!(back.show_channels);
     }
 }

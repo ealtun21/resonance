@@ -17,7 +17,6 @@
 use crate::app::{GuiApp, ServiceAction, ServiceFn};
 use crate::browser::Browser;
 use crate::state::{Dialog, SaveDialog};
-use crate::theme::Theme;
 use crate::ui::icons::{self, Icon};
 use crate::ui::kit;
 use crate::ui::widgets::{ellipsize, lerp_color};
@@ -58,6 +57,7 @@ impl GuiApp {
             Output,
             History,
             Daemon,
+            Settings,
             Help,
             Overflow,
         }
@@ -91,12 +91,13 @@ impl GuiApp {
         let w_output = 18.0 + gap + 200.0; // speaker icon + 2-line dropdown
         let w_daemon = text_width(ui, kf.clone(), "● Daemon") + 22.0; // menu button
         let w_history = kit::CTRL_H + gap + kit::CTRL_H; // two icon buttons
+        let w_settings = 28.0; // ⚙ settings icon button
         let w_help = 28.0; // ? help icon button
         let w_overflow = 28.0; // ☰ icon menu button
 
         // Cumulative widths required, in widen order: output → preamp-full →
         // daemon → history. Power, the compact preamp, ? and ☰ are always present.
-        let base = w_power + w_pre_min + w_help + w_overflow + 4.0 * unit;
+        let base = w_power + w_pre_min + w_settings + w_help + w_overflow + 5.0 * unit;
         let req_output = base + w_output + unit;
         let req_preamp_full = req_output + (w_pre_full - w_pre_min);
         let req_daemon = req_preamp_full + w_daemon + unit;
@@ -137,6 +138,7 @@ impl GuiApp {
             if daemon_inline {
                 groups.push(Grp::Daemon);
             }
+            groups.push(Grp::Settings);
             groups.push(Grp::Help);
             groups.push(Grp::Overflow);
 
@@ -150,6 +152,7 @@ impl GuiApp {
                     Grp::Output => self.tb_output(ui, state.as_ref()),
                     Grp::History => self.tb_history(ui),
                     Grp::Daemon => self.daemon_menu(ui),
+                    Grp::Settings => self.tb_settings(ui),
                     Grp::Help => self.tb_help(ui),
                     Grp::Overflow => self.overflow_menu(
                         ui,
@@ -366,6 +369,12 @@ impl GuiApp {
         }
     }
 
+    fn tb_settings(&mut self, ui: &mut egui::Ui) {
+        if kit::icon_btn(ui, Icon::Gear, kit::CTRL_H, "Settings") {
+            self.dialog = Dialog::Settings;
+        }
+    }
+
     fn tb_history(&mut self, ui: &mut egui::Ui) {
         if kit::icon_btn_enabled(
             ui,
@@ -435,14 +444,7 @@ impl GuiApp {
                 if kit::menu_item(ui, "Reset layout", false) {
                     self.reset_layout(ui.ctx());
                 }
-
-                kit::menu_caption(ui, "Theme");
-                let ctx = ui.ctx().clone();
-                for t in Theme::ALL {
-                    if kit::menu_item(ui, t.label(), self.theme == t) {
-                        self.set_theme(&ctx, t);
-                    }
-                }
+                // Theme moved to the Settings dialog (gear icon).
             },
         );
     }
@@ -651,7 +653,7 @@ impl GuiApp {
                 khz(s.sample_rate)
             };
 
-            let segs: Vec<(String, String, egui::Color32)> = vec![
+            let mut segs: Vec<(String, String, egui::Color32)> = vec![
                 (format!("{} · ", backend_label()), rate, t.text),
                 (String::new(), format!("{} ch", s.channels.max(1)), t.dim),
                 ("in ".into(), format!("{:>4} dB", db(m.in_peak)), lvl_col),
@@ -668,6 +670,11 @@ impl GuiApp {
                     },
                 ),
             ];
+            // Compact hint when a hidden advanced feature holds a non-default
+            // value (e.g. dither on while its section is hidden).
+            if let Some(hint) = self.advanced_active_hint() {
+                segs.push((String::new(), hint, self.palette.boost));
+            }
             let n = segs.len();
             for (i, (label, value, vcol)) in segs.iter().enumerate() {
                 seg(ui, label, value, *vcol);

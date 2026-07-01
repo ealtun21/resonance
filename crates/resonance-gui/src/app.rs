@@ -333,6 +333,14 @@ pub struct GuiApp {
     /// (the per-band `Ch` column is otherwise hidden until >2ch, progressive
     /// disclosure). Lets stereo users do per-channel (L/R) EQ. Persisted.
     pub(crate) per_channel_eq: bool,
+    /// Advanced-feature visibility toggles (persisted; default off for a clean
+    /// UI). `show_slope`/`show_scope` gate the bands-table Slope/Scope columns;
+    /// `show_dither` gates the Output section. Channels controls are relocated
+    /// into the Settings dialog; the per-band `Ch` column stays gated by
+    /// `per_channel_eq` (auto-on for >2ch).
+    pub(crate) show_slope: bool,
+    pub(crate) show_scope: bool,
+    pub(crate) show_dither: bool,
     /// Graph series the user has hidden via the legend's eye toggles (keyed by
     /// the legend label, e.g. "FL"/"Result FR"/"Target"). Session-only.
     pub(crate) hidden_curves: std::collections::HashSet<String>,
@@ -573,7 +581,7 @@ impl GuiApp {
         let theme = cc
             .storage
             .and_then(|s| s.get_string("theme"))
-            .map_or(Theme::Resonance, |s| Theme::from_label(&s));
+            .map_or(Theme::System, |s| Theme::from_label(&s));
         cc.egui_ctx.set_visuals(theme.visuals());
         // Restore the reference overlay (measurement + target) from a previous
         // session so a loaded measurement persists across restarts.
@@ -668,6 +676,18 @@ impl GuiApp {
             per_channel_eq: cc
                 .storage
                 .and_then(|s| s.get_string("per_channel_eq"))
+                .is_some_and(|v| v == "true"),
+            show_slope: cc
+                .storage
+                .and_then(|s| s.get_string("show_slope"))
+                .is_some_and(|v| v == "true"),
+            show_scope: cc
+                .storage
+                .and_then(|s| s.get_string("show_scope"))
+                .is_some_and(|v| v == "true"),
+            show_dither: cc
+                .storage
+                .and_then(|s| s.get_string("show_dither"))
                 .is_some_and(|v| v == "true"),
             hidden_curves: std::collections::HashSet::new(),
             demo: std::env::var("RESONANCE_DEMO").is_ok(),
@@ -1197,6 +1217,9 @@ impl eframe::App for GuiApp {
             storage.set_string("reference", j);
         }
         storage.set_string("per_channel_eq", self.per_channel_eq.to_string());
+        storage.set_string("show_slope", self.show_slope.to_string());
+        storage.set_string("show_scope", self.show_scope.to_string());
+        storage.set_string("show_dither", self.show_dither.to_string());
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1394,6 +1417,7 @@ impl GuiApp {
         self.export_dialog(ctx);
         self.confirm_dialog(ctx);
         self.help_dialog(ctx);
+        self.settings_dialog(ctx);
         self.browse_dialog(ctx);
         self.manage_dialog(ctx);
         self.curve_picker_dialog(ctx);
@@ -1514,11 +1538,67 @@ impl GuiApp {
     pub(crate) fn export_profile_named(&mut self, name: String, path: String) {
         let _ = self.cmd_tx.send(WorkerCmd::ExportNamed(name, path));
     }
+
+    /// Names advanced features that are hidden yet non-default, so nothing runs
+    /// invisibly. `None` when every hidden feature is at its default.
+    // `slope`/`scope` are deliberately parallel feature names.
+    #[allow(clippy::similar_names)]
+    pub(crate) fn advanced_active_hint(&self) -> Option<String> {
+        let s = self.state.as_ref()?;
+        // The per-band Ch column is visible on >2ch or when per-channel EQ is on.
+        let ch_visible = s.channels > 2 || (self.per_channel_eq && s.channels >= 2);
+        let dither = !self.show_dither && s.dither_bits.is_some();
+        let slope = !self.show_slope
+            && s.bands
+                .iter()
+                .any(|b| b.band_type.uses_slope() && b.slope_db_oct != 12);
+        let scope = !self.show_scope
+            && s.bands
+                .iter()
+                .any(|b| b.scope != resonance_ipc::BandScope::Stereo);
+        let channels = !ch_visible && s.bands.iter().any(|b| !b.channels.is_global(s.channels));
+        advanced_hint_label(dither, slope, scope, channels)
+    }
+}
+
+/// Build the compact status-bar hint naming hidden-but-active advanced
+/// features, or `None` when nothing hidden is doing anything.
+// `slope`/`scope` are deliberately parallel feature names.
+#[allow(clippy::similar_names)]
+pub(crate) fn advanced_hint_label(
+    dither: bool,
+    slope: bool,
+    scope: bool,
+    channels: bool,
+) -> Option<String> {
+    let parts: Vec<&str> = [
+        ("dither", dither),
+        ("slope", slope),
+        ("scope", scope),
+        ("channels", channels),
+    ]
+    .into_iter()
+    .filter_map(|(name, on)| on.then_some(name))
+    .collect();
+    (!parts.is_empty()).then(|| format!("adv: {}", parts.join(" ")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn advanced_hint_label_lists_active_features() {
+        assert_eq!(advanced_hint_label(false, false, false, false), None);
+        assert_eq!(
+            advanced_hint_label(true, false, true, false).as_deref(),
+            Some("adv: dither scope")
+        );
+        assert_eq!(
+            advanced_hint_label(true, true, true, true).as_deref(),
+            Some("adv: dither slope scope channels")
+        );
+    }
 
     /// The demo measurement spans 20 Hz → 20 kHz over exactly 96 log-spaced
     /// points, strictly increasing in frequency, with finite dB values.

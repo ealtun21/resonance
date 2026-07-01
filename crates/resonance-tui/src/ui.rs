@@ -67,13 +67,13 @@ pub fn render(app: &App, frame: &mut Frame) {
         render_squig_browse(*tab, query, *cursor, app, frame, frame.area());
     }
     if let InputMode::Help = &app.mode {
-        render_help(frame, frame.area());
+        render_help(app, frame, frame.area());
     }
 }
 
 // ── Help overlay ────────────────────────────────────────────────────────────
 
-fn render_help(frame: &mut Frame, area: Rect) {
+fn render_help(app: &App, frame: &mut Frame, area: Rect) {
     let dialog = centered_rect(area, 60, 80);
     frame.render_widget(Clear, dialog);
 
@@ -93,7 +93,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         ))
     };
 
-    let lines = vec![
+    let mut lines = vec![
         head("Navigation"),
         key("Tab", "switch panel (effects / bands / graph)"),
         key("↑ ↓", "move selection"),
@@ -111,9 +111,6 @@ fn render_help(frame: &mut Frame, area: Rect) {
         key("a", "add band"),
         key("d / Del", "remove band"),
         key("t", "cycle band type"),
-        key("S", "cycle band slope 12/24/48 dB/oct (shelf, HP/LP)"),
-        key("M", "cycle band scope stereo/mid/side (≥2ch)"),
-        key("c", "channel targeting (multichannel)"),
         Line::raw(""),
         head("FR graph (Tab to it, or use the mouse)"),
         key("↑↓ / ←→", "drag node: gain / frequency"),
@@ -123,9 +120,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::raw(""),
         head("Global"),
         key("+ / -", "preamp ±0.5 dB"),
-        key("D", "cycle output dither (off / 16 / 20 / 24-bit)"),
         key("p", "power on/off"),
-        key("w", "swap L/R channels (≥2ch)"),
         key("l", "load preset (file browser)"),
         key("o", "select output device"),
         key("A", "show/hide Applications panel"),
@@ -138,6 +133,36 @@ fn render_help(frame: &mut Frame, area: Rect) {
             Style::default().fg(Color::DarkGray).italic(),
         )),
     ];
+
+    // Advanced shortcuts are listed only when their toggle is on, matching the
+    // gated keybindings (Settings → Preferences enables them).
+    let mut adv: Vec<Line> = Vec::new();
+    if app.prefs.show_slope {
+        adv.push(key("S", "cycle band slope 12/24/48 dB/oct (shelf, HP/LP)"));
+    }
+    if app.prefs.show_scope {
+        adv.push(key("M", "cycle band scope stereo/mid/side (≥2ch)"));
+    }
+    if app.show_ch() {
+        adv.push(key("c", "channel targeting (multichannel)"));
+        adv.push(key("w", "swap L/R channels (≥2ch)"));
+    }
+    if app.prefs.show_dither {
+        adv.push(key("D", "cycle output dither (off / 16 / 20 / 24-bit)"));
+    }
+    if adv.is_empty() {
+        adv.push(Line::from(Span::styled(
+            "  (enable slope / scope / dither / channels in Settings → Preferences)",
+            Style::default().fg(Color::DarkGray).italic(),
+        )));
+    }
+    // Splice the Advanced section in just above the trailing blank + "press any
+    // key" line.
+    let tail = lines.split_off(lines.len() - 2);
+    lines.push(Line::raw(""));
+    lines.push(head("Advanced (opt-in)"));
+    lines.extend(adv);
+    lines.extend(tail);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -153,21 +178,40 @@ fn render_help(frame: &mut Frame, area: Rect) {
 // ── Footer / contextual help ───────────────────────────────────────────────
 
 fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
-    let common = "[Tab] focus  [↑↓] select  [←→] adjust  [+/-] preamp  [D] dither  [Space] toggle  [l] load  [s] settings  [o] output  [A] apps  [O] outputs  [p] power  [?] help  [q] quit";
+    // The dither shortcut is only advertised when its toggle is on.
+    let dither_hint = if app.prefs.show_dither {
+        "  [D] dither"
+    } else {
+        ""
+    };
+    let common = format!(
+        "[Tab] focus  [↑↓] select  [←→] adjust  [+/-] preamp{dither_hint}  [Space] toggle  [l] load  [s] settings  [o] output  [A] apps  [O] outputs  [p] power  [?] help  [q] quit"
+    );
+    // Band/graph slope + scope hints are gated behind their toggles.
+    let band_adv = {
+        let mut extra = String::new();
+        if app.prefs.show_slope {
+            extra.push_str("  [S] slope");
+        }
+        if app.prefs.show_scope {
+            extra.push_str("  [M] scope");
+        }
+        extra
+    };
     let mut ctx = match app.focus {
         Panel::Effects => "  •  [←→] intensity".to_string(),
         Panel::Apps => "  •  [←→] volume  [Space] mute  [A] hide".to_string(),
         Panel::Sinks => "  •  [←→] volume  [Space] mute  [O] hide".to_string(),
-        Panel::Bands => "  •  [a] add  [d] del  [t] type  [S] slope  [M] scope".to_string(),
+        Panel::Bands => format!("  •  [a] add  [d] del  [t] type{band_adv}"),
         Panel::Graph => {
-            "  •  drag node: [↑↓] gain  [←→] freq  [ ][ ] select  [a/d/t/S/M] band".to_string()
+            format!("  •  drag node: [↑↓] gain  [←→] freq  [ ][ ] select  [a/d/t] band{band_adv}")
         }
     };
-    // Channel hints only when relevant (progressive disclosure).
+    // Channel hints only when the channel controls are visible.
     if matches!(app.focus, Panel::Bands | Panel::Graph) && app.show_ch() {
         ctx.push_str("  [c] chans");
     }
-    if app.state.as_ref().is_some_and(|s| s.channels >= 2) {
+    if app.show_ch() {
         ctx.push_str("  [w] swap L/R");
     }
     let line = Line::from(vec![
@@ -332,9 +376,18 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         sep(),
         Span::styled(preamp, Style::default().fg(preamp_color)),
         sep(),
-        Span::styled(dither, Style::default().fg(dither_color)),
-        sep(),
     ];
+    // Dither indicator only when its toggle is on (otherwise the advanced-active
+    // hint below covers a non-default hidden dither).
+    if app.prefs.show_dither {
+        spans.push(Span::styled(dither, Style::default().fg(dither_color)));
+        spans.push(sep());
+    }
+    // Compact hint when a hidden advanced feature holds a non-default value.
+    if let Some(hint) = app.advanced_active_hint() {
+        spans.push(Span::styled(hint, Style::default().fg(Color::Yellow)));
+        spans.push(sep());
+    }
     if let Some(ch) = ch_str {
         spans.push(Span::styled(ch, Style::default().fg(Color::Cyan)));
         spans.push(sep());
@@ -1230,9 +1283,9 @@ fn render_bands(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    // Progressive disclosure: the per-band channel column only appears on
-    // >2-channel devices so stereo users get a clean table.
-    let show_ch = channels > 2;
+    // Progressive disclosure: the per-band channel column appears on >2ch
+    // devices, or on stereo when the user enables "Show channels" in settings.
+    let show_ch = app.show_ch();
     let full_names = crate::layout::band_type_full(inner.width);
 
     let header_rect = Rect::new(inner.x, inner.y, inner.width, 1);
@@ -1353,24 +1406,26 @@ fn render_band_row(
     };
 
     // Type cell; for shelves + HP/LP append the filter slope (12/24/48 dB/oct),
-    // which only those types honour. Single-biquad types show the type alone.
+    // which only those types honour — but only when the slope toggle is on.
+    // Single-biquad types show the type alone.
+    let show_slope = app.prefs.show_slope && b.band_type.uses_slope();
     let type_name = if full_names {
-        if b.band_type.uses_slope() {
+        if show_slope {
             format!("{} {}dB", b.band_type.full(), b.slope_db_oct)
         } else {
             b.band_type.full().to_string()
         }
-    } else if b.band_type.uses_slope() {
+    } else if show_slope {
         format!("{} {}", b.band_type.abbrev(), b.slope_db_oct)
     } else {
         b.band_type.abbrev().to_string()
     };
-    // Stereo is the implicit default; append the scope abbrev (M/S) only when a
-    // band is scoped to mid or side, so most rows stay uncluttered.
-    let type_name = if b.scope == resonance_ipc::BandScope::Stereo {
-        type_name
-    } else {
+    // Append the scope abbrev (M/S) only when scoped away from Stereo AND the
+    // scope toggle is on, so most rows stay uncluttered.
+    let type_name = if app.prefs.show_scope && b.scope != resonance_ipc::BandScope::Stereo {
         format!("{type_name} {}", b.scope.abbrev())
+    } else {
+        type_name
     };
 
     put_cell(
@@ -2262,7 +2317,12 @@ fn render_tab_devices(s: &SettingsState, app: &App, frame: &mut Frame, area: Rec
 
 fn render_tab_prefs(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect) {
     let prefs = &app.prefs;
-    let items: [(&str, String, &str); 6] = [
+    let swap_state = if app.is_swapped_lr() {
+        "swapped"
+    } else {
+        "—"
+    };
+    let items: Vec<(&str, String, &str)> = vec![
         ("FPS", prefs.fps.to_string(), "(applied next launch)"),
         (
             "Refresh ms",
@@ -2288,6 +2348,31 @@ fn render_tab_prefs(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect)
             "Show spectrum",
             prefs.show_spectrum.to_string(),
             "(Space/Enter toggles; off = larger graph)",
+        ),
+        (
+            "Show slope column",
+            prefs.show_slope.to_string(),
+            "(advanced: per-band filter slope + [S] key)",
+        ),
+        (
+            "Show scope column",
+            prefs.show_scope.to_string(),
+            "(advanced: per-band mid/side scope + [M] key)",
+        ),
+        (
+            "Show dither",
+            prefs.show_dither.to_string(),
+            "(advanced: output dither indicator + [D] key)",
+        ),
+        (
+            "Show channels",
+            prefs.show_channels.to_string(),
+            "(advanced: per-band Ch column + [c]/[w] keys)",
+        ),
+        (
+            "Swap L / R",
+            swap_state.to_string(),
+            "(Space/Enter swaps front L/R; needs ≥2ch)",
         ),
     ];
 
