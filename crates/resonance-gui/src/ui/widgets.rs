@@ -83,6 +83,36 @@ pub(crate) fn ellipsize(s: &str, max: usize) -> String {
     }
 }
 
+/// Truncate `s` so it fits within `max_w` pixels when laid out with `font`,
+/// appending an ellipsis when cut. Measures with the real font (proportional-
+/// safe), so painter-drawn row labels — application/device names — never spill
+/// past their cell into the value column or the card edge.
+pub(crate) fn ellipsize_to_width(
+    ui: &egui::Ui,
+    s: &str,
+    font: &egui::FontId,
+    max_w: f32,
+) -> String {
+    let width = |t: &str| {
+        ui.painter()
+            .layout_no_wrap(t.to_owned(), font.clone(), egui::Color32::WHITE)
+            .size()
+            .x
+    };
+    if max_w <= 0.0 || width(s) <= max_w {
+        return s.to_owned();
+    }
+    let mut chars: Vec<char> = s.chars().collect();
+    while !chars.is_empty() {
+        chars.pop();
+        let candidate: String = chars.iter().collect::<String>() + "…";
+        if width(&candidate) <= max_w {
+            return candidate;
+        }
+    }
+    "…".to_owned()
+}
+
 /// Wrap a column's content in uniform inner padding and a vertical scroll area,
 /// so the three central columns breathe instead of hugging the panel edge.
 pub(crate) fn padded_scroll(ui: &mut egui::Ui, salt: &str, add: impl FnOnce(&mut egui::Ui)) {

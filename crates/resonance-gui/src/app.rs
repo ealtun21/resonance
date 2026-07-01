@@ -1028,7 +1028,9 @@ fn demo_measurement() -> Vec<(f64, f64)> {
 /// UI render (graph, bands, effects, devices, per-channel curves) with no daemon,
 /// for the screenshot harness and design iteration. Values mirror the design mock.
 fn demo_state() -> DaemonState {
-    use resonance_ipc::{AppStream, BandState, BandType, ChannelMask, EffectsState, Meters};
+    use resonance_ipc::{
+        AppStream, BandState, BandType, ChannelMask, EffectsState, Meters, SinkVolume,
+    };
     let band = |band_type, freq, gain_db, q, enabled, channels| BandState {
         band_type,
         freq,
@@ -1143,6 +1145,27 @@ fn demo_state() -> DaemonState {
                 volume: 1.0,
                 muted: true,
                 active: false,
+            },
+        ],
+        sinks: vec![
+            SinkVolume {
+                name: "alsa_output.pci-0000_00_1f.3.analog-stereo".into(),
+                description: "Built-in Speakers".into(),
+                volume: 0.85,
+                muted: false,
+            },
+            SinkVolume {
+                name: "bluez_output.AC_12_2F.1".into(),
+                description: "WH-1000XM4".into(),
+                volume: 0.6,
+                muted: false,
+            },
+            SinkVolume {
+                name: "alsa_output.pci-0000_5c_00.1.hdmi-surround71".into(),
+                description: "Radeon High Definition Audio Controller Digital Surround 7.1 (HDMI 3)"
+                    .into(),
+                volume: 1.0,
+                muted: false,
             },
         ],
     }

@@ -117,6 +117,10 @@ pub struct BackendCtx {
     /// IPC → backend: per-application volume/mute requests (control-plane, not
     /// the RT path). Drained on the backend's main-loop/control thread.
     pub app_ctl_rx: std::sync::mpsc::Receiver<crate::state::AppControl>,
+    /// Backend → IPC: the live output-sink volume list (control-plane).
+    pub sinks_vol_tx: tokio::sync::mpsc::UnboundedSender<Vec<resonance_ipc::SinkVolume>>,
+    /// IPC → backend: per-output-sink volume/mute requests (control-plane).
+    pub sink_ctl_rx: std::sync::mpsc::Receiver<crate::state::SinkCtl>,
 }
 
 /// Spawn the audio backend on its own dedicated real-time thread.

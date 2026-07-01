@@ -223,6 +223,19 @@ fn spawn_apps_task(
     });
 }
 
+/// Drain the live output-sink volume list pushed by the backend into shared state.
+fn spawn_sinks_vol_task(
+    mut sinks_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<resonance_ipc::SinkVolume>>,
+    shared: &state::SharedState,
+) {
+    let sinks_state = shared.clone();
+    tokio::spawn(async move {
+        while let Some(sinks) = sinks_rx.recv().await {
+            sinks_state.set_sinks(sinks);
+        }
+    });
+}
+
 /// Initialise the Windows control plane: open the APO state bridge, start the
 /// telemetry pump (mirrors APO meters/spectrum into shared state for clients),
 /// and start the device-watch thread that auto-attaches the APO to every
@@ -321,6 +334,10 @@ async fn main() -> Result<()> {
     let (app_ctl_tx, app_ctl_rx) = std::sync::mpsc::channel::<state::AppControl>();
     let (apps_tx, apps_rx) =
         tokio::sync::mpsc::unbounded_channel::<Vec<resonance_ipc::AppStream>>();
+    // Per-output-sink control + the live sink-volume list (same shape as apps).
+    let (sink_ctl_tx, sink_ctl_rx) = std::sync::mpsc::channel::<state::SinkCtl>();
+    let (sinks_vol_tx, sinks_vol_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Vec<resonance_ipc::SinkVolume>>();
 
     let initial_chain = ProcessorChain::builder()
         .channels(audio::target_channels())
@@ -328,12 +345,14 @@ async fn main() -> Result<()> {
         .build();
 
     let meters = std::sync::Arc::new(meters::AtomicMeters::default());
-    let shared = state::SharedState::new(cmd_tx, route_tx, meters.clone(), app_ctl_tx);
+    let shared =
+        state::SharedState::new(cmd_tx, route_tx, meters.clone(), app_ctl_tx, sink_ctl_tx);
 
     spawn_spectrum_task(spectrum_rx, &shared);
     spawn_output_mapping_task(output_rx, &shared);
     spawn_sinks_task(sinks_rx, &shared);
     spawn_apps_task(apps_rx, &shared);
+    spawn_sinks_vol_task(sinks_vol_rx, &shared);
 
     // Audio backend on a dedicated RT thread (Linux/PipeWire, macOS/CoreAudio).
     // On Windows the daemon does no audio: the in-graph APO owns the DSP and the
@@ -350,6 +369,8 @@ async fn main() -> Result<()> {
         meters,
         apps_tx,
         app_ctl_rx,
+        sinks_vol_tx,
+        sink_ctl_rx,
     })?;
 
     #[cfg(target_os = "windows")]
@@ -364,6 +385,9 @@ async fn main() -> Result<()> {
             sinks_tx,
             meters,
         );
+        // Per-output-sink volume isn't implemented on Windows yet; drop the
+        // backend-side ends so the channels are inert.
+        let _ = (sinks_vol_tx, sink_ctl_rx);
         // Per-app control plane: enumerate WASAPI sessions + apply volume/mute
         // on dedicated COM threads. The enumeration thread feeds `apps_tx` →
         // `spawn_apps_task` → shared state, like the audio backends do.

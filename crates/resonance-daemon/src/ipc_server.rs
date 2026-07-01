@@ -1,5 +1,5 @@
 use crate::config::{self, KnownSinks, Mappings, Profile};
-use crate::state::{AppControl, AudioCommand, SharedState};
+use crate::state::{AppControl, AudioCommand, SharedState, SinkCtl};
 use anyhow::Result;
 use resonance_dsp::chain::ProcessorChain;
 use resonance_dsp::channel::{ChannelMask as DspMask, ChannelMatrix};
@@ -182,6 +182,8 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
         Command::RecallSlot { slot } => handle_recall_slot(state, slot),
         Command::SetAppVolume { key, volume } => handle_set_app_volume(state, key, volume),
         Command::SetAppMute { key, muted } => handle_set_app_mute(state, key, muted),
+        Command::SetSinkVolume { name, volume } => handle_set_sink_volume(state, name, volume),
+        Command::SetSinkMute { name, muted } => handle_set_sink_mute(state, name, muted),
         // The actual cleanup + exit happens in `handle_client` after this Ok is
         // flushed to the client (see the `is_shutdown` branch there).
         Command::Shutdown => Response::Ok,
@@ -213,6 +215,23 @@ fn handle_set_app_volume(state: &SharedState, key: String, volume: f64) -> Respo
 /// Forward a per-app mute request (see [`handle_set_app_volume`]).
 fn handle_set_app_mute(state: &SharedState, key: String, muted: bool) -> Response {
     state.forward_app_ctl(AppControl::SetMute { key, muted });
+    Response::Ok
+}
+
+/// Forward a per-output-sink volume request to the backend (`PipeWire` main-loop
+/// thread). The volume is clamped to `0.0..=4.0`; the backend further clamps to
+/// what the device supports. Control-plane only — never touches the RT chain.
+fn handle_set_sink_volume(state: &SharedState, name: String, volume: f64) -> Response {
+    state.forward_sink_ctl(SinkCtl::SetVolume {
+        name,
+        volume: volume.clamp(0.0, 4.0),
+    });
+    Response::Ok
+}
+
+/// Forward a per-output-sink mute request (see [`handle_set_sink_volume`]).
+fn handle_set_sink_mute(state: &SharedState, name: String, muted: bool) -> Response {
+    state.forward_sink_ctl(SinkCtl::SetMute { name, muted });
     Response::Ok
 }
 

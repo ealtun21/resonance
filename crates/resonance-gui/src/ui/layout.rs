@@ -227,6 +227,12 @@ impl GuiApp {
                             });
                             ui.add_space(12.0);
                         }
+                        if !s.sinks.is_empty() {
+                            section_hint(ui, "Outputs", "device volume", |ui| {
+                                self.sinks_section(ui, s);
+                            });
+                            ui.add_space(12.0);
+                        }
                     }
                     self.devices_profiles(ui);
                 });
@@ -266,6 +272,12 @@ impl GuiApp {
                         ui.add_space(GAP);
                         section_hint(ui, "Applications", "per-app volume", |ui| {
                             self.apps_section(ui, s);
+                        });
+                    }
+                    if !s.sinks.is_empty() {
+                        ui.add_space(GAP);
+                        section_hint(ui, "Outputs", "device volume", |ui| {
+                            self.sinks_section(ui, s);
                         });
                     }
                     ui.add_space(GAP);

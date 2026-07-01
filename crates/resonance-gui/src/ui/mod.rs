@@ -13,5 +13,6 @@ pub(crate) mod icons;
 pub(crate) mod kit;
 pub(crate) mod layout;
 pub(crate) mod reference_bar;
+pub(crate) mod sinks;
 pub(crate) mod toolbar;
 pub(crate) mod widgets;

@@ -265,6 +265,11 @@ pub enum Command {
     SetAppVolume { key: String, volume: f64 },
     /// Mute or unmute a per-application stream by its `AppStream::key`.
     SetAppMute { key: String, muted: bool },
+    /// Set an output sink's volume (0.0–1.0, perceptual — matches the system
+    /// mixer). `name` matches a `SinkVolume::name` from `DaemonState::sinks`.
+    SetSinkVolume { name: String, volume: f64 },
+    /// Mute or unmute an output sink by its `SinkVolume::name`.
+    SetSinkMute { name: String, muted: bool },
 }
 
 /// One of the two in-memory comparison slots for quick A/B auditioning.
@@ -499,6 +504,11 @@ pub struct DaemonState {
     /// postcard IPC wire is version-locked regardless (clients ship together).
     #[serde(default)]
     pub apps: Vec<AppStream>,
+    /// Output sinks (devices) the daemon can control (volume/mute). Empty when
+    /// the backend doesn't enumerate sink volumes. Appended LAST + `serde`
+    /// default, same compatibility note as `apps`.
+    #[serde(default)]
+    pub sinks: Vec<SinkVolume>,
 }
 
 impl DaemonState {
@@ -569,6 +579,18 @@ pub struct AppStream {
     pub muted: bool,
     /// Currently producing audio (vs. listed but idle).
     pub active: bool,
+}
+
+/// One output sink (device) the daemon can volume/mute.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SinkVolume {
+    /// Stable identity (`PipeWire node.name`); commands key off this.
+    pub name: String,
+    /// Human-facing device name (`node.description`), for display.
+    pub description: String,
+    /// Volume `0.0..=1.0`, perceptual (matches the system mixer's %).
+    pub volume: f64,
+    pub muted: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -725,6 +747,14 @@ mod tests {
             key: "firefox.42".into(),
             muted: true,
         });
+        command_round_trip(&Command::SetSinkVolume {
+            name: "alsa_output.pci".into(),
+            volume: 0.8,
+        });
+        command_round_trip(&Command::SetSinkMute {
+            name: "alsa_output.pci".into(),
+            muted: true,
+        });
         command_round_trip(&Command::SaveProfile {
             name: "night".into(),
         });
@@ -866,9 +896,28 @@ mod tests {
                 muted: false,
                 active: true,
             }],
+            sinks: vec![SinkVolume {
+                name: "alsa_output.pci".into(),
+                description: "Built-in Audio".into(),
+                volume: 0.8,
+                muted: false,
+            }],
         };
         let bytes = to_stdvec(&Response::State(st)).expect("encode");
         let _: Response = from_bytes(&bytes).expect("decode");
+    }
+
+    #[test]
+    fn sink_volume_round_trips_through_postcard() {
+        let sink = SinkVolume {
+            name: "alsa_output.pci".into(),
+            description: "Built-in Audio".into(),
+            volume: 0.6,
+            muted: true,
+        };
+        let bytes = to_stdvec(&sink).unwrap();
+        let back: SinkVolume = from_bytes(&bytes).unwrap();
+        assert_eq!(sink, back);
     }
 
     #[test]

@@ -131,6 +131,15 @@ enum Sub {
         #[command(subcommand)]
         action: AppAction,
     },
+    /// List the output sinks (devices) the daemon can control
+    Sinks,
+    /// Control one output sink's volume, e.g. `resonance sink <name> volume 80`
+    Sink {
+        /// Sink node name as shown by `resonance sinks`
+        name: String,
+        #[command(subcommand)]
+        action: SinkAction,
+    },
     /// Send a raw shutdown signal to the daemon
     Shutdown,
     /// Manage the resonanced user service (start/stop/autostart). Backed by
@@ -163,6 +172,14 @@ enum ChannelAction {
 
 #[derive(Subcommand)]
 enum AppAction {
+    /// Set volume as a percentage, 0–400 (100 = unity; >100 boosts where supported)
+    Volume { percent: u16 },
+    /// Mute or unmute: on | off
+    Mute { state: String },
+}
+
+#[derive(Subcommand)]
+enum SinkAction {
     /// Set volume as a percentage, 0–400 (100 = unity; >100 boosts where supported)
     Volume { percent: u16 },
     /// Mute or unmute: on | off
@@ -255,6 +272,12 @@ fn main() -> Result<()> {
     if let Sub::App { key, action } = &sub {
         return run_app(key, action);
     }
+    if let Sub::Sinks = sub {
+        return run_sinks();
+    }
+    if let Sub::Sink { name, action } = &sub {
+        return run_sink(name, action);
+    }
 
     let cmd = to_ipc_command(sub)?;
     let response = send(cmd)?;
@@ -332,6 +355,8 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
         | Sub::Devices
         | Sub::Apps
         | Sub::App { .. }
+        | Sub::Sinks
+        | Sub::Sink { .. }
         | Sub::Completions { .. } => {
             unreachable!()
         }
@@ -444,6 +469,66 @@ fn print_apps(p: &Paint, apps: &[resonance_ipc::AppStream]) {
             vol,
             p.dim(&app.key)
         );
+    }
+}
+
+fn run_sinks() -> Result<()> {
+    match send(Command::GetState)? {
+        Response::State(s) => {
+            print_sinks(&Paint::auto(), &s.sinks);
+            Ok(())
+        }
+        other => {
+            print_response(other);
+            Ok(())
+        }
+    }
+}
+
+/// `resonance sink <name> volume|mute …`: map to a per-sink control command.
+fn run_sink(name: &str, action: &SinkAction) -> Result<()> {
+    let cmd = match action {
+        SinkAction::Volume { percent } => {
+            if *percent > 400 {
+                bail!("volume must be 0–400, got {percent}");
+            }
+            Command::SetSinkVolume {
+                name: name.to_string(),
+                volume: f64::from(*percent) / 100.0,
+            }
+        }
+        SinkAction::Mute { state } => Command::SetSinkMute {
+            name: name.to_string(),
+            muted: parse_bool(state)?,
+        },
+    };
+    print_response(send(cmd)?);
+    Ok(())
+}
+
+fn print_sinks(p: &Paint, sinks: &[resonance_ipc::SinkVolume]) {
+    println!("{}", p.bold("output sinks"));
+    if sinks.is_empty() {
+        println!(
+            "  {}",
+            p.dim("(no output sinks reported — backend may not support it yet)")
+        );
+        return;
+    }
+    for sink in sinks {
+        let vol = format!("{:>4.0}%", sink.volume * 100.0);
+        let vol = if sink.muted {
+            p.red("muted")
+        } else {
+            p.cyan(&vol)
+        };
+        let label = if sink.description.is_empty() {
+            &sink.name
+        } else {
+            &sink.description
+        };
+        // Friendly description first; node name dimmed for `resonance sink <name>`.
+        println!("  {}  {}  {}", p.bold(label), vol, p.dim(&sink.name));
     }
 }
 

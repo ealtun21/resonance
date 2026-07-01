@@ -9,7 +9,7 @@
 
 use super::{SAMPLE_RATE, app_streams, apply_command, target_channels};
 use crate::meters::{AtomicMeters, Sample, peak_rms, peak_rms_f32};
-use crate::state::{AppControl, AudioCommand};
+use crate::state::{AppControl, AudioCommand, SinkCtl};
 use anyhow::Result;
 use pipewire as pw;
 use pipewire::properties::properties;
@@ -22,10 +22,11 @@ use pw::spa::pod::{
 };
 use pw::spa::utils::SpaTypes;
 use resonance_dsp::chain::ProcessorChain;
-use resonance_ipc::AppStream;
+use resonance_ipc::{AppStream, SinkVolume};
 use spa_sys::{
-    SPA_DIRECTION_INPUT, SPA_DIRECTION_OUTPUT, SPA_PROP_channelVolumes, SPA_PROP_mute, spa_hook,
-    spa_io_position,
+    SPA_DIRECTION_INPUT, SPA_DIRECTION_OUTPUT, SPA_PARAM_ROUTE_device, SPA_PARAM_ROUTE_direction,
+    SPA_PARAM_ROUTE_index, SPA_PARAM_ROUTE_props, SPA_PARAM_ROUTE_save, SPA_PROP_channelVolumes,
+    SPA_PROP_mute, spa_hook, spa_io_position,
 };
 use std::{
     collections::HashMap,
@@ -77,6 +78,49 @@ struct AppNode {
     _param_listener: pw::node::NodeListener,
 }
 
+/// A real output device (`media.class = Audio/Sink`, excluding our own
+/// "resonance" virtual sink) the daemon can volume/mute.
+///
+/// Unlike app streams, a hardware sink's user-facing volume/mute lives on its
+/// **`Device` `Route` param** (what pavucontrol / `wpctl` drive), *not* the
+/// node's converter `Props` — so this maps a sink node to its owning device +
+/// the route's `device` index, and we read/write through the bound `Device`
+/// (see [`GraphState::devices`] and [`RouteRead`]).
+struct SinkNode {
+    name: String,
+    description: String,
+    /// Registry id of the owning `Device` global (`device.id` on the node) —
+    /// the key into [`GraphState::route_reads`].
+    device_id: u32,
+    /// Active output route's `index` + `device` fields, latched from read-back
+    /// (`-1` until known); both required to write the `Route` param back.
+    route_index: i32,
+    route_device: i32,
+    /// Channel count of the route's `channelVolumes` (from read-back; 2 default).
+    channels: usize,
+    volume: f64,
+    muted: bool,
+}
+
+/// A bound `Device` proxy plus its `Route` param listener (kept alive so the
+/// device keeps emitting route read-backs).
+struct BoundDevice {
+    device: pw::device::Device,
+    _param_listener: pw::device::DeviceListener,
+}
+
+/// Live read-back of one output `Route` from a `Device`'s `Route` param: the
+/// route `index` + `device` (both needed to address the route on write), its
+/// channel count and `(volume, mute)`. Either value field is `None` when that
+/// event didn't carry it.
+struct RouteRead {
+    index: i32,
+    device: i32,
+    channels: usize,
+    volume: Option<f64>,
+    muted: Option<bool>,
+}
+
 struct GraphState {
     raw_core: usize, // *mut pw_sys::pw_core stored as usize for Send
     sink_node_id: u32,
@@ -94,6 +138,20 @@ struct GraphState {
     apps_tx: tokio::sync::mpsc::UnboundedSender<Vec<AppStream>>,
     /// IPC → backend: per-application volume/mute requests, drained in the timer.
     app_ctl_rx: std::sync::mpsc::Receiver<AppControl>,
+    /// Real output sinks, keyed by the sink *node*'s registry global id.
+    sink_nodes: HashMap<u32, SinkNode>,
+    /// Bound `Device` proxies (volume/mute lives on the device `Route`), keyed
+    /// by the device global id. Holds each device's `Route` listener alive.
+    devices: HashMap<u32, BoundDevice>,
+    /// Read-back inbox: device `Route` listeners write each device's active
+    /// output route here, keyed by the device global id (= a sink node's
+    /// `device.id`). The timer folds it into `sink_nodes`. A separate `Arc` (not
+    /// `gs`) so the callbacks never re-lock the graph mutex from the main loop.
+    route_reads: Arc<Mutex<HashMap<u32, RouteRead>>>,
+    /// Backend → IPC: the live output-sink volume list (control-plane).
+    sinks_vol_tx: tokio::sync::mpsc::UnboundedSender<Vec<SinkVolume>>,
+    /// IPC → backend: per-sink volume/mute requests, drained in the timer.
+    sink_ctl_rx: std::sync::mpsc::Receiver<SinkCtl>,
     out_links: Vec<pw::link::Link>,
     monitor_links: Vec<pw::link::Link>,
     metadata_obj: Option<pw::metadata::Metadata>,
@@ -136,6 +194,10 @@ struct GraphState {
     /// appearing one-by-one) don't cause spurious rebuilds.
     device_seen_count: usize,
     device_seen_ticks: u8,
+    /// Round-robin phase for polling device `Route` params (see `poll_routes`):
+    /// a bare `subscribe_params` only reliably delivers a device route's initial
+    /// value, so we re-`enum_params` periodically to catch external changes.
+    route_poll_phase: u8,
 }
 
 // SAFETY: only touched from the pw main-loop thread.
@@ -182,6 +244,8 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
         meters,
         apps_tx,
         app_ctl_rx,
+        sinks_vol_tx,
+        sink_ctl_rx,
     } = ctx;
     // Channel count is fixed for the daemon's lifetime (env override or stereo).
     // The chain may arrive built at a different width; force it to match the ports.
@@ -213,6 +277,11 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
         app_volumes: Arc::new(Mutex::new(HashMap::new())),
         apps_tx,
         app_ctl_rx,
+        sink_nodes: HashMap::new(),
+        devices: HashMap::new(),
+        route_reads: Arc::new(Mutex::new(HashMap::new())),
+        sinks_vol_tx,
+        sink_ctl_rx,
         out_links: Vec::new(),
         monitor_links: Vec::new(),
         metadata_obj: None,
@@ -230,6 +299,7 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
         pending_channels: None,
         device_seen_count: 0,
         device_seen_ticks: 0,
+        route_poll_phase: 0,
     }));
 
     Ok(thread::Builder::new()
@@ -266,6 +336,10 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
                     // on reconnect. Publish empty so clients don't show ghosts.
                     g.app_nodes.clear();
                     let _ = g.apps_tx.send(Vec::new());
+                    g.sink_nodes.clear();
+                    g.devices.clear();
+                    g.route_reads.lock().unwrap().clear();
+                    let _ = g.sinks_vol_tx.send(Vec::new());
                     g.out_links.clear();
                     g.monitor_links.clear();
                     g.metadata_obj = None;
@@ -570,6 +644,17 @@ fn on_graph_timer_tick(g: &mut GraphState, node_id: u32, quit_ptr: usize) {
     // Fold in any read-back the per-app `Props` listeners recorded (real volumes,
     // external pavucontrol/wpctl changes) and republish if they moved.
     apply_app_volumes(g);
+    // Same control + read-back cycle for the real output-sink volumes. Poll the
+    // device routes every ~4th tick (~200 ms) so external pavucontrol/wpctl
+    // changes are reflected; `apply_sink_volumes` then folds what arrived.
+    while let Ok(ctl) = g.sink_ctl_rx.try_recv() {
+        apply_sink_ctl(g, &ctl);
+    }
+    g.route_poll_phase = g.route_poll_phase.wrapping_add(1);
+    if g.route_poll_phase % 4 == 0 {
+        poll_routes(g);
+    }
+    apply_sink_volumes(g);
     // Apply any pending preferred-output changes from the IPC thread.
     let mut reroute_needed = false;
     while let Ok(name) = g.route_rx.try_recv() {
@@ -691,7 +776,7 @@ fn on_global(
                 NodeMeta {
                     media_class: mc.clone(),
                     name: name.clone(),
-                    description,
+                    description: description.clone(),
                 },
             );
             if mc == "Audio/Sink" && name == "resonance" {
@@ -699,6 +784,29 @@ fn on_global(
                 reroute(g);
                 try_set_default(g);
             } else if mc == "Audio/Sink" {
+                // A real output device — record it for the per-output mixer.
+                // Volume/mute is driven through the owning `Device`'s `Route`
+                // param (bound when the Device global arrives); the node's
+                // `device.id` keys into the device's route read-back, which
+                // carries the route index + device needed to address it.
+                let device_id = props
+                    .get("device.id")
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(u32::MAX);
+                g.sink_nodes.insert(
+                    obj.id,
+                    SinkNode {
+                        name,
+                        description,
+                        device_id,
+                        route_index: -1,
+                        route_device: -1,
+                        channels: 2,
+                        volume: 1.0,
+                        muted: false,
+                    },
+                );
+                publish_sinks(g);
                 reroute(g);
             } else if mc == "Stream/Output/Audio" {
                 // An application playback stream — bind a Node proxy so we can
@@ -819,6 +927,43 @@ fn on_global(
                 }
             }
         }
+        ObjectType::Device => {
+            // Bind audio devices so we can read/write each sink's user-facing
+            // volume/mute through its `Route` param (the path pavucontrol/wpctl
+            // use). Non-audio devices are harmless to bind but skipped to avoid
+            // noise. The `Route` listener writes read-backs into `route_reads`
+            // (a side `Arc`, never `gs`) keyed by `(device_id, card_device)`.
+            if g.devices.contains_key(&obj.id) {
+                return;
+            }
+            let media_class = obj.props.and_then(|p| p.get("media.class")).unwrap_or("");
+            if !media_class.contains("Audio") {
+                return;
+            }
+            let Ok(device) = registry.bind::<pw::device::Device, _>(obj) else {
+                return;
+            };
+            let dev_id = obj.id;
+            let inbox = Arc::clone(&g.route_reads);
+            let listener = device
+                .add_listener_local()
+                .param(move |_seq, _ty, _idx, _next, pod| {
+                    if let Some(pod) = pod {
+                        if let Some(r) = parse_route(pod) {
+                            inbox.lock().unwrap().insert(dev_id, r);
+                        }
+                    }
+                })
+                .register();
+            device.subscribe_params(&[ParamType::Route]);
+            g.devices.insert(
+                obj.id,
+                BoundDevice {
+                    device,
+                    _param_listener: listener,
+                },
+            );
+        }
         _ => {}
     }
 }
@@ -832,6 +977,15 @@ fn on_global_remove(g: &mut GraphState, id: u32) {
     // An application closed its stream — drop it and refresh the per-app list.
     if g.app_nodes.remove(&id).is_some() {
         publish_apps(g);
+    }
+    // A real output device's sink node went away — drop it + refresh the list.
+    if g.sink_nodes.remove(&id).is_some() {
+        publish_sinks(g);
+    }
+    // A bound `Device` global went away — release its proxy + listener and its
+    // route read-back (keyed by the device global id).
+    if g.devices.remove(&id).is_some() {
+        g.route_reads.lock().unwrap().remove(&id);
     }
     if was_real_sink {
         reroute(g);
@@ -1007,6 +1161,250 @@ fn apply_app_volumes(g: &mut GraphState) {
     }
     if changed {
         publish_apps(g);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-output-sink volume / mute (real devices; same model as the per-app path)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Parse a `Device` `Route` param Pod → a [`RouteRead`] for an **output** route,
+/// or `None` for input routes / unparseable pods. Reads the route `index` +
+/// `device`, the nested `props` channel count and `(volume, mute)`. Volume is the
+/// cube root of the max `channelVolumes` (matches the pavucontrol/wpctl "volume
+/// %" — `channelVolumes` is linear amplitude).
+fn parse_route(pod: &Pod) -> Option<RouteRead> {
+    let Ok((_, Value::Object(obj))) = PodDeserializer::deserialize_from::<Value>(pod.as_bytes())
+    else {
+        return None;
+    };
+    let mut index = None;
+    let mut direction = None;
+    let mut card_device = None;
+    let mut channels = 0usize;
+    let mut volume = None;
+    let mut muted = None;
+    for prop in obj.properties {
+        if prop.key == SPA_PARAM_ROUTE_index {
+            if let Value::Int(i) = prop.value {
+                index = Some(i);
+            }
+        } else if prop.key == SPA_PARAM_ROUTE_direction {
+            if let Value::Id(id) = prop.value {
+                direction = Some(id.0);
+            }
+        } else if prop.key == SPA_PARAM_ROUTE_device {
+            if let Value::Int(d) = prop.value {
+                card_device = Some(d);
+            }
+        } else if prop.key == SPA_PARAM_ROUTE_props {
+            if let Value::Object(props) = prop.value {
+                for p in props.properties {
+                    if p.key == SPA_PROP_channelVolumes {
+                        if let Value::ValueArray(ValueArray::Float(vs)) = p.value {
+                            channels = vs.len();
+                            let max = vs.into_iter().fold(f32::NEG_INFINITY, f32::max);
+                            if max.is_finite() {
+                                volume = Some(f64::from(max.max(0.0)).cbrt());
+                            }
+                        }
+                    } else if p.key == SPA_PROP_mute {
+                        if let Value::Bool(m) = p.value {
+                            muted = Some(m);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Output routes only; need index + device to address the route on write.
+    if direction != Some(SPA_DIRECTION_OUTPUT) {
+        return None;
+    }
+    Some(RouteRead {
+        index: index?,
+        device: card_device?,
+        channels: channels.max(1),
+        volume,
+        muted,
+    })
+}
+
+/// Serialize a `Route` param Pod addressing `(index, card_device)` with the given
+/// nested `Props` (`channelVolumes` and/or `mute`), `save = true` so the change
+/// persists (matching `wpctl`/pavucontrol).
+fn pod_route(index: i32, card_device: i32, props: Vec<Property>) -> Option<Vec<u8>> {
+    let value = Value::Object(Object {
+        type_: SpaTypes::ObjectParamRoute.as_raw(),
+        id: ParamType::Route.as_raw(),
+        properties: vec![
+            Property {
+                key: SPA_PARAM_ROUTE_index,
+                flags: PropertyFlags::empty(),
+                value: Value::Int(index),
+            },
+            Property {
+                key: SPA_PARAM_ROUTE_device,
+                flags: PropertyFlags::empty(),
+                value: Value::Int(card_device),
+            },
+            Property {
+                key: SPA_PARAM_ROUTE_props,
+                flags: PropertyFlags::empty(),
+                value: Value::Object(Object {
+                    type_: SpaTypes::ObjectParamProps.as_raw(),
+                    id: ParamType::Route.as_raw(),
+                    properties: props,
+                }),
+            },
+            Property {
+                key: SPA_PARAM_ROUTE_save,
+                flags: PropertyFlags::empty(),
+                value: Value::Bool(true),
+            },
+        ],
+    });
+    let cursor = PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &value).ok()?;
+    Some(cursor.0.into_inner())
+}
+
+/// Push the current output-sink volume list to the daemon, sorted by description
+/// then name for a stable UI order. Falls back to the node name when a sink has
+/// no human description.
+fn publish_sinks(g: &GraphState) {
+    let mut sinks: Vec<SinkVolume> = g
+        .sink_nodes
+        .values()
+        .map(|s| SinkVolume {
+            name: s.name.clone(),
+            description: if s.description.is_empty() {
+                s.name.clone()
+            } else {
+                s.description.clone()
+            },
+            volume: s.volume,
+            muted: s.muted,
+        })
+        .collect();
+    sinks.sort_by(|a, b| {
+        a.description
+            .cmp(&b.description)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    let _ = g.sinks_vol_tx.send(sinks);
+}
+
+/// Apply one per-sink volume/mute request by setting the owning `Device`'s
+/// `Route` param (the user-facing volume/mute, what pavucontrol/wpctl drive —
+/// *not* the node's converter `Props`), then refresh the list optimistically.
+/// No-op until the route index has been read back from the device.
+fn apply_sink_ctl(g: &mut GraphState, ctl: &SinkCtl) {
+    let name = match ctl {
+        SinkCtl::SetVolume { name, .. } | SinkCtl::SetMute { name, .. } => name.as_str(),
+    };
+    let Some(sink) = g.sink_nodes.values().find(|s| s.name == name) else {
+        return;
+    };
+    let (device_id, route_device, route_index, channels) = (
+        sink.device_id,
+        sink.route_device,
+        sink.route_index,
+        sink.channels,
+    );
+    if route_index < 0 {
+        return; // route not read back yet — can't address it
+    }
+    let channels = channels.clamp(1, MAX_CH);
+    let props = match *ctl {
+        SinkCtl::SetVolume { volume, .. } => {
+            // Perceptual fraction (matches the system mixer) → linear amplitude.
+            let v = volume.clamp(0.0, 4.0);
+            let linear = (v * v * v) as f32;
+            vec![Property {
+                key: SPA_PROP_channelVolumes,
+                flags: PropertyFlags::empty(),
+                value: Value::ValueArray(ValueArray::Float(vec![linear; channels])),
+            }]
+        }
+        SinkCtl::SetMute { muted, .. } => vec![Property {
+            key: SPA_PROP_mute,
+            flags: PropertyFlags::empty(),
+            value: Value::Bool(muted),
+        }],
+    };
+    let Some(bytes) = pod_route(route_index, route_device, props) else {
+        return;
+    };
+    let Some(pod) = Pod::from_bytes(&bytes) else {
+        return;
+    };
+    if let Some(bound) = g.devices.get(&device_id) {
+        bound.device.set_param(ParamType::Route, 0, pod);
+    }
+    // Optimistic local update; the route read-back reconciles it next tick.
+    if let Some(sink) = g.sink_nodes.values_mut().find(|s| s.name == name) {
+        match *ctl {
+            SinkCtl::SetVolume { volume, .. } => sink.volume = volume.clamp(0.0, 4.0),
+            SinkCtl::SetMute { muted, .. } => sink.muted = muted,
+        }
+    }
+    publish_sinks(g);
+}
+
+/// Re-enumerate every bound device's `Route` param so external volume/mute
+/// changes (pavucontrol / wpctl) are picked up. A plain `subscribe_params` only
+/// reliably delivers a device route's *initial* value, so we poll; results
+/// arrive via each device's param listener into `route_reads`.
+fn poll_routes(g: &GraphState) {
+    for bound in g.devices.values() {
+        bound.device.enum_params(0, Some(ParamType::Route), 0, 64);
+    }
+}
+
+/// Fold the device `Route` read-back inbox into `sink_nodes` (matched by the
+/// node's `device.id`) and republish on change — so the per-sink list reflects
+/// the devices' real volume/mute, including changes made externally (pavucontrol
+/// / wpctl). Latches the route index + device needed for writes. Called each
+/// timer tick.
+fn apply_sink_volumes(g: &mut GraphState) {
+    // Drain (don't iterate): the device emits a Route event on every change, so
+    // an empty inbox means "nothing new". The route index/device is latched into
+    // the `SinkNode` below, so draining doesn't lose it — and crucially it stops
+    // a stale cached read from reverting our own optimistic set on the next tick.
+    let updates: Vec<(u32, RouteRead)> = {
+        let mut map = g.route_reads.lock().unwrap();
+        if map.is_empty() {
+            return;
+        }
+        map.drain().collect()
+    };
+    let mut changed = false;
+    for (device_id, r) in updates {
+        if let Some(sink) = g
+            .sink_nodes
+            .values_mut()
+            .find(|s| s.device_id == device_id)
+        {
+            sink.route_index = r.index;
+            sink.route_device = r.device;
+            sink.channels = r.channels;
+            if let Some(v) = r.volume {
+                let v = v.clamp(0.0, 4.0);
+                if (sink.volume - v).abs() > 0.0005 {
+                    sink.volume = v;
+                    changed = true;
+                }
+            }
+            if let Some(m) = r.muted {
+                if sink.muted != m {
+                    sink.muted = m;
+                    changed = true;
+                }
+            }
+        }
+    }
+    if changed {
+        publish_sinks(g);
     }
 }
 

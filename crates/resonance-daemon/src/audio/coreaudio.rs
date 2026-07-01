@@ -115,7 +115,12 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
         meters,
         apps_tx,
         app_ctl_rx,
+        sinks_vol_tx,
+        sink_ctl_rx,
     } = ctx;
+    // Per-output-sink volume isn't implemented on macOS yet; drop the channel
+    // ends so they're inert.
+    let _ = (sinks_vol_tx, sink_ctl_rx);
     // Per-app control state: `key -> (volume, muted)`, set via `app_ctl_rx` and
     // overlaid onto the enumerated list so the published volume reflects what the
     // user set. The muted-tap mixer (next increment) reads this same map to apply

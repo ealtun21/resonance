@@ -2,7 +2,7 @@ use crate::meters::AtomicMeters;
 use resonance_dsp::channel::{ChannelMask, ChannelMatrix};
 use resonance_dsp::{chain::FxEffect, chain::ProcessorChain};
 use resonance_ipc::{
-    AppStream, BandState, BandType, DaemonState, EffectsState, FxEffectId, RoutingMatrix,
+    AppStream, BandState, BandType, DaemonState, EffectsState, FxEffectId, RoutingMatrix, SinkVolume,
     default_channel_layout,
 };
 use rtrb::Producer;
@@ -70,6 +70,14 @@ pub enum AppControl {
     SetMute { key: String, muted: bool },
 }
 
+/// Per-output-sink volume/mute requests, forwarded from the IPC thread to the
+/// backend (`PipeWire` main-loop thread). Control-plane, like [`AppControl`].
+#[derive(Debug, Clone)]
+pub enum SinkCtl {
+    SetVolume { name: String, volume: f64 },
+    SetMute { name: String, muted: bool },
+}
+
 pub struct Inner {
     pub chain: ProcessorChain,
     pub current_preset: Option<String>,
@@ -98,6 +106,10 @@ pub struct Inner {
     /// Forward per-app volume/mute to the component that owns app control
     /// (backend thread or Windows control task).
     pub app_ctl_tx: std::sync::mpsc::Sender<AppControl>,
+    /// Latest output-sink volume list (pushed by the backend, read on snapshot).
+    pub sinks: Vec<SinkVolume>,
+    /// Forward per-sink volume/mute to the backend (`PipeWire` main-loop thread).
+    pub sink_ctl_tx: std::sync::mpsc::Sender<SinkCtl>,
     /// In-memory A/B comparison slots ([A, B]); filled by `StoreSlot`.
     pub ab_slots: [Option<crate::config::Profile>; 2],
     /// Live meters written by the RT thread, read on snapshot.
@@ -120,6 +132,7 @@ impl SharedState {
         route_tx: std::sync::mpsc::Sender<String>,
         meters: Arc<AtomicMeters>,
         app_ctl_tx: std::sync::mpsc::Sender<AppControl>,
+        sink_ctl_tx: std::sync::mpsc::Sender<SinkCtl>,
     ) -> Self {
         let chain = ProcessorChain::builder()
             .channels(crate::audio::target_channels())
@@ -139,6 +152,8 @@ impl SharedState {
             route_tx,
             apps: Vec::new(),
             app_ctl_tx,
+            sinks: Vec::new(),
+            sink_ctl_tx,
             ab_slots: [None, None],
             meters,
             apo_writer: None,
@@ -293,6 +308,7 @@ impl SharedState {
             preferred_output: inner.preferred_output.clone(),
             meters: inner.meters.snapshot(),
             apps: inner.apps.clone(),
+            sinks: inner.sinks.clone(),
         }
     }
 
@@ -301,8 +317,17 @@ impl SharedState {
         self.0.lock().unwrap().spectrum = bins;
     }
 
-    /// Replace the per-application stream list (called by the backend / a
-    /// platform app-enumeration task whenever the set of streams changes).
+    /// Replace the output-sink volume list (called by the backend whenever a
+    /// sink's volume/mute changes or the set of sinks changes).
+    pub fn set_sinks(&self, sinks: Vec<SinkVolume>) {
+        self.0.lock().unwrap().sinks = sinks;
+    }
+
+    /// Forward a per-sink volume/mute request to the backend. Best effort.
+    pub fn forward_sink_ctl(&self, ctl: SinkCtl) {
+        let _ = self.0.lock().unwrap().sink_ctl_tx.send(ctl);
+    }
+
     pub fn set_apps(&self, apps: Vec<AppStream>) {
         self.0.lock().unwrap().apps = apps;
     }
@@ -362,7 +387,14 @@ mod tests {
         let (tx, _rx) = rtrb::RingBuffer::<AudioCommand>::new(16);
         let (route_tx, _route_rx) = std::sync::mpsc::channel();
         let (app_ctl_tx, _app_ctl_rx) = std::sync::mpsc::channel();
-        SharedState::new(tx, route_tx, Arc::new(AtomicMeters::default()), app_ctl_tx)
+        let (sink_ctl_tx, _sink_ctl_rx) = std::sync::mpsc::channel();
+        SharedState::new(
+            tx,
+            route_tx,
+            Arc::new(AtomicMeters::default()),
+            app_ctl_tx,
+            sink_ctl_tx,
+        )
     }
 
     #[test]

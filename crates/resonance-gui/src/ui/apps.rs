@@ -60,11 +60,13 @@ impl GuiApp {
             } else {
                 t.dim
             };
+            let font = egui::FontId::proportional(kit::T_BODY);
+            let shown = crate::ui::widgets::ellipsize_to_width(ui, &app.display_name, &font, nr.width());
             ui.painter().text(
                 egui::pos2(nr.left(), nr.center().y),
                 egui::Align2::LEFT_CENTER,
-                &app.display_name,
-                egui::FontId::proportional(kit::T_BODY),
+                shown,
+                font,
                 name_col,
             );
 
