@@ -22,6 +22,11 @@ const X_W: f32 = 24.0;
 /// Width of the abbreviated coloured Type badge (PK/LS/HS…). Compact + scannable;
 /// the full names live in its dropdown menu.
 const TYPE_W: f32 = 50.0;
+/// Width of the filter-slope selector (12/24/48 dB/oct). Only meaningful for
+/// shelves + HP/LP; other band types show a dim placeholder to keep alignment.
+const SLOPE_W: f32 = 48.0;
+/// The slopes offered by the per-band slope selector, in cycle order.
+const SLOPES: [u8; 3] = [12, 24, 48];
 /// Cells get an 8px gutter of their own (mockup table `td` padding) while the
 /// row tint/rule still span the full card width.
 const GUTTER: f32 = 8.0;
@@ -38,6 +43,8 @@ struct BandColumns {
     show_graph: bool,
     /// Coloured Type-badge dropdown column.
     show_type: bool,
+    /// Filter-slope selector column (rides alongside the Type column).
+    show_slope: bool,
     /// Inter-column spacing.
     gap: f32,
     /// Width of the flexible Graph column (only meaningful when `show_graph`).
@@ -50,13 +57,19 @@ impl BandColumns {
     /// channel column should appear. `avail` is already clamped to a sane minimum.
     fn resolve(avail: f32, gap: f32, show_ch: bool) -> Self {
         // Collapse columns as the table narrows: drop the gain graph first, then
-        // the Type combo.
-        let show_graph = avail >= 480.0;
+        // the Slope selector, then the Type combo.
+        let show_graph = avail >= 520.0;
+        let show_slope = avail >= 420.0;
         let show_type = avail >= 360.0;
-        let n_cols = 6 + usize::from(show_type) + usize::from(show_graph) + usize::from(show_ch);
+        let n_cols = 6
+            + usize::from(show_type)
+            + usize::from(show_slope)
+            + usize::from(show_graph)
+            + usize::from(show_ch);
         let fixed = IDX_W
             + ON_W
             + if show_type { TYPE_W } else { 0.0 }
+            + if show_slope { SLOPE_W } else { 0.0 }
             + FREQ_W
             + GAIN_W
             + Q_W
@@ -67,6 +80,7 @@ impl BandColumns {
             show_ch,
             show_graph,
             show_type,
+            show_slope,
             gap,
             graph_w,
         }
@@ -297,6 +311,10 @@ impl GuiApp {
             }
         }
 
+        if cols.show_slope {
+            self.band_slope_cell(ui, b, i, &t);
+        }
+
         let mut freq = b.freq;
         let mut gain = b.gain_db;
         let mut q = b.q;
@@ -355,6 +373,47 @@ impl GuiApp {
             // Keep the lock pins on the same band after the list shifts.
             remap_pin_on_remove(&mut self.vlock, i);
             remap_pin_on_remove(&mut self.hlock, i);
+        }
+    }
+
+    /// The filter-slope cell for band `i`. Shelves + HP/LP get a 12/24/48 dB/oct
+    /// dropdown (reusing the Type badge widget); every other band type is
+    /// single-biquad and ignores slope, so it shows a dim "—" placeholder that
+    /// keeps the column aligned without offering a no-op control.
+    fn band_slope_cell(
+        &mut self,
+        ui: &mut egui::Ui,
+        b: &resonance_ipc::BandState,
+        i: usize,
+        t: &kit::Tokens,
+    ) {
+        if b.band_type.uses_slope() {
+            let labels: [String; 3] = SLOPES.map(|s| format!("{s} dB/oct"));
+            let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+            if let Some(sel) = kit::tag_dropdown(
+                ui,
+                SLOPE_W,
+                22.0,
+                egui::Id::new(("bs", i)),
+                &format!("{}", b.slope_db_oct),
+                t.accent,
+                &label_refs,
+            ) {
+                self.queue_edit(Command::SetBandSlope {
+                    index: i,
+                    slope_db_oct: SLOPES[sel],
+                });
+            }
+        } else {
+            // Single-biquad type: no slope. Dim placeholder keeps alignment.
+            let (r, _) = ui.allocate_exact_size(egui::vec2(SLOPE_W, 22.0), egui::Sense::hover());
+            ui.painter().text(
+                r.center(),
+                egui::Align2::CENTER_CENTER,
+                "—",
+                egui::FontId::monospace(kit::T_VALUE),
+                t.faint,
+            );
         }
     }
 
@@ -509,6 +568,9 @@ fn bands_header(ui: &mut egui::Ui, cols: &BandColumns) {
         if cols.show_type {
             cap(ui, TYPE_W, "Type");
         }
+        if cols.show_slope {
+            cap(ui, SLOPE_W, "Slope");
+        }
         cap(ui, FREQ_W, "Freq");
         cap(ui, GAIN_W, "Gain");
         cap(ui, Q_W, "Q");
@@ -576,13 +638,16 @@ mod tests {
         let gap = 6.0;
         // Wide: every optional column shows.
         let wide = BandColumns::resolve(700.0, gap, true);
-        assert!(wide.show_graph && wide.show_type);
-        // The graph drops first below 480.
-        let mid = BandColumns::resolve(400.0, gap, true);
-        assert!(!mid.show_graph && mid.show_type);
+        assert!(wide.show_graph && wide.show_slope && wide.show_type);
+        // The graph drops first below 520; slope + type still show.
+        let mid = BandColumns::resolve(480.0, gap, true);
+        assert!(!mid.show_graph && mid.show_slope && mid.show_type);
+        // The slope selector drops below 420; type still shows.
+        let tight = BandColumns::resolve(400.0, gap, true);
+        assert!(!tight.show_graph && !tight.show_slope && tight.show_type);
         // The Type combo drops below 360.
         let narrow = BandColumns::resolve(300.0, gap, true);
-        assert!(!narrow.show_graph && !narrow.show_type);
+        assert!(!narrow.show_graph && !narrow.show_slope && !narrow.show_type);
     }
 
     #[test]
