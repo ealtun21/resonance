@@ -179,7 +179,11 @@ fn render_help(app: &App, frame: &mut Frame, area: Rect) {
 
 fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
     // The dither shortcut is only advertised when its toggle is on.
-    let dither_hint = if app.prefs.show_dither { "  [D] dither" } else { "" };
+    let dither_hint = if app.prefs.show_dither {
+        "  [D] dither"
+    } else {
+        ""
+    };
     let common = format!(
         "[Tab] focus  [↑↓] select  [←→] adjust  [+/-] preamp{dither_hint}  [Space] toggle  [l] load  [s] settings  [o] output  [A] apps  [O] outputs  [p] power  [?] help  [q] quit"
     );
@@ -2313,7 +2317,11 @@ fn render_tab_devices(s: &SettingsState, app: &App, frame: &mut Frame, area: Rec
 
 fn render_tab_prefs(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect) {
     let prefs = &app.prefs;
-    let swap_state = if app.is_swapped_lr() { "swapped" } else { "—" };
+    let swap_state = if app.is_swapped_lr() {
+        "swapped"
+    } else {
+        "—"
+    };
     let items: Vec<(&str, String, &str)> = vec![
         ("FPS", prefs.fps.to_string(), "(applied next launch)"),
         (
