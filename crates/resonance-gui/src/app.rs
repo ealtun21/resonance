@@ -333,6 +333,14 @@ pub struct GuiApp {
     /// (the per-band `Ch` column is otherwise hidden until >2ch, progressive
     /// disclosure). Lets stereo users do per-channel (L/R) EQ. Persisted.
     pub(crate) per_channel_eq: bool,
+    /// Advanced-feature visibility toggles (persisted; default off for a clean
+    /// UI). `show_slope`/`show_scope` gate the bands-table Slope/Scope columns;
+    /// `show_dither` gates the Output section. Channels controls are relocated
+    /// into the Settings dialog; the per-band `Ch` column stays gated by
+    /// `per_channel_eq` (auto-on for >2ch).
+    pub(crate) show_slope: bool,
+    pub(crate) show_scope: bool,
+    pub(crate) show_dither: bool,
     /// Graph series the user has hidden via the legend's eye toggles (keyed by
     /// the legend label, e.g. "FL"/"Result FR"/"Target"). Session-only.
     pub(crate) hidden_curves: std::collections::HashSet<String>,
@@ -668,6 +676,18 @@ impl GuiApp {
             per_channel_eq: cc
                 .storage
                 .and_then(|s| s.get_string("per_channel_eq"))
+                .is_some_and(|v| v == "true"),
+            show_slope: cc
+                .storage
+                .and_then(|s| s.get_string("show_slope"))
+                .is_some_and(|v| v == "true"),
+            show_scope: cc
+                .storage
+                .and_then(|s| s.get_string("show_scope"))
+                .is_some_and(|v| v == "true"),
+            show_dither: cc
+                .storage
+                .and_then(|s| s.get_string("show_dither"))
                 .is_some_and(|v| v == "true"),
             hidden_curves: std::collections::HashSet::new(),
             demo: std::env::var("RESONANCE_DEMO").is_ok(),
@@ -1197,6 +1217,9 @@ impl eframe::App for GuiApp {
             storage.set_string("reference", j);
         }
         storage.set_string("per_channel_eq", self.per_channel_eq.to_string());
+        storage.set_string("show_slope", self.show_slope.to_string());
+        storage.set_string("show_scope", self.show_scope.to_string());
+        storage.set_string("show_dither", self.show_dither.to_string());
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
