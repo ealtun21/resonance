@@ -175,16 +175,18 @@ fn handle_normal(app: &mut App, key: KeyEvent) {
         KeyCode::Char('a') if band_focus => app.add_band(),
         KeyCode::Char('d') | KeyCode::Delete if band_focus => app.remove_band(),
         KeyCode::Char('t') if band_focus => app.cycle_band_type(),
+        // Advanced keys are gated behind their Settings → Preferences toggle so
+        // a clean default UI has no hidden shortcuts; when off they no-op.
         // Cycle the selected band's filter slope 12→24→48 (shelves + HP/LP only;
         // gated inside the call). Uppercase so lowercase `s` keeps settings.
-        KeyCode::Char('S') if band_focus => app.cycle_band_slope(),
+        KeyCode::Char('S') if band_focus && app.prefs.show_slope => app.cycle_band_slope(),
         // Cycle the selected band's stereo scope Stereo→Mid→Side (all band types;
         // audible on ≥2ch). Uppercase, matching the `S` slope-cycle convention.
-        KeyCode::Char('M') if band_focus => app.cycle_band_scope(),
-        // Per-band channel targeting (multichannel only; gated inside the call).
-        KeyCode::Char('c') if band_focus => app.begin_select_band_channels(),
-        // L/R channel swap (≥2 channels; gated inside the call).
-        KeyCode::Char('w') => app.toggle_swap_lr(),
+        KeyCode::Char('M') if band_focus && app.prefs.show_scope => app.cycle_band_scope(),
+        // Per-band channel targeting (channels visible only).
+        KeyCode::Char('c') if band_focus && app.show_ch() => app.begin_select_band_channels(),
+        // L/R channel swap (channels visible only; also reachable from settings).
+        KeyCode::Char('w') if app.show_ch() => app.toggle_swap_lr(),
         KeyCode::Char('o') => app.begin_select_output(),
         // Toggle the Applications / Outputs volume panels (uppercase, so lowercase
         // `a`/`o` keep their band-add / output-selector meanings).
@@ -192,7 +194,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) {
         KeyCode::Char('O') => app.toggle_sinks_panel(),
         // Cycle output dither depth (uppercase, so lowercase `d` keeps its
         // delete-band meaning): Off → 16 → 20 → 24 → Off.
-        KeyCode::Char('D') => app.cycle_dither(),
+        KeyCode::Char('D') if app.prefs.show_dither => app.cycle_dither(),
         KeyCode::Char('?') => app.show_help(),
         _ => {}
     }
