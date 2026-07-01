@@ -16,6 +16,14 @@ pub struct Prefs {
     pub default_band_type: BandType,
     #[serde(default = "default_show_spectrum")]
     pub show_spectrum: bool,
+    /// Show the per-application volume panel (toggle with `A`). Defaults on, so
+    /// the panel still appears automatically once the daemon reports streams.
+    #[serde(default = "default_true")]
+    pub show_apps: bool,
+    /// Show the per-output-sink volume panel (toggle with `O`). Defaults off —
+    /// opt-in, so a plain launch stays uncluttered on small terminals.
+    #[serde(default = "default_false")]
+    pub show_sinks: bool,
 }
 
 fn default_fps() -> u64 {
@@ -41,6 +49,12 @@ fn default_band_type() -> BandType {
 fn default_show_spectrum() -> bool {
     true
 }
+fn default_true() -> bool {
+    true
+}
+fn default_false() -> bool {
+    false
+}
 
 impl Default for Prefs {
     fn default() -> Self {
@@ -51,6 +65,8 @@ impl Default for Prefs {
             default_band_q: default_band_q(),
             default_band_type: default_band_type(),
             show_spectrum: default_show_spectrum(),
+            show_apps: default_true(),
+            show_sinks: default_false(),
         }
     }
 }
@@ -75,12 +91,20 @@ impl Prefs {
     }
 
     pub fn save(&self) {
-        let p = Self::path();
-        if let Some(parent) = p.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(s) = toml::to_string(self) {
-            let _ = std::fs::write(p, s);
+        // Unit tests exercise the panel toggles (which persist prefs); they must
+        // never write the user's real config, or one test's save would leak into
+        // another `App::new()`/`Prefs::load()`.
+        #[cfg(test)]
+        let _ = self;
+        #[cfg(not(test))]
+        {
+            let p = Self::path();
+            if let Some(parent) = p.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(s) = toml::to_string(self) {
+                let _ = std::fs::write(p, s);
+            }
         }
     }
 }

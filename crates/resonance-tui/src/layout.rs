@@ -12,8 +12,10 @@ pub struct Panes {
     pub spectrum: Rect,
     pub effects: Rect,
     pub bands: Rect,
-    /// Per-application volume strip (height 0 when no apps are reported).
+    /// Per-application volume strip (zero-size when hidden).
     pub apps: Rect,
+    /// Per-output-sink volume strip (zero-size when hidden).
+    pub sinks: Rect,
     pub footer: Rect,
 }
 
@@ -24,17 +26,18 @@ pub struct Panes {
 /// it takes the lion's share of the height and grows with the window. The
 /// spectrum is a fixed strip that collapses to nothing when `show_spectrum` is
 /// off, handing its rows to the graph.
-pub fn panes(area: Rect, show_spectrum: bool, show_apps: bool) -> Panes {
+pub fn panes(area: Rect, show_spectrum: bool, show_apps: bool, show_sinks: bool) -> Panes {
     let spectrum_h = if show_spectrum { 13 } else { 0 };
-    // Per-app strip: a fixed bordered row below the controls, collapsing to
-    // nothing when the backend reports no application streams (progressive).
-    let apps_h = if show_apps { 7 } else { 0 };
+    // Applications + Outputs share one fixed bordered row below the controls,
+    // split side-by-side when both are shown (so two volume panels cost the same
+    // vertical space as one) and collapsing to nothing when neither is.
+    let extras_h = if show_apps || show_sinks { 7 } else { 0 };
     let v = Layout::vertical([
         Constraint::Length(1),          // status
         Constraint::Fill(3),            // EQ curve — the hero
         Constraint::Length(spectrum_h), // spectrum (0 = hidden)
         Constraint::Fill(2),            // bands + effects row
-        Constraint::Length(apps_h),     // applications (0 = hidden)
+        Constraint::Length(extras_h),   // applications | outputs (0 = hidden)
         Constraint::Length(1),          // footer
     ])
     .split(area);
@@ -43,13 +46,26 @@ pub fn panes(area: Rect, show_spectrum: bool, show_apps: bool) -> Panes {
     let bottom =
         Layout::horizontal([Constraint::Percentage(72), Constraint::Percentage(28)]).split(v[3]);
 
+    // Split the extras row: both → side-by-side halves; one → full width.
+    let (apps, sinks) = match (show_apps, show_sinks) {
+        (true, true) => {
+            let e = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(v[4]);
+            (e[0], e[1])
+        }
+        (true, false) => (v[4], Rect::default()),
+        (false, true) => (Rect::default(), v[4]),
+        (false, false) => (Rect::default(), Rect::default()),
+    };
+
     Panes {
         status: v[0],
         eq: v[1],
         spectrum: v[2],
         bands: bottom[0],
         effects: bottom[1],
-        apps: v[4],
+        apps,
+        sinks,
         footer: v[5],
     }
 }

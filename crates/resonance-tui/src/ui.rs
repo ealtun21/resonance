@@ -6,7 +6,7 @@ use crate::{
     curve,
     settings::{ConfirmAction, SettingsState, TABS},
 };
-use resonance_ipc::{AppStream, ChannelMask, RoutingMatrix};
+use resonance_ipc::{AppStream, ChannelMask, RoutingMatrix, SinkVolume};
 use resonance_reference::reference::SeriesRole;
 
 use ratatui::{
@@ -24,7 +24,12 @@ use ratatui::{
 const DB_RANGE: f64 = 18.0;
 
 pub fn render(app: &App, frame: &mut Frame) {
-    let p = crate::layout::panes(frame.area(), app.prefs.show_spectrum, app.has_apps());
+    let p = crate::layout::panes(
+        frame.area(),
+        app.prefs.show_spectrum,
+        app.apps_visible(),
+        app.sinks_visible(),
+    );
 
     render_status(app, frame, p.status);
     render_eq_curve(app, frame, p.eq);
@@ -33,8 +38,11 @@ pub fn render(app: &App, frame: &mut Frame) {
     }
     render_effects(app, frame, p.effects);
     render_bands(app, frame, p.bands);
-    if app.has_apps() {
+    if app.apps_visible() {
         render_apps(app, frame, p.apps);
+    }
+    if app.sinks_visible() {
+        render_sinks(app, frame, p.sinks);
     }
     render_footer(app, frame, p.footer);
 
@@ -117,6 +125,8 @@ fn render_help(frame: &mut Frame, area: Rect) {
         key("w", "swap L/R channels (≥2ch)"),
         key("l", "load preset (file browser)"),
         key("o", "select output device"),
+        key("A", "show/hide Applications panel"),
+        key("O", "show/hide Outputs panel"),
         key("s", "settings — profiles, devices, reference + Auto-EQ"),
         key("s → 6", "Reference tab: target curve, measurement, Auto-EQ"),
         Line::raw(""),
@@ -140,10 +150,11 @@ fn render_help(frame: &mut Frame, area: Rect) {
 // ── Footer / contextual help ───────────────────────────────────────────────
 
 fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
-    let common = "[Tab] focus  [↑↓] select  [←→] adjust  [+/-] preamp  [Space] toggle  [l] load  [s] settings  [o] output  [p] power  [?] help  [q] quit";
+    let common = "[Tab] focus  [↑↓] select  [←→] adjust  [+/-] preamp  [Space] toggle  [l] load  [s] settings  [o] output  [A] apps  [O] outputs  [p] power  [?] help  [q] quit";
     let mut ctx = match app.focus {
         Panel::Effects => "  •  [←→] intensity".to_string(),
-        Panel::Apps => "  •  [←→] volume  [Space] mute".to_string(),
+        Panel::Apps => "  •  [←→] volume  [Space] mute  [A] hide".to_string(),
+        Panel::Sinks => "  •  [←→] volume  [Space] mute  [O] hide".to_string(),
         Panel::Bands => "  •  [a] add  [d] del  [t] type".to_string(),
         Panel::Graph => {
             "  •  drag node: [↑↓] gain  [←→] freq  [ ][ ] select  [a/d/t] band".to_string()
@@ -888,8 +899,15 @@ fn render_apps(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         Style::default().fg(Color::DarkGray)
     };
+    let count = app.state.as_ref().map_or(0, |s| s.apps.len());
     let block = Block::default()
-        .title(Line::from(" Applications ").fg(if focused { Color::Cyan } else { Color::Magenta }))
+        .title(
+            Line::from(format!(" Applications · {count} ")).fg(if focused {
+                Color::Cyan
+            } else {
+                Color::Magenta
+            }),
+        )
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(border_style);
@@ -907,6 +925,116 @@ fn render_apps(app: &App, frame: &mut Frame, area: Rect) {
     let rows = Layout::vertical(vec![Constraint::Length(1); shown]).split(inner);
     for (idx, line) in rows.iter().enumerate() {
         render_app_row(app, frame, &state.apps[idx], idx, *line, focused);
+    }
+}
+
+/// The Outputs (per-output-sink) volume panel — the device-volume mirror of the
+/// Applications panel. Same row layout (mute dot · name · gauge · %), keyed by
+/// the sink's human description. Focus/select via Tab + arrows; `Space` mutes.
+fn render_sinks(app: &App, frame: &mut Frame, area: Rect) {
+    let focused = app.focus == Panel::Sinks;
+    let border_style = if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let count = app.state.as_ref().map_or(0, |s| s.sinks.len());
+    let block = Block::default()
+        .title(Line::from(format!(" Outputs · {count} ")).fg(if focused {
+            Color::Cyan
+        } else {
+            Color::Magenta
+        }))
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(border_style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some(state) = app.state.as_ref() else {
+        return;
+    };
+    let fit = inner.height as usize;
+    let shown = state.sinks.len().min(fit);
+    if shown == 0 {
+        return;
+    }
+    let rows = Layout::vertical(vec![Constraint::Length(1); shown]).split(inner);
+    for (idx, line) in rows.iter().enumerate() {
+        render_sink_row(app, frame, &state.sinks[idx], idx, *line, focused);
+    }
+}
+
+fn render_sink_row(
+    app: &App,
+    frame: &mut Frame,
+    sink: &SinkVolume,
+    idx: usize,
+    area: Rect,
+    panel_focused: bool,
+) {
+    let selected = panel_focused && app.sink_cursor == idx;
+    let label = if sink.description.is_empty() {
+        &sink.name
+    } else {
+        &sink.description
+    };
+    let name_style = if selected {
+        Style::default().fg(Color::Yellow).bold()
+    } else if sink.muted {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let mute_sym = if sink.muted {
+        Span::styled("○", Style::default().fg(Color::DarkGray))
+    } else {
+        Span::styled("●", Style::default().fg(Color::Green))
+    };
+    let pct = (sink.volume * 100.0).round() as i32;
+    let ratio = sink.volume.clamp(0.0, 1.0);
+
+    // Layout mirrors the app row: mute(1) · gap(1) · name(18) · gauge · " NNNN%"
+    let row = Layout::horizontal([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(18),
+        Constraint::Min(6),
+        Constraint::Length(6),
+    ])
+    .split(area);
+
+    frame.render_widget(Paragraph::new(Line::from(vec![mute_sym])), row[0]);
+    frame.render_widget(
+        Paragraph::new(Span::styled(fit_name(label, 18), name_style)),
+        row[2],
+    );
+    let gauge_color = if sink.muted {
+        Color::DarkGray
+    } else if selected {
+        Color::Yellow
+    } else {
+        Color::Cyan
+    };
+    let gauge = Gauge::default()
+        .gauge_style(Style::default().fg(gauge_color).bg(Color::Black))
+        .ratio(ratio)
+        .label("");
+    frame.render_widget(gauge, row[3]);
+    frame.render_widget(
+        Paragraph::new(format!(" {pct:4}%")).style(Style::default().fg(Color::Gray)),
+        row[4],
+    );
+}
+
+/// Truncate a volume-row label to `max` cells, appending `…` when cut, so long
+/// application/device names don't spill into the gauge. Shared by both panels.
+fn fit_name(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let keep = max.saturating_sub(1);
+        format!("{}…", s.chars().take(keep).collect::<String>())
     }
 }
 
@@ -946,7 +1074,7 @@ fn render_app_row(
 
     frame.render_widget(Paragraph::new(Line::from(vec![mute_sym])), row[0]);
     frame.render_widget(
-        Paragraph::new(Span::styled(stream.display_name.clone(), name_style)),
+        Paragraph::new(Span::styled(fit_name(&stream.display_name, 18), name_style)),
         row[2],
     );
     let gauge_color = if stream.muted {
@@ -2415,6 +2543,15 @@ mod tests {
         }
     }
 
+    fn sink_volume(name: &str, desc: &str, volume: f64, muted: bool) -> SinkVolume {
+        SinkVolume {
+            name: name.into(),
+            description: desc.into(),
+            volume,
+            muted,
+        }
+    }
+
     fn band(freq: f64, channels: ChannelMask) -> BandState {
         BandState {
             band_type: BandType::Peaking,
@@ -2504,6 +2641,7 @@ mod tests {
     #[test]
     fn applications_panel_lists_apps_when_present() {
         let mut app = App::new();
+        app.prefs.show_apps = true; // decouple from on-disk prefs
         let mut st = fixture(2);
         st.apps.push(app_stream("firefox.1", "Firefox", 1.0, false));
         st.apps.push(app_stream("spotify.2", "Spotify", 0.5, true));
@@ -2520,6 +2658,7 @@ mod tests {
     #[test]
     fn applications_panel_hidden_without_apps() {
         let mut app = App::new();
+        app.prefs.show_apps = true; // toggle on, but no apps → still hidden
         app.state = Some(fixture(2)); // fixture has no apps
         let text = render_to_text(&app, 120, 44);
         assert!(
@@ -2531,6 +2670,9 @@ mod tests {
     #[test]
     fn tab_includes_apps_only_when_present() {
         let mut app = App::new();
+        // Decouple from on-disk prefs: the panel-visibility toggles gate Tab now.
+        app.prefs.show_apps = true;
+        app.prefs.show_sinks = false;
         // No apps: Graph wraps straight back to Effects.
         app.state = Some(fixture(2));
         app.focus = Panel::Graph;
@@ -2545,6 +2687,39 @@ mod tests {
         assert_eq!(app.focus, Panel::Apps, "Graph should advance to Apps");
         app.next_panel();
         assert_eq!(app.focus, Panel::Effects, "Apps should wrap to Effects");
+    }
+
+    #[test]
+    fn outputs_panel_toggle_gates_visibility_and_tab() {
+        let mut app = App::new();
+        app.prefs.show_apps = false;
+        app.prefs.show_sinks = false;
+        let mut st = fixture(2);
+        st.sinks
+            .push(sink_volume("dev.uid", "Built-in Speakers", 0.85, false));
+        app.state = Some(st);
+        // Toggle off → not visible → Graph skips Outputs.
+        assert!(!app.sinks_visible(), "hidden while toggle off");
+        app.focus = Panel::Graph;
+        app.next_panel();
+        assert_eq!(
+            app.focus,
+            Panel::Effects,
+            "Graph should skip hidden Outputs"
+        );
+        // Toggle on → visible + in the Tab cycle after Graph.
+        app.toggle_sinks_panel();
+        assert!(app.sinks_visible(), "visible after toggle + sinks present");
+        app.focus = Panel::Graph;
+        app.next_panel();
+        assert_eq!(app.focus, Panel::Sinks, "Graph should advance to Outputs");
+        // Rendered panel shows the device label.
+        let text = render_to_text(&app, 120, 44);
+        assert!(text.contains("Outputs"), "Outputs title missing:\n{text}");
+        assert!(
+            text.contains("Built-in Speakers"),
+            "device label missing:\n{text}"
+        );
     }
 
     #[test]
@@ -2715,8 +2890,8 @@ mod tests {
     #[test]
     fn hiding_spectrum_enlarges_the_graph() {
         let area = ratatui::layout::Rect::new(0, 0, 100, 44);
-        let on = crate::layout::panes(area, true, false);
-        let off = crate::layout::panes(area, false, false);
+        let on = crate::layout::panes(area, true, false, false);
+        let off = crate::layout::panes(area, false, false, false);
         assert!(
             off.eq.height > on.eq.height,
             "graph should grow when the spectrum is hidden ({} → {})",

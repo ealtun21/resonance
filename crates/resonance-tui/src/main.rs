@@ -180,6 +180,10 @@ fn handle_normal(app: &mut App, key: KeyEvent) {
         // L/R channel swap (≥2 channels; gated inside the call).
         KeyCode::Char('w') => app.toggle_swap_lr(),
         KeyCode::Char('o') => app.begin_select_output(),
+        // Toggle the Applications / Outputs volume panels (uppercase, so lowercase
+        // `a`/`o` keep their band-add / output-selector meanings).
+        KeyCode::Char('A') => app.toggle_apps_panel(),
+        KeyCode::Char('O') => app.toggle_sinks_panel(),
         KeyCode::Char('?') => app.show_help(),
         _ => {}
     }

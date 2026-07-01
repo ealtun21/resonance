@@ -38,9 +38,12 @@ pub enum Panel {
     /// The interactive FR graph — nodes editable by keyboard (arrows) and mouse
     /// (click-select + drag).
     Graph,
-    /// Per-application volume/mute list (in the Tab cycle only when the daemon
-    /// reports application streams).
+    /// Per-application volume/mute list (in the Tab cycle only when visible:
+    /// `show_apps` pref on and the daemon reports application streams).
     Apps,
+    /// Per-output-sink (device) volume/mute list (in the Tab cycle only when
+    /// visible: `show_sinks` pref on and the daemon reports output sinks).
+    Sinks,
 }
 
 /// An in-progress mouse drag of a band node on the FR graph.
@@ -115,6 +118,7 @@ pub struct App {
     pub focus: Panel,
     pub effect_cursor: usize,
     pub app_cursor: usize,
+    pub sink_cursor: usize,
     pub band_cursor: usize,
     pub band_field: BandField,
     pub mode: InputMode,
@@ -184,6 +188,7 @@ impl App {
             focus: Panel::Effects,
             effect_cursor: 0,
             app_cursor: 0,
+            sink_cursor: 0,
             band_cursor: 0,
             band_field: BandField::Gain,
             mode: InputMode::Normal,
@@ -547,23 +552,78 @@ impl App {
                 BandField::Gain => self.band_field = BandField::Q,
                 BandField::Q => self.focus = Panel::Graph,
             },
-            // After the graph, visit Applications when the daemon reports any
-            // (otherwise wrap straight back to Effects).
+            // After the graph, visit the first visible extra panel (Applications
+            // then Outputs), else wrap straight back to Effects.
             Panel::Graph => {
-                self.focus = if self.has_apps() {
+                self.focus = if self.apps_visible() {
                     Panel::Apps
+                } else if self.sinks_visible() {
+                    Panel::Sinks
                 } else {
                     Panel::Effects
                 };
             }
-            Panel::Apps => self.focus = Panel::Effects,
+            Panel::Apps => {
+                self.focus = if self.sinks_visible() {
+                    Panel::Sinks
+                } else {
+                    Panel::Effects
+                };
+            }
+            Panel::Sinks => self.focus = Panel::Effects,
         }
     }
 
-    /// Whether the daemon currently reports any application streams (drives the
-    /// Applications panel's progressive disclosure + Tab inclusion).
+    /// Whether the daemon currently reports any application streams.
     pub fn has_apps(&self) -> bool {
         self.state.as_ref().is_some_and(|s| !s.apps.is_empty())
+    }
+
+    /// Whether the daemon currently reports any output sinks.
+    pub fn has_sinks(&self) -> bool {
+        self.state.as_ref().is_some_and(|s| !s.sinks.is_empty())
+    }
+
+    /// Whether the Applications panel is visible: the `show_apps` toggle is on
+    /// AND the daemon reports streams (progressive disclosure). Drives layout,
+    /// rendering and Tab inclusion.
+    pub fn apps_visible(&self) -> bool {
+        self.prefs.show_apps && self.has_apps()
+    }
+
+    /// Whether the Outputs panel is visible (`show_sinks` toggle on + sinks
+    /// reported).
+    pub fn sinks_visible(&self) -> bool {
+        self.prefs.show_sinks && self.has_sinks()
+    }
+
+    /// Toggle the Applications panel; if it was focused and is now hidden, move
+    /// focus back to Effects so the cursor never lands on an invisible panel.
+    pub fn toggle_apps_panel(&mut self) {
+        self.prefs.show_apps = !self.prefs.show_apps;
+        self.prefs.save();
+        if !self.apps_visible() && self.focus == Panel::Apps {
+            self.focus = Panel::Effects;
+        }
+        self.set_status(if self.prefs.show_apps {
+            "applications panel: on"
+        } else {
+            "applications panel: off"
+        });
+    }
+
+    /// Toggle the Outputs panel (see [`Self::toggle_apps_panel`]).
+    pub fn toggle_sinks_panel(&mut self) {
+        self.prefs.show_sinks = !self.prefs.show_sinks;
+        self.prefs.save();
+        if !self.sinks_visible() && self.focus == Panel::Sinks {
+            self.focus = Panel::Effects;
+        }
+        self.set_status(if self.prefs.show_sinks {
+            "outputs panel: on"
+        } else {
+            "outputs panel: off"
+        });
     }
 
     pub fn cursor_up(&mut self) {
@@ -576,6 +636,11 @@ impl App {
             Panel::Apps => {
                 if self.app_cursor > 0 {
                     self.app_cursor -= 1;
+                }
+            }
+            Panel::Sinks => {
+                if self.sink_cursor > 0 {
+                    self.sink_cursor -= 1;
                 }
             }
             Panel::Bands => {
@@ -603,6 +668,15 @@ impl App {
                     .map_or(0, |s| s.apps.len().saturating_sub(1));
                 if self.app_cursor < max {
                     self.app_cursor += 1;
+                }
+            }
+            Panel::Sinks => {
+                let max = self
+                    .state
+                    .as_ref()
+                    .map_or(0, |s| s.sinks.len().saturating_sub(1));
+                if self.sink_cursor < max {
+                    self.sink_cursor += 1;
                 }
             }
             Panel::Bands => {
@@ -690,6 +764,26 @@ impl App {
                     self.refresh_state();
                 }
             }
+            Panel::Sinks => {
+                // Per-output-sink volume nudge (mirrors the Apps arm). Not part
+                // of the EQ profile — no undo snapshot.
+                let Some((name, cur)) = self
+                    .state
+                    .as_ref()
+                    .and_then(|s| s.sinks.get(self.sink_cursor))
+                    .map(|s| (s.name.clone(), s.volume))
+                else {
+                    return;
+                };
+                let new_vol = ((cur + delta).clamp(0.0, 1.0) * 100.0).round() / 100.0;
+                if (new_vol - cur).abs() > 0.001 {
+                    self.send(Command::SetSinkVolume {
+                        name,
+                        volume: new_vol,
+                    });
+                    self.refresh_state();
+                }
+            }
             // Graph uses dedicated 2-axis nudges (gain/freq), not the single
             // active-field `adjust`; handled in the key dispatcher.
             Panel::Graph => {}
@@ -700,7 +794,12 @@ impl App {
 
     /// Resolve a click on the effects column to an effect index.
     fn hit_effect(&self, col: u16, row: u16) -> Option<usize> {
-        let p = crate::layout::panes(self.last_frame, self.prefs.show_spectrum, self.has_apps());
+        let p = crate::layout::panes(
+            self.last_frame,
+            self.prefs.show_spectrum,
+            self.apps_visible(),
+            self.sinks_visible(),
+        );
         if !crate::layout::hit(p.effects, col, row) {
             return None;
         }
@@ -711,7 +810,12 @@ impl App {
 
     /// Resolve a click on the bands panel to (band index, optional field).
     fn hit_band(&self, col: u16, row: u16) -> Option<(usize, BandHit)> {
-        let p = crate::layout::panes(self.last_frame, self.prefs.show_spectrum, self.has_apps());
+        let p = crate::layout::panes(
+            self.last_frame,
+            self.prefs.show_spectrum,
+            self.apps_visible(),
+            self.sinks_visible(),
+        );
         if !crate::layout::hit(p.bands, col, row) {
             return None;
         }
@@ -869,6 +973,22 @@ impl App {
                 self.send(Command::SetAppMute { key, muted: !muted });
                 self.refresh_state();
             }
+            // Toggle the selected output sink's mute.
+            Panel::Sinks => {
+                let Some((name, muted)) = self
+                    .state
+                    .as_ref()
+                    .and_then(|s| s.sinks.get(self.sink_cursor))
+                    .map(|s| (s.name.clone(), s.muted))
+                else {
+                    return;
+                };
+                self.send(Command::SetSinkMute {
+                    name,
+                    muted: !muted,
+                });
+                self.refresh_state();
+            }
         }
     }
 
@@ -876,14 +996,24 @@ impl App {
 
     /// The interactive plot rectangle of the EQ curve (None if too small).
     fn eq_plot(&self) -> Option<Rect> {
-        let p = crate::layout::panes(self.last_frame, self.prefs.show_spectrum, self.has_apps());
+        let p = crate::layout::panes(
+            self.last_frame,
+            self.prefs.show_spectrum,
+            self.apps_visible(),
+            self.sinks_visible(),
+        );
         let plot = crate::layout::eq_plot_area(p.eq);
         (plot.width >= 2 && plot.height >= 2).then_some(plot)
     }
 
     /// True if (col,row) is inside the EQ-curve panel.
     pub fn in_eq_panel(&self, col: u16, row: u16) -> bool {
-        let p = crate::layout::panes(self.last_frame, self.prefs.show_spectrum, self.has_apps());
+        let p = crate::layout::panes(
+            self.last_frame,
+            self.prefs.show_spectrum,
+            self.apps_visible(),
+            self.sinks_visible(),
+        );
         crate::layout::hit(p.eq, col, row)
     }
 
