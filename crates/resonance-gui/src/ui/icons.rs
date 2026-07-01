@@ -40,6 +40,7 @@ pub(crate) enum Icon {
     Chevron,
     Power,
     Help,
+    Grip,
 }
 
 /// Every icon with a label — drives the dev gallery (`RESONANCE_ICON_GALLERY=1`).
@@ -68,6 +69,7 @@ pub(crate) const ALL: &[(Icon, &str)] = &[
     (Icon::Chevron, "Chevron"),
     (Icon::Power, "Power"),
     (Icon::Help, "Help"),
+    (Icon::Grip, "Grip"),
 ];
 
 /// Draw `icon` centred in `rect`, tinted `color`. Stroke weight scales with the
@@ -211,6 +213,7 @@ fn paths(p: &Pen, icon: Icon) {
         Icon::Chevron => draw_chevron(p),
         Icon::Power => draw_power(p),
         Icon::Help => draw_help(p),
+        Icon::Grip => draw_grip(p),
     }
 }
 
@@ -430,6 +433,15 @@ fn draw_help(p: &Pen) {
         (0.50, 0.61),
     ]);
     p.dot(0.50, 0.71, 0.045);
+}
+
+/// Six dots in two columns — the "drag to reorder" grip handle.
+fn draw_grip(p: &Pen) {
+    for x in [0.38, 0.62] {
+        for y in [0.30, 0.50, 0.70] {
+            p.dot(x, y, 0.07);
+        }
+    }
 }
 
 /// Dev gallery: paint every icon in a labelled grid. Gated behind

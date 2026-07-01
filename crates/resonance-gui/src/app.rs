@@ -5,6 +5,7 @@
 //! authoritative `DaemonState` is re-fetched immediately afterwards (and on a
 //! periodic poll) so widgets always reflect the daemon.
 
+use crate::card_layout::{CardCol, CardId, CardLayout};
 use crate::curve;
 use crate::ipc::IpcClient;
 use crate::state::{Confirm, Dialog, Snapshot};
@@ -341,6 +342,14 @@ pub struct GuiApp {
     pub(crate) show_slope: bool,
     pub(crate) show_scope: bool,
     pub(crate) show_dither: bool,
+    /// User's arrangement of the movable control cards (persisted).
+    pub(crate) layout: CardLayout,
+    /// Session-only "arrange the layout" mode: shows draggable card tiles + drop
+    /// zones instead of the live cards. Never persisted.
+    pub(crate) layout_edit: bool,
+    /// A card move requested this frame by a drop, applied after the columns
+    /// finish rendering (so the lists aren't mutated mid-iteration).
+    pub(crate) pending_card_move: Option<(CardId, CardCol, usize)>,
     /// Graph series the user has hidden via the legend's eye toggles (keyed by
     /// the legend label, e.g. "FL"/"Result FR"/"Target"). Session-only.
     pub(crate) hidden_curves: std::collections::HashSet<String>,
@@ -689,6 +698,13 @@ impl GuiApp {
                 .storage
                 .and_then(|s| s.get_string("show_dither"))
                 .is_some_and(|v| v == "true"),
+            layout: cc
+                .storage
+                .and_then(|s| s.get_string("card_layout"))
+                .map(|s| CardLayout::from_json_or_default(&s))
+                .unwrap_or_default(),
+            layout_edit: std::env::var("RESONANCE_EDIT_LAYOUT").is_ok(),
+            pending_card_move: None,
             hidden_curves: std::collections::HashSet::new(),
             demo: std::env::var("RESONANCE_DEMO").is_ok(),
             open_customizer: std::env::var("RESONANCE_OPEN").as_deref() == Ok("customize"),
@@ -1220,6 +1236,9 @@ impl eframe::App for GuiApp {
         storage.set_string("show_slope", self.show_slope.to_string());
         storage.set_string("show_scope", self.show_scope.to_string());
         storage.set_string("show_dither", self.show_dither.to_string());
+        if let Ok(j) = serde_json::to_string(&self.layout) {
+            storage.set_string("card_layout", j);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1440,6 +1459,7 @@ impl GuiApp {
             d.remove::<PanelState>(egui::Id::new("controls_panel"));
             d.remove::<PanelState>(egui::Id::new("graph_narrow"));
         });
+        self.layout = CardLayout::default();
         self.set_status("layout reset");
     }
 
