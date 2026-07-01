@@ -273,6 +273,10 @@ pub enum Command {
     /// Set (or clear) the output dither target bit depth. `None` = off (bit-exact);
     /// `Some(16 | 20 | 24)` = TPDF-dither to that grid as the final DSP stage.
     SetDither { bits: Option<u32> },
+    /// Set an EQ band's filter slope in dB/oct (12/24/48). Applies to shelves +
+    /// HP/LP; ignored by single-biquad band types. `index` matches a band's
+    /// position in `DaemonState::bands`.
+    SetBandSlope { index: usize, slope_db_oct: u8 },
 }
 
 /// One of the two in-memory comparison slots for quick A/B auditioning.
@@ -573,6 +577,18 @@ pub struct BandState {
     /// (clients + daemon ship together).
     #[serde(default)]
     pub channels: ChannelMask,
+    /// Filter slope in dB/oct — 12 (default, single biquad), 24, or 48. Applies
+    /// to shelves + HP/LP; ignored by the single-biquad band types. `serde`
+    /// default keeps profiles written before slopes existed loading as 12.
+    #[serde(default = "default_slope_db_oct")]
+    pub slope_db_oct: u8,
+}
+
+/// Serde default for [`BandState::slope_db_oct`] — 12 dB/oct (single biquad),
+/// the pre-slope behaviour.
+#[must_use]
+pub fn default_slope_db_oct() -> u8 {
+    12
 }
 
 /// One application's audio stream that the daemon can volume/mute independently.
@@ -734,6 +750,7 @@ mod tests {
                 q: 1.41,
                 enabled: true,
                 channels: ChannelMask::single(0),
+                slope_db_oct: 24,
             }],
             effects: EffectsState {
                 fidelity_intensity: 0.5,
@@ -883,6 +900,7 @@ mod tests {
                 q: 8.0,
                 enabled: true,
                 channels: ChannelMask::single(1),
+                slope_db_oct: 48,
             }],
             effects: EffectsState {
                 fidelity_intensity: 0.5,

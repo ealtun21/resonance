@@ -1186,6 +1186,7 @@ impl GuiApp {
                         q: fl.q,
                         enabled: true,
                         channels: resonance_ipc::ChannelMask::ALL,
+                        slope_db_oct: resonance_ipc::default_slope_db_oct(),
                     })
                     .collect();
                 let _ = tx.send(crate::app::AutoEqOutcome {

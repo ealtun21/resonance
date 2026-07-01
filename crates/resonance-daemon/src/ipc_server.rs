@@ -161,6 +161,10 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
         } => handle_add_band(state, band_type, freq, gain_db, q),
         Command::RemoveBand { index } => handle_remove_band(state, index),
         Command::SetBandType { index, band_type } => handle_set_band_type(state, index, band_type),
+        Command::SetBandSlope {
+            index,
+            slope_db_oct,
+        } => handle_set_band_slope(state, index, slope_db_oct),
         Command::SetBandChannels { index, channels } => {
             handle_set_band_channels(state, index, channels)
         }
@@ -547,6 +551,23 @@ fn handle_set_band_type(state: &SharedState, index: usize, band_type: BandType) 
                 if let Ok(nf) = build_band(chain, band_type.into(), freq, gain_db, q, en, mask) {
                     chain.filters[index] = nf;
                 }
+            }
+        },
+    );
+    Response::Ok
+}
+
+/// Change an EQ band's filter slope (12/24/48 dB/oct).
+fn handle_set_band_slope(state: &SharedState, index: usize, slope_db_oct: u8) -> Response {
+    state.send(
+        AudioCommand::SetBandSlope {
+            index,
+            slope_db_oct,
+        },
+        move |chain| {
+            let sr = chain.sample_rate;
+            if let Some(f) = chain.filters.get_mut(index) {
+                let _ = f.set_slope(slope_db_oct, sr);
             }
         },
     );

@@ -210,6 +210,15 @@ pub fn apply_command(chain: &mut ProcessorChain, cmd: AudioCommand) {
                 let _ = f.update(band_type.into(), f.freq, f.gain_db, f.q, sr);
             }
         }
+        AudioCommand::SetBandSlope {
+            index,
+            slope_db_oct,
+        } => {
+            let sr = chain.sample_rate;
+            if let Some(f) = chain.filters.get_mut(index) {
+                let _ = f.set_slope(slope_db_oct, sr);
+            }
+        }
         AudioCommand::SetBandChannels { index, mask } => {
             if let Some(f) = chain.filters.get_mut(index) {
                 f.mask = mask;

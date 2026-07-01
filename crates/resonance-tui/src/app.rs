@@ -1373,6 +1373,7 @@ impl App {
                             q: fl.q,
                             enabled: true,
                             channels: ChannelMask::ALL,
+                            slope_db_oct: resonance_ipc::default_slope_db_oct(),
                         })
                         .collect();
                     AutoEqDone {

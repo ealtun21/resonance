@@ -304,6 +304,9 @@ pub struct ApoFilter {
     pub freq: f64,
     pub gain_db: f64,
     pub q: f64,
+    /// Filter slope in dB/oct (12/24/48) for shelves + HP/LP; ignored by the
+    /// single-biquad types. 12 = the original single-biquad behaviour.
+    pub slope_db_oct: u8,
     pub enabled: bool,
     /// Which channels this band applies to. Defaults to [`ChannelMask::ALL`] so a
     /// band loaded from a preset (or built without an explicit target) processes
@@ -315,6 +318,9 @@ pub struct ApoFilter {
     /// higher rate makes it realizable again — without touching `enabled`.
     realizable: bool,
     biquad: BiquadFilter,
+    /// Extra cascaded sections for steeper slopes (empty at 12 dB/oct, so the
+    /// common path is byte-identical to a single biquad).
+    extra: Vec<BiquadFilter>,
 }
 
 impl ApoFilter {
@@ -330,6 +336,7 @@ pub struct ApoFilterBuilder {
     freq: Option<f64>,
     gain_db: f64,
     q: f64,
+    slope_db_oct: u8,
     enabled: bool,
     channels: usize,
     sample_rate: Option<f64>,
@@ -359,6 +366,14 @@ impl ApoFilterBuilder {
     #[must_use]
     pub fn q(mut self, q: f64) -> Self {
         self.q = q;
+        self
+    }
+
+    /// Filter slope in dB/oct — 12 (default, single biquad), 24, or 48. Applies
+    /// to shelves + HP/LP; ignored by the single-biquad types.
+    #[must_use]
+    pub fn slope_db_oct(mut self, slope: u8) -> Self {
+        self.slope_db_oct = slope;
         self
     }
 
@@ -410,18 +425,26 @@ impl ApoFilterBuilder {
             0.0
         };
         let channels = if self.channels == 0 { 2 } else { self.channels };
+        let slope_db_oct = normalize_slope(self.slope_db_oct);
 
-        let coeffs = coeffs_for(filter_type, freq, gain_db, q, sr)?;
+        let mut coeffs = section_coeffs(filter_type, freq, gain_db, q, slope_db_oct, sr)?;
+        let head = coeffs.remove(0);
+        let extra = coeffs
+            .into_iter()
+            .map(|c| BiquadFilter::new(c, channels))
+            .collect();
 
         Ok(ApoFilter {
             filter_type,
             freq,
             gain_db,
             q,
+            slope_db_oct,
             enabled: self.enabled,
             mask: self.channel_mask,
             realizable: true,
-            biquad: BiquadFilter::new(coeffs, channels),
+            biquad: BiquadFilter::new(head, channels),
+            extra,
         })
     }
 }
@@ -450,6 +473,87 @@ fn coeffs_for(
     })
 }
 
+/// Per-section Butterworth Q values for an even-order low/high-pass cascade of
+/// `sections` biquads. Their product is maximally flat with the −3 dB point
+/// exactly at Fc for every order — the standard cascaded-biquad Butterworth
+/// pole-Q table (2nd/4th/8th order).
+fn butterworth_section_qs(sections: usize) -> &'static [f64] {
+    match sections {
+        2 => &[0.541_196_100, 1.306_562_965], // 4th order — 24 dB/oct
+        4 => &[0.509_795_579, 0.601_344_887, 0.899_976_223, 2.562_915_447], // 8th order — 48 dB/oct
+        _ => &[std::f64::consts::FRAC_1_SQRT_2], // 2nd order — 12 dB/oct
+    }
+}
+
+/// Filter types whose slope is adjustable (shelves + HP/LP). Peaking, Notch,
+/// `BandPass` and `AllPass` are single-biquad and ignore the slope.
+fn is_slope_type(ft: FilterType) -> bool {
+    matches!(
+        ft,
+        FilterType::LowShelf
+            | FilterType::LowShelf12Db
+            | FilterType::LowShelfQ
+            | FilterType::HighShelf
+            | FilterType::HighShelf12Db
+            | FilterType::HighShelfQ
+            | FilterType::LowPass
+            | FilterType::LowPassQ
+            | FilterType::HighPass
+            | FilterType::HighPassQ
+    )
+}
+
+/// Number of cascaded biquad sections for a slope: 12→1, 24→2, 48→4.
+fn sections_for_slope(slope_db_oct: u8) -> usize {
+    match slope_db_oct {
+        24 => 2,
+        48 => 4,
+        _ => 1,
+    }
+}
+
+/// Normalise an arbitrary slope value to the supported set {12, 24, 48} dB/oct.
+fn normalize_slope(slope_db_oct: u8) -> u8 {
+    match slope_db_oct {
+        24 => 24,
+        48 => 48,
+        _ => 12,
+    }
+}
+
+/// Coefficients for every cascaded section realising `filter_type` at `slope`.
+/// A single biquad (identical to [`coeffs_for`]) for non-slope types or 12 dB/oct;
+/// a Butterworth cascade otherwise. Shelves split their gain across sections so
+/// the pass-band gain is unchanged as the slope steepens.
+fn section_coeffs(
+    filter_type: FilterType,
+    freq: f64,
+    gain_db: f64,
+    q: f64,
+    slope_db_oct: u8,
+    sr: f64,
+) -> Result<Vec<BiquadCoeffs>, FilterError> {
+    let n = sections_for_slope(slope_db_oct);
+    if n == 1 || !is_slope_type(filter_type) {
+        return Ok(vec![coeffs_for(filter_type, freq, gain_db, q, sr)?]);
+    }
+    let per_section_gain = gain_db / n as f64;
+    butterworth_section_qs(n)
+        .iter()
+        .map(|&qk| match filter_type {
+            FilterType::LowPass | FilterType::LowPassQ => BiquadCoeffs::low_pass(freq, qk, sr),
+            FilterType::HighPass | FilterType::HighPassQ => BiquadCoeffs::high_pass(freq, qk, sr),
+            FilterType::LowShelf | FilterType::LowShelf12Db | FilterType::LowShelfQ => {
+                BiquadCoeffs::low_shelf(freq, per_section_gain, qk, sr)
+            }
+            FilterType::HighShelf | FilterType::HighShelf12Db | FilterType::HighShelfQ => {
+                BiquadCoeffs::high_shelf(freq, per_section_gain, qk, sr)
+            }
+            _ => unreachable!("non-slope types return a single biquad above"),
+        })
+        .collect()
+}
+
 impl ApoFilter {
     /// Re-evaluate whether the band is realizable at `sr`, holding it inert when
     /// not (rather than leaving stale coefficients live). Returns the result.
@@ -464,7 +568,11 @@ impl ApoFilter {
         if !self.enabled || !self.realizable {
             return sample;
         }
-        self.biquad.process_channel(sample, channel)
+        let mut y = self.biquad.process_channel(sample, channel);
+        for section in &mut self.extra {
+            y = section.process_channel(y, channel);
+        }
+        y
     }
 
     /// Recompute coefficients in place, **preserving** the running filter state.
@@ -488,17 +596,42 @@ impl ApoFilter {
         // (`SetBand`) and presets, so a NaN gain must not poison the biquad.
         let q = if !q.is_finite() || q <= 0.0 { 0.707 } else { q };
         let gain_db = if gain_db.is_finite() { gain_db } else { 0.0 };
-        let coeffs = coeffs_for(filter_type, freq, gain_db, q, sr)?;
+        let coeffs = section_coeffs(filter_type, freq, gain_db, q, self.slope_db_oct, sr)?;
         self.filter_type = filter_type;
         self.freq = freq;
         self.gain_db = gain_db;
         self.q = q;
-        self.biquad.coeffs = coeffs;
+        self.biquad.coeffs = coeffs[0];
+        // Update the extra sections in place when the count is unchanged so live
+        // parameter edits keep the running state (click-free); otherwise rebuild.
+        let channels = self.biquad.states.len();
+        if self.extra.len() == coeffs.len() - 1 {
+            for (section, c) in self.extra.iter_mut().zip(&coeffs[1..]) {
+                section.coeffs = *c;
+            }
+        } else {
+            self.extra = coeffs[1..]
+                .iter()
+                .map(|c| BiquadFilter::new(*c, channels))
+                .collect();
+        }
         Ok(())
+    }
+
+    /// Change the slope (12/24/48 dB/oct) and rebuild the section cascade at `sr`.
+    /// Leaves the filter untouched on bad coefficients.
+    ///
+    /// # Errors
+    /// Returns [`FilterError`] if the current parameters are not realisable at
+    /// `sr` (same conditions as [`Self::update`]).
+    pub fn set_slope(&mut self, slope_db_oct: u8, sr: f64) -> Result<(), FilterError> {
+        self.slope_db_oct = normalize_slope(slope_db_oct);
+        self.update(self.filter_type, self.freq, self.gain_db, self.q, sr)
     }
 
     pub fn reset(&mut self) {
         self.biquad.reset();
+        self.extra.iter_mut().for_each(BiquadFilter::reset);
     }
 
     /// Resize per-channel filter state to `channels` (device renegotiation). The
@@ -506,6 +639,7 @@ impl ApoFilter {
     /// after a widen — and existing channels keep their running history.
     pub fn set_channels(&mut self, channels: usize) {
         self.biquad.set_channels(channels);
+        self.extra.iter_mut().for_each(|s| s.set_channels(channels));
     }
 }
 
@@ -820,5 +954,102 @@ mod tests {
     fn invalid_q_rejected() {
         assert!(BiquadCoeffs::peaking(1000.0, 0.0, 0.0, SR).is_err());
         assert!(BiquadCoeffs::peaking(1000.0, 0.0, -1.0, SR).is_err());
+    }
+
+    // ── Adjustable slopes (12/24/48 dB/oct Butterworth cascade) ─────────────
+
+    fn build_slope(ft: FilterType, freq: f64, gain_db: f64, q: f64, slope: u8) -> ApoFilter {
+        ApoFilter::builder()
+            .filter_type(ft)
+            .freq(freq)
+            .gain_db(gain_db)
+            .q(q)
+            .slope_db_oct(slope)
+            .enabled(true)
+            .channels(1)
+            .sample_rate(SR)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    // float_cmp: 12 dB/oct must be byte-identical to the pre-slope single biquad.
+    #[allow(clippy::float_cmp)]
+    fn slope_12db_is_bit_exact_to_single_biquad() {
+        // The default/12 dB path must reproduce the original single-biquad output
+        // exactly, so existing presets are unchanged.
+        let mut sloped = build_slope(FilterType::LowPass, 1000.0, 0.0, 0.707, 12);
+        let c = BiquadCoeffs::low_pass(1000.0, 0.707, SR).unwrap();
+        let mut state = BiquadState::default();
+        for i in 0..1024 {
+            let x = (f64::from(i) * 0.05).sin();
+            let a = sloped.process_channel(x, 0);
+            let b = state.process(x, &c);
+            assert_eq!(a.to_bits(), b.to_bits(), "12 dB slope diverged at {i}");
+        }
+    }
+
+    #[test]
+    fn lowpass_slope_rejection_matches_order() {
+        // One octave above Fc a Butterworth LP is down ~order·6 dB.
+        for (slope, expected) in [(12u8, -12.3), (24, -24.1), (48, -48.2)] {
+            let mut f = build_slope(FilterType::LowPass, 1000.0, 0.0, 0.707, slope);
+            let g = filter_gain_db(&mut f, 2000.0, SR);
+            assert!(
+                (g - expected).abs() < 3.0,
+                "LP {slope} dB/oct at 2·Fc: got {g:.1} dB, expected ~{expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn highpass_slope_rejection_matches_order() {
+        // One octave below Fc a Butterworth HP is down ~order·6 dB.
+        for (slope, expected) in [(12u8, -12.3), (24, -24.1), (48, -48.2)] {
+            let mut f = build_slope(FilterType::HighPass, 1000.0, 0.0, 0.707, slope);
+            let g = filter_gain_db(&mut f, 500.0, SR);
+            assert!(
+                (g - expected).abs() < 3.0,
+                "HP {slope} dB/oct at Fc/2: got {g:.1} dB, expected ~{expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn lowpass_minus3db_at_fc_all_orders() {
+        // Butterworth is maximally flat with the −3 dB point exactly at Fc for
+        // every order.
+        for slope in [12u8, 24, 48] {
+            let mut f = build_slope(FilterType::LowPass, 1000.0, 0.0, 0.707, slope);
+            let g = filter_gain_db(&mut f, 1000.0, SR);
+            assert!(
+                (g - (-3.0)).abs() < 1.0,
+                "LP {slope} dB/oct at Fc should be ~−3 dB, got {g:.2}"
+            );
+        }
+    }
+
+    #[test]
+    fn high_shelf_reaches_full_gain_all_orders() {
+        // A steeper shelf must still reach its full gain in the pass band.
+        for slope in [12u8, 24, 48] {
+            let mut f = build_slope(FilterType::HighShelf, 1000.0, 6.0, 0.707, slope);
+            let g = filter_gain_db(&mut f, 12000.0, SR);
+            assert!(
+                (g - 6.0).abs() < 1.0,
+                "high shelf {slope} dB/oct should reach +6 dB, got {g:.2}"
+            );
+        }
+    }
+
+    #[test]
+    fn slope_ignored_for_peaking() {
+        // Peaking is single-biquad; a slope value must not change its response.
+        let mut a = build_slope(FilterType::Peaking, 1000.0, 6.0, 1.0, 48);
+        let g = filter_gain_db(&mut a, 1000.0, SR);
+        assert!(
+            (g - 6.0).abs() < 0.5,
+            "peaking +6 dB unaffected by slope: {g:.2}"
+        );
     }
 }

@@ -1038,6 +1038,7 @@ fn demo_state() -> DaemonState {
         q,
         enabled,
         channels,
+        slope_db_oct: 12,
     };
     DaemonState {
         enabled: true,

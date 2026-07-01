@@ -2569,6 +2569,7 @@ mod tests {
             q: 1.4,
             enabled: true,
             channels,
+            slope_db_oct: 12,
         }
     }
 
