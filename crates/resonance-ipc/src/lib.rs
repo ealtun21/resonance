@@ -414,6 +414,31 @@ impl BandType {
             BandType::BandPass => BandType::Peaking,
         }
     }
+
+    /// Whether the per-band filter slope ([`BandState::slope_db_oct`]) is
+    /// meaningful for this type. Only shelves and high/low-pass filters build
+    /// cascaded sections for steeper slopes; the single-biquad types (peaking,
+    /// notch, band-pass, all-pass) ignore the slope. Front-ends gate their slope
+    /// control on this.
+    #[must_use]
+    pub fn uses_slope(self) -> bool {
+        matches!(
+            self,
+            BandType::LowShelf | BandType::HighShelf | BandType::LowPass | BandType::HighPass
+        )
+    }
+}
+
+/// Cycle a filter slope through the supported values 12 → 24 → 48 → 12 dB/oct.
+/// Any unexpected value snaps back to 12. Shared by the front-ends' slope
+/// controls.
+#[must_use]
+pub fn next_slope_db_oct(slope_db_oct: u8) -> u8 {
+    match slope_db_oct {
+        12 => 24,
+        24 => 48,
+        _ => 12,
+    }
 }
 
 impl From<FilterType> for BandType {
