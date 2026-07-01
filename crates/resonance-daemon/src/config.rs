@@ -22,6 +22,10 @@ pub struct Profile {
     pub enabled: bool,
     pub effects: EffectsState,
     pub bands: Vec<BandState>,
+    /// Output dither target bit depth (`None` = off). `serde` default so profiles
+    /// written before dither existed still load.
+    #[serde(default)]
+    pub dither_bits: Option<u32>,
 }
 
 impl Profile {
@@ -32,6 +36,7 @@ impl Profile {
             enabled: s.enabled,
             effects: s.effects.clone(),
             bands: s.bands.clone(),
+            dither_bits: s.dither_bits,
         }
     }
 
@@ -78,8 +83,12 @@ impl Profile {
                 // equivalent, so it starts off for preset-derived profiles.
                 loudness_intensity: 0.0,
                 loudness_enabled: false,
+                // Crossfeed likewise has no preset equivalent — off by default.
+                crossfeed_intensity: 0.0,
+                crossfeed_enabled: false,
             },
             bands,
+            dither_bits: None,
         }
     }
 
@@ -118,6 +127,7 @@ impl Profile {
             chain.set_effect_intensity(fx, intensity);
             chain.set_effect_enabled(fx, enabled);
         }
+        chain.set_dither(self.dither_bits);
 
         chain
     }
@@ -421,6 +431,7 @@ mod tests {
             preamp_db: 0.0,
             enabled: true,
             effects: EffectsState::default(),
+            dither_bits: None,
             bands: vec![
                 BandState {
                     band_type: BandType::Peaking,

@@ -149,6 +149,7 @@ pub fn apply_command(chain: &mut ProcessorChain, cmd: AudioCommand) {
             chain.set_effect_intensity(effect, value);
         }
         AudioCommand::SetEffectEnabled { effect, on } => chain.set_effect_enabled(effect, on),
+        AudioCommand::SetDither { bits } => chain.set_dither(bits),
         AudioCommand::ReplaceChain(c) => {
             // The incoming chain carries the shadow/preset construction rate
             // (often 48 kHz), but the RT thread may be running at the live

@@ -656,7 +656,7 @@ impl App {
     pub fn cursor_down(&mut self) {
         match self.focus {
             Panel::Effects => {
-                let max = 4; // 5 effects
+                let max = EFFECT_NAMES.len() - 1;
                 if self.effect_cursor < max {
                     self.effect_cursor += 1;
                 }
@@ -1593,6 +1593,20 @@ impl App {
         }
     }
 
+    /// Cycle the output TPDF dither depth: Off → 16 → 20 → 24 → Off.
+    pub fn cycle_dither(&mut self) {
+        let current = self.state.as_ref().and_then(|s| s.dither_bits);
+        let next = match current {
+            None => Some(16),
+            Some(16) => Some(20),
+            Some(20) => Some(24),
+            _ => None,
+        };
+        self.push_undo();
+        self.send(Command::SetDither { bits: next });
+        self.refresh_state();
+    }
+
     // ── Settings popup ─────────────────────────────────────────────────────
 
     pub fn begin_settings(&mut self) {
@@ -2161,11 +2175,21 @@ impl App {
 // ── FxSound effect helpers ─────────────────────────────────────────────────
 
 /// Narrow labels for the TUI effects column (kept local: "Dyn Boost" fits where
-/// the shared `FxEffectId::label()` "Dynamic Boost" would not).
-pub const EFFECT_NAMES: [&str; 5] = ["Fidelity", "Ambience", "Surround", "Dyn Boost", "Bass"];
+/// the shared `FxEffectId::label()` "Dynamic Boost" would not). One entry per
+/// `FxEffectId::ALL` variant, in chain order — the array length drives the
+/// effects column's row count, so a new effect appears here and renders.
+pub const EFFECT_NAMES: [&str; FxEffectId::ALL.len()] = [
+    "Fidelity",
+    "Ambience",
+    "Surround",
+    "Dyn Boost",
+    "Bass",
+    "Loudness",
+    "Crossfeed",
+];
 
 pub fn fx_effect_at(idx: usize) -> FxEffectId {
-    FxEffectId::ALL[idx.min(4)]
+    FxEffectId::ALL[idx.min(FxEffectId::ALL.len() - 1)]
 }
 
 /// Minimum intensity for an effect: Surround and Bass are bipolar (−1), others 0.

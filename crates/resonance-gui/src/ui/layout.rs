@@ -201,6 +201,11 @@ impl GuiApp {
                         section_hint(ui, "Effects", "DSP sound effects", |ui| {
                             self.effects_section(ui, s);
                         });
+                        // Output stage (dither) sits directly under the effects rack.
+                        ui.add_space(12.0);
+                        section_hint(ui, "Output", "dither", |ui| {
+                            self.output_section(ui, s);
+                        });
                         // Channels sits under Effects (matches the design mock).
                         // Multi-channel-only — stereo users still get the L/R swap.
                         if s.channels >= 2 {
@@ -267,6 +272,10 @@ impl GuiApp {
                 if let Some(s) = state {
                     section_hint(ui, "Effects", "DSP sound effects", |ui| {
                         self.effects_section(ui, s);
+                    });
+                    ui.add_space(GAP);
+                    section_hint(ui, "Output", "dither", |ui| {
+                        self.output_section(ui, s);
                     });
                     if !s.apps.is_empty() {
                         ui.add_space(GAP);

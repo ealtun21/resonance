@@ -23,6 +23,10 @@ pub enum AudioCommand {
         effect: FxEffect,
         on: bool,
     },
+    /// Set (or clear) the final-stage output dither target bit depth.
+    SetDither {
+        bits: Option<u32>,
+    },
     ReplaceChain(Box<ProcessorChain>),
     #[allow(dead_code)]
     Reset,
@@ -284,6 +288,7 @@ impl SharedState {
             eq_enabled: true,
             bands,
             effects,
+            dither_bits: chain.dither.bits(),
             current_preset: inner.current_preset.clone(),
             // Prefer the live rate the RT thread reports (it follows device/graph
             // renegotiation); fall back to the mirror chain before audio starts.

@@ -811,6 +811,88 @@ impl Effect for LoudnessEffect {
     }
 }
 
+// ── Crossfeed — Bauer/Meier headphone crossfeed ───────────────────────────────
+//
+// Each ear also hears an attenuated, low-passed copy of the opposite channel.
+// The low-pass stands in for the frequency-dependent head shadow (an ITD/ILD
+// approximation), so low frequencies bleed across more than highs. Mixing the
+// opposite channel narrows the stereo image, relieving the unnaturally hard
+// left/right separation of headphones and reducing listening fatigue.
+//
+//   outL = (L + level · lp(R)) / (1 + level)
+//   outR = (R + level · lp(L)) / (1 + level)
+//
+// The 1/(1+level) compensation keeps a centred (mono) low-frequency signal at
+// unity so crossfeed adds no bass build-up. `intensity` 0 → level 0 → the early
+// return makes it a bit-exact passthrough. Stereo semantics only: channels 0 and
+// 1 are the L/R pair; any further channels pass through untouched.
+
+const CROSSFEED_CUTOFF_HZ: f64 = 700.0; // head-shadow low-pass corner
+const CROSSFEED_LEVEL_MAX: f64 = 0.5; // opposite-ear mix at full intensity
+
+#[derive(Debug, Clone)]
+pub struct CrossfeedEffect {
+    intensity: f64,
+    enabled: bool,
+    alpha: f64,
+    lp: Vec<f64>, // one-pole low-pass state, one per channel
+}
+
+impl CrossfeedEffect {
+    #[must_use]
+    pub fn new(channels: usize, sample_rate: f64) -> Self {
+        // One-pole low-pass coefficient α = 1 − e^(−2π·fc/fs). Clamp the corner
+        // below Nyquist so it stays well-formed at any negotiated rate.
+        let fc = CROSSFEED_CUTOFF_HZ.min(0.45 * sample_rate);
+        let alpha = 1.0 - (-2.0 * PI * fc / sample_rate).exp();
+        Self {
+            intensity: 0.0,
+            enabled: true,
+            alpha,
+            lp: vec![0.0; channels.max(2)],
+        }
+    }
+}
+
+impl Effect for CrossfeedEffect {
+    fn process(&mut self, samples: &mut [f64], channels: usize) {
+        if !self.enabled || self.intensity == 0.0 || channels < 2 {
+            return;
+        }
+        let level = self.intensity * CROSSFEED_LEVEL_MAX;
+        let norm = 1.0 / (1.0 + level);
+        let frames = samples.len() / channels;
+        for frame in 0..frames {
+            let il = frame * channels;
+            let ir = il + 1;
+            let l = samples[il];
+            let r = samples[ir];
+            // Low-pass each source channel (state carried across frames).
+            self.lp[0] += self.alpha * (l - self.lp[0]);
+            self.lp[1] += self.alpha * (r - self.lp[1]);
+            samples[il] = (l + level * self.lp[1]) * norm;
+            samples[ir] = (r + level * self.lp[0]) * norm;
+        }
+    }
+
+    fn reset(&mut self) {
+        self.lp.iter_mut().for_each(|s| *s = 0.0);
+    }
+
+    fn set_intensity(&mut self, v: f64) {
+        self.intensity = v.clamp(0.0, 1.0);
+    }
+    fn intensity(&self) -> f64 {
+        self.intensity
+    }
+    fn enabled(&self) -> bool {
+        self.enabled
+    }
+    fn set_enabled(&mut self, on: bool) {
+        self.enabled = on;
+    }
+}
+
 #[cfg(test)]
 mod loudness_contour_tests {
     use super::{Effect, LoudnessEffect, iso226};

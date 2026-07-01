@@ -1085,6 +1085,8 @@ fn demo_state() -> DaemonState {
             bass_enabled: true,
             loudness_intensity: 0.4,
             loudness_enabled: true,
+            crossfeed_intensity: 0.25,
+            crossfeed_enabled: true,
         },
         current_preset: Some("Reference".into()),
         sample_rate: 48000.0,
@@ -1168,6 +1170,7 @@ fn demo_state() -> DaemonState {
                 muted: false,
             },
         ],
+        dither_bits: None,
     }
 }
 

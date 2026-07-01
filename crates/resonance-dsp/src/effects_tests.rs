@@ -1,6 +1,6 @@
 use crate::effects::{
-    AmbienceEffect, BassBoostEffect, DynamicBoostEffect, Effect, FidelityEffect, LoudnessEffect,
-    SurroundEffect,
+    AmbienceEffect, BassBoostEffect, CrossfeedEffect, DynamicBoostEffect, Effect, FidelityEffect,
+    LoudnessEffect, SurroundEffect,
 };
 use rustfft::{FftPlanner, num_complex::Complex};
 use std::f64::consts::PI;
@@ -585,4 +585,140 @@ fn loudness_gain_grows_with_intensity() {
         high > low && low > 0.0,
         "more intensity = more bass boost ({low:.1} → {high:.1} dB)"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CROSSFEED — Bauer/Meier headphone crossfeed: each ear also hears an
+// attenuated, low-passed copy of the opposite channel, narrowing the stereo
+// image to reduce listening fatigue. Bit-exact bypass at intensity 0.
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn deinterleave(buf: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    (
+        buf.iter().step_by(2).copied().collect(),
+        buf.iter().skip(1).step_by(2).copied().collect(),
+    )
+}
+
+fn side_rms(buf: &[f64]) -> f64 {
+    let (l, r) = deinterleave(buf);
+    let side: Vec<f64> = l.iter().zip(&r).map(|(a, b)| (a - b) / 2.0).collect();
+    rms(&side)
+}
+
+#[test]
+fn crossfeed_bypass_at_zero_is_bit_exact() {
+    let mut fx = CrossfeedEffect::new(2, SR);
+    // Default intensity is 0 → the effect must be a bit-exact passthrough.
+    let input: Vec<f64> = (0..512)
+        .map(|i| (f64::from(i) * 0.03).sin() * 0.5)
+        .collect();
+    let mut buf = input.clone();
+    fx.process(&mut buf, 2);
+    assert_eq!(buf, input);
+}
+
+#[test]
+fn crossfeed_mono_signal_is_bypass() {
+    // With a single channel there is no opposite ear to feed → passthrough.
+    let mut fx = CrossfeedEffect::new(1, SR);
+    fx.set_intensity(1.0);
+    let input: Vec<f64> = (0..256).map(|i| (f64::from(i) * 0.04).sin()).collect();
+    let mut buf = input.clone();
+    fx.process(&mut buf, 1);
+    assert_eq!(buf, input);
+}
+
+#[test]
+fn crossfeed_reduces_side_energy() {
+    // Anti-phase content (L = +x, R = −x) is a pure side signal. Crossfeed mixes
+    // the opposite channel in, so the difference (and thus the stereo width)
+    // must shrink — the defining behaviour of crossfeed.
+    const FRAMES: usize = 8192;
+    let x = sine(200.0, FRAMES, 0.5);
+    let mut buf: Vec<f64> = x.iter().flat_map(|&s| [s, -s]).collect();
+    let before = side_rms(&buf);
+    let mut fx = CrossfeedEffect::new(2, SR);
+    fx.set_intensity(1.0);
+    fx.process(&mut buf, 2);
+    let after = side_rms(&buf);
+    assert!(
+        after < before * 0.95,
+        "crossfeed should narrow the image: side {before:.4} → {after:.4}"
+    );
+}
+
+#[test]
+fn crossfeed_bleeds_into_silent_channel() {
+    // Hard-left input (R = 0): the right ear must receive some of the left.
+    const FRAMES: usize = 4096;
+    let l = sine(200.0, FRAMES, 0.5);
+    let mut buf: Vec<f64> = l.iter().flat_map(|&x| [x, 0.0]).collect();
+    let mut fx = CrossfeedEffect::new(2, SR);
+    fx.set_intensity(1.0);
+    fx.process(&mut buf, 2);
+    let (_l, r) = deinterleave(&buf);
+    assert!(
+        rms(&r) > 0.01,
+        "right channel should get bleed, got {}",
+        rms(&r)
+    );
+}
+
+#[test]
+fn crossfeed_bleed_is_lowpassed() {
+    // The crossfeed path is low-passed (stands in for head-shadow), so a low
+    // tone bleeds into the opposite ear far more than a high tone.
+    const FRAMES: usize = 8192;
+    let bleed_rms = |freq: f64| {
+        let l = sine(freq, FRAMES, 0.5);
+        let mut buf: Vec<f64> = l.iter().flat_map(|&x| [x, 0.0]).collect();
+        let mut fx = CrossfeedEffect::new(2, SR);
+        fx.set_intensity(1.0);
+        fx.process(&mut buf, 2);
+        let (_l, r) = deinterleave(&buf);
+        rms(&r)
+    };
+    let low = bleed_rms(150.0);
+    let high = bleed_rms(6000.0);
+    assert!(
+        low > high * 2.0,
+        "low-freq bleed {low:.4} should dominate high-freq bleed {high:.4}"
+    );
+}
+
+#[test]
+fn crossfeed_preserves_low_freq_mono_level() {
+    // A centred (mono) low-frequency signal must not be boosted or cut — the
+    // level compensation keeps it within ±0.5 dB (no bass build-up).
+    const FRAMES: usize = 8192;
+    let m = sine(100.0, FRAMES, 0.5);
+    let mut buf: Vec<f64> = m.iter().flat_map(|&x| [x, x]).collect();
+    let (l0, _) = deinterleave(&buf);
+    let before = rms(&l0);
+    let mut fx = CrossfeedEffect::new(2, SR);
+    fx.set_intensity(1.0);
+    fx.process(&mut buf, 2);
+    let (l1, _) = deinterleave(&buf);
+    let db = 20.0 * (rms(&l1) / before).log10();
+    assert!(
+        db.abs() < 0.5,
+        "mono low-freq level within 0.5 dB, got {db:.2} dB"
+    );
+}
+
+#[test]
+fn crossfeed_stable_across_rates() {
+    for sr in [44_100.0, 96_000.0, 192_000.0] {
+        let mut fx = CrossfeedEffect::new(2, sr);
+        fx.set_intensity(1.0);
+        let mut buf: Vec<f64> = (0..1024)
+            .map(|i| (f64::from(i) * 0.05).sin() * 0.5)
+            .collect();
+        fx.process(&mut buf, 2);
+        assert!(
+            buf.iter().all(|s| s.is_finite()),
+            "non-finite output at {sr} Hz"
+        );
+    }
 }

@@ -69,4 +69,37 @@ impl GuiApp {
             }
         }
     }
+
+    /// Output-stage settings: currently the TPDF dither selector (Off / 16 / 20 /
+    /// 24-bit). A segmented row of pills — `active` marks the live `dither_bits`.
+    pub(crate) fn output_section(&mut self, ui: &mut egui::Ui, state: &DaemonState) {
+        // (label, bits) — `None` = dither off.
+        const CHOICES: [(&str, Option<u32>); 4] = [
+            ("Off", None),
+            ("16", Some(16)),
+            ("20", Some(20)),
+            ("24", Some(24)),
+        ];
+        ui.horizontal(|ui| {
+            ui.set_min_height(kit::CTRL_H);
+            ui.spacing_mut().item_spacing.x = kit::SP_XS;
+            let t = kit::tokens(ui);
+            ui.painter().text(
+                egui::pos2(ui.cursor().left(), ui.cursor().center().y),
+                egui::Align2::LEFT_CENTER,
+                "Dither",
+                egui::FontId::proportional(kit::T_BODY),
+                t.dim,
+            );
+            ui.add_space(kit::text_width(ui, kit::T_BODY, "Dither") + kit::SP_S);
+            for (label, bits) in CHOICES {
+                let active = state.dither_bits == bits;
+                if kit::pill_icon(ui, None, label, active, false, true, "output dither depth")
+                    && !active
+                {
+                    self.queue_edit(Command::SetDither { bits });
+                }
+            }
+        });
+    }
 }
