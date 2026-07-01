@@ -118,9 +118,17 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
         sinks_vol_tx,
         sink_ctl_rx,
     } = ctx;
-    // Per-output-sink volume isn't implemented on macOS yet; drop the channel
-    // ends so they're inert.
-    let _ = (sinks_vol_tx, sink_ctl_rx);
+    // Per-output-sink (device) volume/mute control plane. Two threads mirror
+    // the per-app pattern: control drains SinkCtl requests and writes them to the
+    // matching CoreAudio device by UID; enumeration reads live device volume/mute
+    // (~2 Hz, source of truth for external System Settings changes) with any
+    // just-set optimistic value overlaid until the read-back catches up. The
+    // shared `pending` map bridges the two (device is authoritative; the map only
+    // hides one-poll lag). Needs no TCC — device volume touches no audio capture.
+    let sink_pending: Arc<Mutex<HashMap<String, (f64, bool)>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    super::mac_sinks::spawn_sink_control(sink_ctl_rx, Arc::clone(&sink_pending));
+    super::mac_sinks::spawn_sink_enumeration(sinks_vol_tx, Arc::clone(&sink_pending));
     // Per-app control state: `key -> (volume, muted)`, set via `app_ctl_rx` and
     // overlaid onto the enumerated list so the published volume reflects what the
     // user set. The muted-tap mixer (next increment) reads this same map to apply
@@ -325,6 +333,11 @@ struct MixerSpec {
     gains: Arc<Mutex<HashMap<String, (f64, bool)>>>,
 }
 
+/// The per-app mixer wiring as passed into `run_streams`: `(keys, gains)` — the
+/// ordered app-key list (tap channel-pair order) and the shared gain map — later
+/// folded into a [`MixerSpec`]. `None` selects the system-wide single-tap mode.
+type MixerChannels = (Vec<String>, Arc<Mutex<HashMap<String, (f64, bool)>>>);
+
 #[allow(clippy::too_many_arguments)]
 fn run_streams(
     shared: &Arc<Mutex<SharedRt>>,
@@ -334,7 +347,7 @@ fn run_streams(
     last_active_output: &mut Option<String>,
     route_rx: &std_mpsc::Receiver<String>,
     tap: &SystemAudioTap,
-    mixer: Option<(Vec<String>, Arc<Mutex<HashMap<String, (f64, bool)>>>)>,
+    mixer: Option<MixerChannels>,
 ) -> Result<StreamExit> {
     // In per-app mode the ring carries `2 * keys.len()` channels (one stereo pair
     // per app) which the callback folds to a stereo mix, so the chain processes

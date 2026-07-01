@@ -223,7 +223,7 @@ impl SystemAudioTap {
     /// Create a **per-application mixer** tap: one muted stereo-mixdown Process
     /// Tap per application (each capturing only that app's audio, with the app's
     /// own output muted), all gathered into a single aggregate device. The
-    /// aggregate's IOProc then delivers `apps.len() * 2` interleaved channels —
+    /// aggregate's `IOProc` then delivers `apps.len() * 2` interleaved channels —
     /// channels `[2i, 2i+1]` are application `i`'s stereo audio, in the returned
     /// key order. The backend gains each pair by the app's volume and sums to
     /// stereo. `apps` is `(key, process_object_id)` pairs.
@@ -231,6 +231,9 @@ impl SystemAudioTap {
     /// Returns the tap + the ordered list of keys (matching the channel-pair
     /// order). Apps whose tap fails to create are skipped (and omitted from the
     /// key list). Errors only if no tap could be created at all.
+    // `tap_ids`/`tap_uids` read as too-similar to clippy::similar_names, but the
+    // id/uid distinction is exactly the point (object ids vs their string UIDs).
+    #[allow(clippy::similar_names)]
     pub fn create_app_mixer(apps: &[(String, u32)]) -> Result<(Self, Vec<String>)> {
         request_audio_capture_permission();
         let mut tap_ids: Vec<AudioObjectID> = Vec::new();

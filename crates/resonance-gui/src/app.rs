@@ -1162,8 +1162,8 @@ fn demo_state() -> DaemonState {
             },
             SinkVolume {
                 name: "alsa_output.pci-0000_5c_00.1.hdmi-surround71".into(),
-                description: "Radeon High Definition Audio Controller Digital Surround 7.1 (HDMI 3)"
-                    .into(),
+                description:
+                    "Radeon High Definition Audio Controller Digital Surround 7.1 (HDMI 3)".into(),
                 volume: 1.0,
                 muted: false,
             },

@@ -2,8 +2,8 @@ use crate::meters::AtomicMeters;
 use resonance_dsp::channel::{ChannelMask, ChannelMatrix};
 use resonance_dsp::{chain::FxEffect, chain::ProcessorChain};
 use resonance_ipc::{
-    AppStream, BandState, BandType, DaemonState, EffectsState, FxEffectId, RoutingMatrix, SinkVolume,
-    default_channel_layout,
+    AppStream, BandState, BandType, DaemonState, EffectsState, FxEffectId, RoutingMatrix,
+    SinkVolume, default_channel_layout,
 };
 use rtrb::Producer;
 use std::sync::{Arc, Mutex};

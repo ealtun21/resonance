@@ -112,6 +112,102 @@ fn handle_list_apps() -> bool {
     true
 }
 
+/// Debug helper for the per-output-sink volume control plane, without starting
+/// the audio backend (on macOS/Windows this is a pure control-plane operation —
+/// no TCC prompt, no audio reroute). Modes:
+///   `--list-sinks`                    print output sinks (id | name | vol | muted)
+///   `--set-sink <id> <percent>`       set one sink's volume (0–100)
+///   `--mute-sink <id> <on|off>`       mute/unmute one sink
+/// On Linux, sink volume is driven in-graph — use `resonance sinks` against a
+/// live daemon. Returns `true` when a mode ran (caller should exit).
+fn handle_sink_debug() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    let arg_after = |flag: &str| {
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1..i + 3))
+    };
+
+    if args.iter().any(|a| a == "--list-sinks") {
+        for s in &sink_debug_enumerate() {
+            println!(
+                "{} | {} | vol={:.2} | muted={}",
+                s.name, s.description, s.volume, s.muted
+            );
+        }
+        return true;
+    }
+    if let Some([id, pct]) = arg_after("--set-sink") {
+        let vol = pct.parse::<f64>().unwrap_or(f64::NAN) / 100.0;
+        if vol.is_finite() {
+            println!(
+                "set-sink {id} -> {:.0}%: {}",
+                vol * 100.0,
+                sink_debug_set_volume(id, vol)
+            );
+        } else {
+            eprintln!("--set-sink: percent must be a number 0..=100");
+        }
+        return true;
+    }
+    if let Some([id, state]) = arg_after("--mute-sink") {
+        let muted = matches!(state.as_str(), "on" | "1" | "true" | "yes");
+        println!(
+            "mute-sink {id} -> {muted}: {}",
+            sink_debug_set_mute(id, muted)
+        );
+        return true;
+    }
+    false
+}
+
+/// Enumerate output sinks for the `--list-sinks` debug mode (control-plane only).
+#[cfg(target_os = "macos")]
+fn sink_debug_enumerate() -> Vec<resonance_ipc::SinkVolume> {
+    audio::mac_sinks::enumerate_output_sinks()
+}
+#[cfg(target_os = "windows")]
+fn sink_debug_enumerate() -> Vec<resonance_ipc::SinkVolume> {
+    audio::win_sinks::enumerate()
+}
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn sink_debug_enumerate() -> Vec<resonance_ipc::SinkVolume> {
+    eprintln!(
+        "--list-sinks: Linux drives sink volume in-graph; use `resonance sinks` on a live daemon"
+    );
+    Vec::new()
+}
+
+/// Set a sink's volume by id for the `--set-sink` debug mode.
+#[cfg(target_os = "macos")]
+fn sink_debug_set_volume(id: &str, volume: f64) -> bool {
+    audio::mac_sinks::set_volume_by_uid(id, volume)
+}
+#[cfg(target_os = "windows")]
+fn sink_debug_set_volume(id: &str, volume: f64) -> bool {
+    audio::win_sinks::set_volume(id, volume)
+}
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn sink_debug_set_volume(_id: &str, _volume: f64) -> bool {
+    eprintln!("--set-sink: unsupported on Linux (use `resonance sink … volume`)");
+    false
+}
+
+/// Mute/unmute a sink by id for the `--mute-sink` debug mode.
+#[cfg(target_os = "macos")]
+fn sink_debug_set_mute(id: &str, muted: bool) -> bool {
+    audio::mac_sinks::set_mute_by_uid(id, muted)
+}
+#[cfg(target_os = "windows")]
+fn sink_debug_set_mute(id: &str, muted: bool) -> bool {
+    audio::win_sinks::set_mute(id, muted)
+}
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn sink_debug_set_mute(_id: &str, _muted: bool) -> bool {
+    eprintln!("--mute-sink: unsupported on Linux (use `resonance sink … mute`)");
+    false
+}
+
 /// Acquire the single-instance lock. Returns `Ok(true)` when this process owns
 /// it (continue startup), `Ok(false)` when another live daemon already holds it.
 ///
@@ -318,6 +414,12 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Debug: inspect/set output-sink volume without starting the backend
+    // (control-plane only — no tap/TCC/reroute).
+    if handle_sink_debug() {
+        return Ok(());
+    }
+
     // Single-instance guard: a duplicate launch is a clean no-op, not a crash.
     if !acquire_singleton_or_exit()? {
         return Ok(());
@@ -345,8 +447,7 @@ async fn main() -> Result<()> {
         .build();
 
     let meters = std::sync::Arc::new(meters::AtomicMeters::default());
-    let shared =
-        state::SharedState::new(cmd_tx, route_tx, meters.clone(), app_ctl_tx, sink_ctl_tx);
+    let shared = state::SharedState::new(cmd_tx, route_tx, meters.clone(), app_ctl_tx, sink_ctl_tx);
 
     spawn_spectrum_task(spectrum_rx, &shared);
     spawn_output_mapping_task(output_rx, &shared);
@@ -385,9 +486,11 @@ async fn main() -> Result<()> {
             sinks_tx,
             meters,
         );
-        // Per-output-sink volume isn't implemented on Windows yet; drop the
-        // backend-side ends so the channels are inert.
-        let _ = (sinks_vol_tx, sink_ctl_rx);
+        // Per-output-sink volume: enumerate WASAPI render endpoints + apply
+        // volume/mute on dedicated COM threads, mirroring the per-app plane.
+        // The enumeration thread feeds `sinks_vol_tx` → `spawn_sinks_vol_task`
+        // → shared state, like the audio backends do on Linux/macOS.
+        audio::win_sinks::spawn_sink_tasks(sinks_vol_tx, sink_ctl_rx);
         // Per-app control plane: enumerate WASAPI sessions + apply volume/mute
         // on dedicated COM threads. The enumeration thread feeds `apps_tx` →
         // `spawn_apps_task` → shared state, like the audio backends do.

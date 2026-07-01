@@ -1380,11 +1380,7 @@ fn apply_sink_volumes(g: &mut GraphState) {
     };
     let mut changed = false;
     for (device_id, r) in updates {
-        if let Some(sink) = g
-            .sink_nodes
-            .values_mut()
-            .find(|s| s.device_id == device_id)
-        {
+        if let Some(sink) = g.sink_nodes.values_mut().find(|s| s.device_id == device_id) {
             sink.route_index = r.index;
             sink.route_device = r.device;
             sink.channels = r.channels;

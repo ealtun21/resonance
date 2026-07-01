@@ -67,6 +67,8 @@ mod hal_input;
 #[cfg(target_os = "macos")]
 pub(crate) mod mac_apps;
 #[cfg(target_os = "macos")]
+pub(crate) mod mac_sinks;
+#[cfg(target_os = "macos")]
 mod system_tap;
 #[cfg(target_os = "macos")]
 use coreaudio as backend;
@@ -81,6 +83,8 @@ pub(crate) mod win_apps;
 pub(crate) mod win_devices;
 #[cfg(target_os = "windows")]
 mod win_measure;
+#[cfg(target_os = "windows")]
+pub(crate) mod win_sinks;
 #[cfg(target_os = "windows")]
 pub use win_measure::measure_loopback;
 
