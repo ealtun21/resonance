@@ -1,0 +1,51 @@
+CLASS1 : Effect Type
+9: Version
+Pop
+0: Double Params Flag
+1: Total number of elements
+38: Main 0
+0: Main 1
+0: Main 2
+13: Main 3
+89: Main 4
+25: Main 5
+0: Element Number
+   0: Param 0
+   0: Param 1
+   0: Param 2
+   0: Param 3
+   0: Param 4
+   0: Param 5
+   0: Param 6
+7: Number of Application Dependent Integers
+0: Number of Application Dependent Reals
+0: Number of Application Dependent Strings
+1: Integer[0]
+1: Integer[1]
+1: Integer[2]
+1: Integer[3]
+1: Integer[4]
+0: Integer[5]
+2: Integer[6]
+10: Number of EQ Bands
+1: On/Off
+62.5: Band 0 CF
+1.97: Band 0 Boost
+110: Band 1 CF
+0: Band 1 Boost
+230: Band 2 CF
+0: Band 2 Boost
+370: Band 3 CF
+0: Band 3 Boost
+650: Band 4 CF
+0: Band 4 Boost
+1200: Band 5 CF
+0: Band 5 Boost
+2150: Band 6 CF
+0: Band 6 Boost
+5300: Band 7 CF
+0: Band 7 Boost
+10000: Band 8 CF
+0: Band 8 Boost
+12000: Band 9 CF
+0: Band 9 Boost

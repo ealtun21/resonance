@@ -1,0 +1,47 @@
+# Empty `[workspace]` makes this its own workspace root so the parent workspace
+# (repo root) never treats `fuzz/` as a member — `cargo build --all` / `cargo
+# test --all` from the repo root do not see or build it. It only builds under
+# `cargo +nightly fuzz`.
+[workspace]
+
+[package]
+name = "resonance-preset-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# This crate is intentionally NOT a member of the workspace (cargo-fuzz nests it
+# under `fuzz/`). It only builds under `cargo +nightly fuzz`; a plain
+# `cargo build --all` / `cargo test --all` from the repo root never sees it.
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.resonance-preset]
+path = ".."
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "fuzz_fac"
+path = "fuzz_targets/fuzz_fac.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_apo"
+path = "fuzz_targets/fuzz_apo.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_graphic"
+path = "fuzz_targets/fuzz_graphic.rs"
+test = false
+doc = false
+bench = false
