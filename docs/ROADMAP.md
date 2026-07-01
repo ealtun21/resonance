@@ -22,12 +22,6 @@ angle so it can be picked up directly.
   (shares the linear-phase FIR work in backlog item 8); a new `ProcessorChain`
   stage + a "load IR" surface in CLI/GUI/TUI. Reports added latency.
 
-- **Loudness compensation (ISO-226 equal-loudness)** — the "loudness" button:
-  auto bass/treble lift at low listening levels tracking the equal-loudness
-  contours. Every consumer EQ has it; flagged in the FineTune comparison. Angle:
-  a level-dependent shelf/tilt derived from ISO-226, gated by the current
-  volume; a single toggle + reference level. Small–medium effort.
-
 ## Medium value
 
 - **Crossfeed for headphones** (Bauer/Meier) — reduce hard L/R isolation to cut
@@ -71,5 +65,6 @@ Cross-platform from one codebase (Linux/PipeWire + Windows/APO + macOS/CoreAudio
 squig.link + Auto-EQ integration with a live reference/measurement overlay;
 N-channel + per-channel EQ + routing matrix; per-application **and** per-output
 volume/mute on all three platforms; three front-ends (GUI/TUI/CLI); FxSound
-effect emulation (Fidelity/Ambience/Surround/Dynamic Boost/Bass). Most
-competitors do a subset of these on a single OS.
+effect emulation (Fidelity/Ambience/Surround/Dynamic Boost/Bass); and
+**loudness compensation (ISO 226:2023 equal-loudness)** — the "loudness" button
+most consumer EQs have. Most competitors do a subset of these on a single OS.
