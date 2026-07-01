@@ -114,6 +114,7 @@ mod tests {
             enabled: true,
             channels: ChannelMask::ALL,
             slope_db_oct: 12,
+            scope: crate::BandScope::Stereo,
         }]
     }
 

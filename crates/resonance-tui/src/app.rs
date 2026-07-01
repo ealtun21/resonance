@@ -945,6 +945,27 @@ impl App {
         self.refresh_state();
     }
 
+    /// Cycle the stereo scope of the selected band (`M` key): Stereo → Mid →
+    /// Side → Stereo. Applies to every band type but is only audible on
+    /// >= 2-channel streams.
+    pub fn cycle_band_scope(&mut self) {
+        if !matches!(self.focus, Panel::Bands | Panel::Graph) {
+            return;
+        }
+        let Some(state) = &self.state else { return };
+        let idx = self.band_cursor;
+        let Some(band) = state.bands.get(idx) else {
+            return;
+        };
+        let next = band.scope.next();
+        self.push_undo();
+        self.send(Command::SetBandScope {
+            index: idx,
+            scope: next,
+        });
+        self.refresh_state();
+    }
+
     pub fn remove_band(&mut self) {
         let Some(state) = &self.state else { return };
         if state.bands.is_empty() {
@@ -1399,6 +1420,7 @@ impl App {
                             enabled: true,
                             channels: ChannelMask::ALL,
                             slope_db_oct: resonance_ipc::default_slope_db_oct(),
+                            scope: resonance_ipc::BandScope::Stereo,
                         })
                         .collect();
                     AutoEqDone {

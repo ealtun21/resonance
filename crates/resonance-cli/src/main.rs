@@ -3,7 +3,7 @@ mod autoeq;
 use anyhow::{Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
-use resonance_ipc::{ChannelMask, Command, FxEffectId, Response, transport::SyncClient};
+use resonance_ipc::{BandScope, ChannelMask, Command, FxEffectId, Response, transport::SyncClient};
 use std::io::{self, IsTerminal};
 
 #[derive(Parser)]
@@ -84,6 +84,13 @@ enum Sub {
         index: usize,
         /// Slope: 12 | 24 | 48 dB/oct
         slope: u8,
+    },
+    /// Set an EQ band's stereo scope (audible only on >= 2-channel streams)
+    BandScope {
+        /// Band index (1-based, as shown in `status`)
+        index: usize,
+        /// Scope: stereo | mid | side
+        scope: String,
     },
     /// Reset to defaults: flat EQ, all effects off, 0 dB preamp
     Reset,
@@ -359,6 +366,21 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
                 slope_db_oct: slope,
             })
         }
+        Sub::BandScope { index, scope } => {
+            if index == 0 {
+                bail!("band index is 1-based (see `status`)");
+            }
+            let scope = match scope.to_ascii_lowercase().as_str() {
+                "stereo" | "st" => BandScope::Stereo,
+                "mid" | "m" => BandScope::Mid,
+                "side" | "s" => BandScope::Side,
+                other => bail!("scope must be stereo, mid or side, got {other}"),
+            };
+            Ok(Command::SetBandScope {
+                index: index - 1,
+                scope,
+            })
+        }
         Sub::Reset => Ok(Command::Reset),
         Sub::Export { path } => Ok(Command::ExportApo {
             path: absolutize(path),
@@ -628,6 +650,8 @@ fn print_response(resp: Response) {
     }
 }
 
+// `slope_tail` and `scope_tail` are deliberately parallel band-attribute tails.
+#[allow(clippy::similar_names)]
 fn print_state(p: &Paint, s: &resonance_ipc::DaemonState) {
     // Header
     let power = if s.enabled {
@@ -745,12 +769,18 @@ fn print_state(p: &Paint, s: &resonance_ipc::DaemonState) {
             } else {
                 String::new()
             };
+            // Stereo is the default and stays implicit; show mid/side only.
+            let scope_tail = if b.scope == BandScope::Stereo {
+                String::new()
+            } else {
+                format!("  {}", p.dim(&b.scope.full().to_ascii_lowercase()))
+            };
             let ch_tail = if chlabel.is_empty() {
                 String::new()
             } else {
                 format!("  {}", p.dim(&chlabel))
             };
-            let tail = format!("{slope_tail}{ch_tail}");
+            let tail = format!("{slope_tail}{scope_tail}{ch_tail}");
             println!(
                 "  {:>2}  {}  {:>8.1} Hz  {:+5.1} dB  Q {:>4.2}  {state}{tail}",
                 i + 1,

@@ -178,6 +178,9 @@ fn handle_normal(app: &mut App, key: KeyEvent) {
         // Cycle the selected band's filter slope 12→24→48 (shelves + HP/LP only;
         // gated inside the call). Uppercase so lowercase `s` keeps settings.
         KeyCode::Char('S') if band_focus => app.cycle_band_slope(),
+        // Cycle the selected band's stereo scope Stereo→Mid→Side (all band types;
+        // audible on ≥2ch). Uppercase, matching the `S` slope-cycle convention.
+        KeyCode::Char('M') if band_focus => app.cycle_band_scope(),
         // Per-band channel targeting (multichannel only; gated inside the call).
         KeyCode::Char('c') if band_focus => app.begin_select_band_channels(),
         // L/R channel swap (≥2 channels; gated inside the call).

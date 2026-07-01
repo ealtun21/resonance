@@ -112,6 +112,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         key("d / Del", "remove band"),
         key("t", "cycle band type"),
         key("S", "cycle band slope 12/24/48 dB/oct (shelf, HP/LP)"),
+        key("M", "cycle band scope stereo/mid/side (≥2ch)"),
         key("c", "channel targeting (multichannel)"),
         Line::raw(""),
         head("FR graph (Tab to it, or use the mouse)"),
@@ -157,9 +158,9 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
         Panel::Effects => "  •  [←→] intensity".to_string(),
         Panel::Apps => "  •  [←→] volume  [Space] mute  [A] hide".to_string(),
         Panel::Sinks => "  •  [←→] volume  [Space] mute  [O] hide".to_string(),
-        Panel::Bands => "  •  [a] add  [d] del  [t] type  [S] slope".to_string(),
+        Panel::Bands => "  •  [a] add  [d] del  [t] type  [S] slope  [M] scope".to_string(),
         Panel::Graph => {
-            "  •  drag node: [↑↓] gain  [←→] freq  [ ][ ] select  [a/d/t/S] band".to_string()
+            "  •  drag node: [↑↓] gain  [←→] freq  [ ][ ] select  [a/d/t/S/M] band".to_string()
         }
     };
     // Channel hints only when relevant (progressive disclosure).
@@ -1363,6 +1364,13 @@ fn render_band_row(
         format!("{} {}", b.band_type.abbrev(), b.slope_db_oct)
     } else {
         b.band_type.abbrev().to_string()
+    };
+    // Stereo is the implicit default; append the scope abbrev (M/S) only when a
+    // band is scoped to mid or side, so most rows stay uncluttered.
+    let type_name = if b.scope == resonance_ipc::BandScope::Stereo {
+        type_name
+    } else {
+        format!("{type_name} {}", b.scope.abbrev())
     };
 
     put_cell(
@@ -2579,6 +2587,7 @@ mod tests {
             enabled: true,
             channels,
             slope_db_oct: 12,
+            scope: resonance_ipc::BandScope::Stereo,
         }
     }
 

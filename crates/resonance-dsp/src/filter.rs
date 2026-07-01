@@ -30,6 +30,17 @@ pub enum FilterType {
     AllPass,
 }
 
+/// Stereo scope of an EQ band. `Stereo` (the default) processes each channel
+/// independently; `Mid`/`Side` process the mono sum / stereo difference of the
+/// front L/R pair, leaving any further channels untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BandScope {
+    #[default]
+    Stereo,
+    Mid,
+    Side,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct BiquadCoeffs {
     pub b0: f64,
@@ -307,6 +318,9 @@ pub struct ApoFilter {
     /// Filter slope in dB/oct (12/24/48) for shelves + HP/LP; ignored by the
     /// single-biquad types. 12 = the original single-biquad behaviour.
     pub slope_db_oct: u8,
+    /// Stereo scope: `Stereo` (per-channel, the default) or `Mid`/`Side`
+    /// (process the mono sum / stereo difference of the front L/R pair).
+    pub scope: BandScope,
     pub enabled: bool,
     /// Which channels this band applies to. Defaults to [`ChannelMask::ALL`] so a
     /// band loaded from a preset (or built without an explicit target) processes
@@ -337,6 +351,7 @@ pub struct ApoFilterBuilder {
     gain_db: f64,
     q: f64,
     slope_db_oct: u8,
+    scope: BandScope,
     enabled: bool,
     channels: usize,
     sample_rate: Option<f64>,
@@ -374,6 +389,13 @@ impl ApoFilterBuilder {
     #[must_use]
     pub fn slope_db_oct(mut self, slope: u8) -> Self {
         self.slope_db_oct = slope;
+        self
+    }
+
+    /// Stereo scope of the band — `Stereo` (default), `Mid`, or `Side`.
+    #[must_use]
+    pub fn scope(mut self, scope: BandScope) -> Self {
+        self.scope = scope;
         self
     }
 
@@ -440,6 +462,7 @@ impl ApoFilterBuilder {
             gain_db,
             q,
             slope_db_oct,
+            scope: self.scope,
             enabled: self.enabled,
             mask: self.channel_mask,
             realizable: true,

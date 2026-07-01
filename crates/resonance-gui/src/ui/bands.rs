@@ -10,7 +10,7 @@ use crate::ui::icons::Icon;
 use crate::ui::kit;
 use crate::ui::widgets::{freq_color, gain_bar, gain_color};
 use eframe::egui;
-use resonance_ipc::{BandType, ChannelMask, Command, DaemonState};
+use resonance_ipc::{BandScope, BandType, ChannelMask, Command, DaemonState};
 
 const IDX_W: f32 = 26.0;
 const ON_W: f32 = 36.0;
@@ -27,6 +27,11 @@ const TYPE_W: f32 = 50.0;
 const SLOPE_W: f32 = 48.0;
 /// The slopes offered by the per-band slope selector, in cycle order.
 const SLOPES: [u8; 3] = [12, 24, 48];
+/// Width of the stereo-scope selector (St/M/S). Applies to every band type;
+/// only audible on >= 2-channel streams.
+const SCOPE_W: f32 = 44.0;
+/// The stereo scopes offered by the per-band scope selector, in menu order.
+const SCOPES: [BandScope; 3] = [BandScope::Stereo, BandScope::Mid, BandScope::Side];
 /// Cells get an 8px gutter of their own (mockup table `td` padding) while the
 /// row tint/rule still span the full card width.
 const GUTTER: f32 = 8.0;
@@ -45,6 +50,8 @@ struct BandColumns {
     show_type: bool,
     /// Filter-slope selector column (rides alongside the Type column).
     show_slope: bool,
+    /// Stereo-scope selector column (St/M/S, applies to every band).
+    show_scope: bool,
     /// Inter-column spacing.
     gap: f32,
     /// Width of the flexible Graph column (only meaningful when `show_graph`).
@@ -55,21 +62,26 @@ impl BandColumns {
     /// Derive the column layout from the table's available width (full pane width
     /// minus the two side gutters), the inter-column `gap`, and whether the
     /// channel column should appear. `avail` is already clamped to a sane minimum.
+    // `show_slope` and `show_scope` are deliberately parallel column flags.
+    #[allow(clippy::similar_names)]
     fn resolve(avail: f32, gap: f32, show_ch: bool) -> Self {
         // Collapse columns as the table narrows: drop the gain graph first, then
-        // the Slope selector, then the Type combo.
-        let show_graph = avail >= 520.0;
-        let show_slope = avail >= 420.0;
+        // the Slope selector, then the Scope selector, then the Type combo.
+        let show_graph = avail >= 560.0;
+        let show_slope = avail >= 464.0;
+        let show_scope = avail >= 410.0;
         let show_type = avail >= 360.0;
         let n_cols = 6
             + usize::from(show_type)
             + usize::from(show_slope)
+            + usize::from(show_scope)
             + usize::from(show_graph)
             + usize::from(show_ch);
         let fixed = IDX_W
             + ON_W
             + if show_type { TYPE_W } else { 0.0 }
             + if show_slope { SLOPE_W } else { 0.0 }
+            + if show_scope { SCOPE_W } else { 0.0 }
             + FREQ_W
             + GAIN_W
             + Q_W
@@ -81,6 +93,7 @@ impl BandColumns {
             show_graph,
             show_type,
             show_slope,
+            show_scope,
             gap,
             graph_w,
         }
@@ -315,6 +328,10 @@ impl GuiApp {
             self.band_slope_cell(ui, b, i, &t);
         }
 
+        if cols.show_scope {
+            self.band_scope_cell(ui, b, i, &t);
+        }
+
         let mut freq = b.freq;
         let mut gain = b.gain_db;
         let mut q = b.q;
@@ -414,6 +431,34 @@ impl GuiApp {
                 egui::FontId::monospace(kit::T_VALUE),
                 t.faint,
             );
+        }
+    }
+
+    /// The stereo-scope cell for band `i`. Every band type gets a Stereo/Mid/Side
+    /// dropdown (reusing the Type badge widget): the badge shows the abbrev
+    /// (St/M/S) and the menu lists the full names. Only audible on >= 2-channel
+    /// streams, but always shown so the choice is discoverable.
+    fn band_scope_cell(
+        &mut self,
+        ui: &mut egui::Ui,
+        b: &resonance_ipc::BandState,
+        i: usize,
+        t: &kit::Tokens,
+    ) {
+        let labels: Vec<&str> = SCOPES.iter().map(|s| s.full()).collect();
+        if let Some(sel) = kit::tag_dropdown(
+            ui,
+            SCOPE_W,
+            22.0,
+            egui::Id::new(("bsc", i)),
+            b.scope.abbrev(),
+            t.accent,
+            &labels,
+        ) {
+            self.queue_edit(Command::SetBandScope {
+                index: i,
+                scope: SCOPES[sel],
+            });
         }
     }
 
@@ -571,6 +616,9 @@ fn bands_header(ui: &mut egui::Ui, cols: &BandColumns) {
         if cols.show_slope {
             cap(ui, SLOPE_W, "Slope");
         }
+        if cols.show_scope {
+            cap(ui, SCOPE_W, "Scope");
+        }
         cap(ui, FREQ_W, "Freq");
         cap(ui, GAIN_W, "Gain");
         cap(ui, Q_W, "Q");
@@ -638,16 +686,21 @@ mod tests {
         let gap = 6.0;
         // Wide: every optional column shows.
         let wide = BandColumns::resolve(700.0, gap, true);
-        assert!(wide.show_graph && wide.show_slope && wide.show_type);
-        // The graph drops first below 520; slope + type still show.
-        let mid = BandColumns::resolve(480.0, gap, true);
-        assert!(!mid.show_graph && mid.show_slope && mid.show_type);
-        // The slope selector drops below 420; type still shows.
-        let tight = BandColumns::resolve(400.0, gap, true);
-        assert!(!tight.show_graph && !tight.show_slope && tight.show_type);
+        assert!(wide.show_graph && wide.show_slope && wide.show_scope && wide.show_type);
+        // The graph drops first below 560; slope + scope + type still show.
+        let mid = BandColumns::resolve(500.0, gap, true);
+        assert!(!mid.show_graph && mid.show_slope && mid.show_scope && mid.show_type);
+        // The slope selector drops below 464; scope + type still show.
+        let tight = BandColumns::resolve(440.0, gap, true);
+        assert!(!tight.show_graph && !tight.show_slope && tight.show_scope && tight.show_type);
+        // The scope selector drops below 410; type still shows.
+        let tighter = BandColumns::resolve(390.0, gap, true);
+        assert!(!tighter.show_slope && !tighter.show_scope && tighter.show_type);
         // The Type combo drops below 360.
         let narrow = BandColumns::resolve(300.0, gap, true);
-        assert!(!narrow.show_graph && !narrow.show_slope && !narrow.show_type);
+        assert!(
+            !narrow.show_graph && !narrow.show_slope && !narrow.show_scope && !narrow.show_type
+        );
     }
 
     #[test]

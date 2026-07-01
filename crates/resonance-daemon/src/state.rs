@@ -2,8 +2,8 @@ use crate::meters::AtomicMeters;
 use resonance_dsp::channel::{ChannelMask, ChannelMatrix};
 use resonance_dsp::{chain::FxEffect, chain::ProcessorChain};
 use resonance_ipc::{
-    AppStream, BandState, BandType, DaemonState, EffectsState, FxEffectId, RoutingMatrix,
-    SinkVolume, default_channel_layout,
+    AppStream, BandScope, BandState, BandType, DaemonState, EffectsState, FxEffectId,
+    RoutingMatrix, SinkVolume, default_channel_layout,
 };
 use rtrb::Producer;
 use std::sync::{Arc, Mutex};
@@ -57,6 +57,11 @@ pub enum AudioCommand {
     SetBandSlope {
         index: usize,
         slope_db_oct: u8,
+    },
+    /// Change an EQ band's stereo scope (Stereo/Mid/Side).
+    SetBandScope {
+        index: usize,
+        scope: BandScope,
     },
     /// Retarget an existing band to a channel subset (per-channel EQ).
     SetBandChannels {
@@ -271,6 +276,7 @@ impl SharedState {
                 enabled: f.enabled,
                 channels: resonance_ipc::ChannelMask::from_dsp(f.mask),
                 slope_db_oct: f.slope_db_oct,
+                scope: BandScope::from(f.scope),
             })
             .collect();
 

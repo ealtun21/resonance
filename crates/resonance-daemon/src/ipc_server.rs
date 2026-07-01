@@ -5,8 +5,8 @@ use resonance_dsp::chain::ProcessorChain;
 use resonance_dsp::channel::{ChannelMask as DspMask, ChannelMatrix};
 use resonance_dsp::filter::{ApoFilter, FilterError, FilterType};
 use resonance_ipc::{
-    AbSlot, BandState, BandType, ChannelMask, Command, EffectsState, FxEffectId, Response,
-    RoutingMatrix,
+    AbSlot, BandScope, BandState, BandType, ChannelMask, Command, EffectsState, FxEffectId,
+    Response, RoutingMatrix,
 };
 use resonance_preset::model::{ApoFilterType, EqBand};
 use resonance_preset::{
@@ -165,6 +165,7 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
             index,
             slope_db_oct,
         } => handle_set_band_slope(state, index, slope_db_oct),
+        Command::SetBandScope { index, scope } => handle_set_band_scope(state, index, scope),
         Command::SetBandChannels { index, channels } => {
             handle_set_band_channels(state, index, channels)
         }
@@ -571,6 +572,16 @@ fn handle_set_band_slope(state: &SharedState, index: usize, slope_db_oct: u8) ->
             }
         },
     );
+    Response::Ok
+}
+
+/// Change an EQ band's stereo scope (Stereo/Mid/Side).
+fn handle_set_band_scope(state: &SharedState, index: usize, scope: BandScope) -> Response {
+    state.send(AudioCommand::SetBandScope { index, scope }, move |chain| {
+        if let Some(f) = chain.filters.get_mut(index) {
+            f.scope = scope.into();
+        }
+    });
     Response::Ok
 }
 
