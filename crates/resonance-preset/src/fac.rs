@@ -482,4 +482,25 @@ mod tests {
         assert_eq!(numeric_prefix("nan: x"), None);
         assert_eq!(numeric_prefix("inf: x"), None);
     }
+
+    // Fuzz property (`fuzz/fuzz_targets/fuzz_fac.rs`): `parse_fac` must never
+    // panic on any input — only ever return `Ok`/`Err`. A 3-minute libFuzzer run
+    // (~20M execs) found no panic; these adversarial classes lock that in as a
+    // fast regression so a future change can't reintroduce one.
+    #[test]
+    fn parse_fac_never_panics_on_adversarial_input() {
+        let cases: &[&str] = &[
+            "",                                                     // empty
+            "\0\0\0\0",                                             // NUL bytes
+            "CLASS1 : Effect Type",                                 // magic only, no newline
+            "CLASS1 : Effect Type\n",                               // truncated after magic
+            "CLASS1 : Effect Type\n9\n\n0\n",                       // truncated mid-preamble
+            "CLASS1 : Effect Type\n9\nN\n0\n-1\n",                  // negative element count
+            "CLASS1 : Effect Type\n9\nN\n0\n:\n:\n:\n:\n:\n:\n:\n", // colon-only int prefixes
+        ];
+        for c in cases {
+            // The only contract is "does not panic"; the Result value is irrelevant.
+            let _ = parse_fac(c);
+        }
+    }
 }

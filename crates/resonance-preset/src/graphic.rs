@@ -626,6 +626,38 @@ mod tests {
         assert!(bands.len() <= 14);
     }
 
+    // Fuzz property (`fuzz/fuzz_targets/fuzz_graphic.rs`): neither
+    // `fit_graphic_eq` (the LM optimiser) nor `graphic_eq_summary` may panic on
+    // any input — non-finite, zero/negative/huge frequencies, cancelling pairs,
+    // empty/degenerate sets. A 3-minute libFuzzer run over arbitrary f64 pairs
+    // found no panic; these classes lock that in as a fast regression.
+    #[test]
+    fn graphic_never_panics_on_adversarial_input() {
+        let point_sets: &[Vec<(f64, f64)>] = &[
+            vec![],                                                  // empty
+            vec![(1000.0, 0.0)],                                     // below the 3-point floor
+            vec![(f64::NAN, f64::NAN); 8],                           // all non-finite
+            vec![(0.0, 0.0), (-1.0, 5.0), (f64::INFINITY, 1.0)],     // zero/negative/inf freqs
+            vec![(1000.0, 1e300), (1000.0, -1e300), (1000.0, 0.0)],  // huge cancelling gains
+            vec![(1000.0, 0.0); 8],                                  // degenerate (all identical)
+            (0..1000).map(|i| (20.0 + f64::from(i), 0.0)).collect(), // over MAX_FIT_POINTS
+        ];
+        for pts in point_sets {
+            let _ = fit_graphic_eq(pts);
+        }
+
+        let lines: &[&str] = &[
+            "",
+            "GraphicEQ:",
+            "GraphicEQ: ;;;",
+            "GraphicEQ: 20",
+            "GraphicEQ: -",
+        ];
+        for l in lines {
+            let _ = graphic_eq_summary(l);
+        }
+    }
+
     #[test]
     fn includes_shelves() {
         let pts = vec![
