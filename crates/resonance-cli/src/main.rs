@@ -29,7 +29,7 @@ enum Sub {
     },
     /// Set an `FxSound` effect intensity (0–100)
     Set {
-        /// Effect name: fidelity / ambience / surround / `dynamic_boost` / bass
+        /// Effect: fidelity / ambience / surround / `dynamic_boost` / bass / loudness / crossfeed
         effect: String,
         /// Intensity 0–100
         value: u8,
@@ -46,6 +46,11 @@ enum Sub {
         // leading '-' as an unknown flag and rejects `resonance preamp -3.5`.
         #[arg(allow_hyphen_values = true)]
         db: f64,
+    },
+    /// Set output dither: off | 16 | 20 | 24 (TPDF to that bit depth)
+    Dither {
+        /// off | 16 | 20 | 24
+        depth: String,
     },
     /// Save the current settings as a named profile
     Save {
@@ -304,6 +309,9 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
             }
             Ok(Command::SetPreamp { db })
         }
+        Sub::Dither { depth } => Ok(Command::SetDither {
+            bits: parse_dither(&depth)?,
+        }),
         Sub::Set { effect, value } => {
             if value > 100 {
                 bail!("intensity must be 0–100, got {value}");
@@ -679,24 +687,23 @@ fn print_state(p: &Paint, s: &resonance_ipc::DaemonState) {
         m.dsp_frame_us
     );
 
-    // Effects with intensity bars
+    println!("{}{}", label("dither"), dither_label(s.dither_bits));
+
+    // Effects with intensity bars. Iterate `FxEffectId::ALL` so new effects
+    // (Loudness, Crossfeed, …) show up automatically and stay in chain order.
     println!();
     println!("{}", p.bold("effects"));
-    let e = &s.effects;
-    let row = |name: &str, int: f64, on: bool| {
+    for id in FxEffectId::ALL {
+        let (int, on) = s.effects.get(id);
         let pct = (int * 100.0).round() as i32;
         let state = if on { p.green("on ") } else { p.dim("off") };
-        println!("  {:<14} {} {:>4}%  {state}", name, p.cyan(&bar(int)), pct);
-    };
-    row("fidelity", e.fidelity_intensity, e.fidelity_enabled);
-    row("ambience", e.ambience_intensity, e.ambience_enabled);
-    row("surround", e.surround_intensity, e.surround_enabled);
-    row(
-        "dynamic_boost",
-        e.dynamic_boost_intensity,
-        e.dynamic_boost_enabled,
-    );
-    row("bass", e.bass_intensity, e.bass_enabled);
+        println!(
+            "  {:<14} {} {:>4}%  {state}",
+            effect_cli_name(id),
+            p.cyan(&bar(int)),
+            pct
+        );
+    }
 
     // EQ bands
     if !s.bands.is_empty() {
@@ -953,6 +960,39 @@ fn mask_label(m: ChannelMask, layout: &[String], channels: usize) -> String {
     format!("[{}]", names.join(","))
 }
 
+/// Lowercase name the CLI prints and accepts for an effect (matches
+/// `parse_effect`'s keys, so `status` output round-trips back into `set`).
+fn effect_cli_name(id: FxEffectId) -> &'static str {
+    match id {
+        FxEffectId::Fidelity => "fidelity",
+        FxEffectId::Ambience => "ambience",
+        FxEffectId::Surround => "surround",
+        FxEffectId::DynamicBoost => "dynamic_boost",
+        FxEffectId::Bass => "bass",
+        FxEffectId::Loudness => "loudness",
+        FxEffectId::Crossfeed => "crossfeed",
+    }
+}
+
+/// Human-readable dither state for `status` (`None` = off).
+fn dither_label(bits: Option<u32>) -> String {
+    match bits {
+        None => "off".to_string(),
+        Some(b) => format!("{b}-bit"),
+    }
+}
+
+/// Parse a `dither` argument (`off` | `16` | `20` | `24`) into `Option<u32>`.
+fn parse_dither(s: &str) -> Result<Option<u32>> {
+    match s.to_ascii_lowercase().as_str() {
+        "off" | "none" | "0" => Ok(None),
+        "16" => Ok(Some(16)),
+        "20" => Ok(Some(20)),
+        "24" => Ok(Some(24)),
+        _ => bail!("dither must be off/16/20/24, got '{s}'"),
+    }
+}
+
 fn parse_effect(s: &str) -> Result<FxEffectId> {
     match s {
         "fidelity" => Ok(FxEffectId::Fidelity),
@@ -960,6 +1000,10 @@ fn parse_effect(s: &str) -> Result<FxEffectId> {
         "surround" => Ok(FxEffectId::Surround),
         "dynamic_boost" | "dynamic" => Ok(FxEffectId::DynamicBoost),
         "bass" => Ok(FxEffectId::Bass),
-        _ => bail!("unknown effect '{s}': use fidelity/ambience/surround/dynamic_boost/bass"),
+        "loudness" => Ok(FxEffectId::Loudness),
+        "crossfeed" => Ok(FxEffectId::Crossfeed),
+        _ => bail!(
+            "unknown effect '{s}': use fidelity/ambience/surround/dynamic_boost/bass/loudness/crossfeed"
+        ),
     }
 }
