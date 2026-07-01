@@ -111,6 +111,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         key("a", "add band"),
         key("d / Del", "remove band"),
         key("t", "cycle band type"),
+        key("S", "cycle band slope 12/24/48 dB/oct (shelf, HP/LP)"),
         key("c", "channel targeting (multichannel)"),
         Line::raw(""),
         head("FR graph (Tab to it, or use the mouse)"),
@@ -156,9 +157,9 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
         Panel::Effects => "  •  [←→] intensity".to_string(),
         Panel::Apps => "  •  [←→] volume  [Space] mute  [A] hide".to_string(),
         Panel::Sinks => "  •  [←→] volume  [Space] mute  [O] hide".to_string(),
-        Panel::Bands => "  •  [a] add  [d] del  [t] type".to_string(),
+        Panel::Bands => "  •  [a] add  [d] del  [t] type  [S] slope".to_string(),
         Panel::Graph => {
-            "  •  drag node: [↑↓] gain  [←→] freq  [ ][ ] select  [a/d/t] band".to_string()
+            "  •  drag node: [↑↓] gain  [←→] freq  [ ][ ] select  [a/d/t/S] band".to_string()
         }
     };
     // Channel hints only when relevant (progressive disclosure).
@@ -1350,8 +1351,16 @@ fn render_band_row(
         if active(field) { field_style } else { cell(fg) }
     };
 
+    // Type cell; for shelves + HP/LP append the filter slope (12/24/48 dB/oct),
+    // which only those types honour. Single-biquad types show the type alone.
     let type_name = if full_names {
-        b.band_type.full().to_string()
+        if b.band_type.uses_slope() {
+            format!("{} {}dB", b.band_type.full(), b.slope_db_oct)
+        } else {
+            b.band_type.full().to_string()
+        }
+    } else if b.band_type.uses_slope() {
+        format!("{} {}", b.band_type.abbrev(), b.slope_db_oct)
     } else {
         b.band_type.abbrev().to_string()
     };

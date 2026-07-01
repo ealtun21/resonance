@@ -101,7 +101,10 @@ pub fn band_type_full(width: u16) -> bool {
 /// Ch column is rect 7 and the gain bar follows it; otherwise the gain bar is
 /// rect 7. The bar is always the last rect.
 pub fn band_columns(row: Rect, show_ch: bool) -> Rc<[Rect]> {
-    let type_w = if band_type_full(row.width) { 11 } else { 5 };
+    // Type column also carries the filter slope for shelf/HP/LP bands
+    // (e.g. "LS 48" abbreviated, "Low Shelf 48dB" full), so it is a little
+    // wider than the bare type name needs.
+    let type_w = if band_type_full(row.width) { 15 } else { 6 };
     let mut cons = vec![
         Constraint::Length(3),      // 0 #
         Constraint::Length(type_w), // 1 Type
