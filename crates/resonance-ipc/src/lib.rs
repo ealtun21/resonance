@@ -270,6 +270,9 @@ pub enum Command {
     SetSinkVolume { name: String, volume: f64 },
     /// Mute or unmute an output sink by its `SinkVolume::name`.
     SetSinkMute { name: String, muted: bool },
+    /// Set (or clear) the output dither target bit depth. `None` = off (bit-exact);
+    /// `Some(16 | 20 | 24)` = TPDF-dither to that grid as the final DSP stage.
+    SetDither { bits: Option<u32> },
 }
 
 /// One of the two in-memory comparison slots for quick A/B auditioning.
@@ -288,18 +291,20 @@ pub enum FxEffectId {
     DynamicBoost,
     Bass,
     Loudness,
+    Crossfeed,
 }
 
 impl FxEffectId {
     /// Every effect, in chain order. Adding a variant forces the array to be
     /// updated, which propagates exhaustively to every `ALL` iteration.
-    pub const ALL: [FxEffectId; 6] = [
+    pub const ALL: [FxEffectId; 7] = [
         FxEffectId::Fidelity,
         FxEffectId::Ambience,
         FxEffectId::Surround,
         FxEffectId::DynamicBoost,
         FxEffectId::Bass,
         FxEffectId::Loudness,
+        FxEffectId::Crossfeed,
     ];
 
     /// Full display name. (The TUI keeps its own narrower labels for the effects
@@ -313,6 +318,7 @@ impl FxEffectId {
             FxEffectId::DynamicBoost => "Dynamic Boost",
             FxEffectId::Bass => "Bass",
             FxEffectId::Loudness => "Loudness",
+            FxEffectId::Crossfeed => "Crossfeed",
         }
     }
 
@@ -340,6 +346,7 @@ impl From<FxEffectId> for FxEffect {
             FxEffectId::DynamicBoost => FxEffect::DynamicBoost,
             FxEffectId::Bass => FxEffect::Bass,
             FxEffectId::Loudness => FxEffect::Loudness,
+            FxEffectId::Crossfeed => FxEffect::Crossfeed,
         }
     }
 }
@@ -509,6 +516,10 @@ pub struct DaemonState {
     /// default, same compatibility note as `apps`.
     #[serde(default)]
     pub sinks: Vec<SinkVolume>,
+    /// Output dither target bit depth (`None` = off). Appended LAST + `serde`
+    /// default, same compatibility note as `apps`/`sinks`.
+    #[serde(default)]
+    pub dither_bits: Option<u32>,
 }
 
 impl DaemonState {
@@ -612,6 +623,10 @@ pub struct EffectsState {
     pub loudness_intensity: f64,
     #[serde(default)]
     pub loudness_enabled: bool,
+    #[serde(default)]
+    pub crossfeed_intensity: f64,
+    #[serde(default)]
+    pub crossfeed_enabled: bool,
 }
 
 impl EffectsState {
@@ -626,6 +641,7 @@ impl EffectsState {
             FxEffectId::DynamicBoost => (self.dynamic_boost_intensity, self.dynamic_boost_enabled),
             FxEffectId::Bass => (self.bass_intensity, self.bass_enabled),
             FxEffectId::Loudness => (self.loudness_intensity, self.loudness_enabled),
+            FxEffectId::Crossfeed => (self.crossfeed_intensity, self.crossfeed_enabled),
         }
     }
 
@@ -654,6 +670,10 @@ impl EffectsState {
             FxEffectId::Bass => {
                 self.bass_intensity = intensity;
                 self.bass_enabled = enabled;
+            }
+            FxEffectId::Crossfeed => {
+                self.crossfeed_intensity = intensity;
+                self.crossfeed_enabled = enabled;
             }
         }
     }
@@ -728,8 +748,12 @@ mod tests {
                 bass_enabled: false,
                 loudness_intensity: 0.0,
                 loudness_enabled: false,
+                crossfeed_intensity: 0.3,
+                crossfeed_enabled: true,
             },
         });
+        command_round_trip(&Command::SetDither { bits: Some(16) });
+        command_round_trip(&Command::SetDither { bits: None });
         command_round_trip(&Command::SetBandChannels {
             index: 1,
             channels: ChannelMask::from_indices([0, 2, 4]),
@@ -873,6 +897,8 @@ mod tests {
                 bass_enabled: true,
                 loudness_intensity: 0.6,
                 loudness_enabled: true,
+                crossfeed_intensity: 0.4,
+                crossfeed_enabled: true,
             },
             current_preset: Some("x.fac".into()),
             sample_rate: 48000.0,
@@ -902,6 +928,7 @@ mod tests {
                 volume: 0.8,
                 muted: false,
             }],
+            dither_bits: Some(24),
         };
         let bytes = to_stdvec(&Response::State(st)).expect("encode");
         let _: Response = from_bytes(&bytes).expect("decode");

@@ -38,10 +38,7 @@ angle so it can be picked up directly.
   item 8; pairs with the convolution engine above. Significant latency.
 
 - **Mid/side EQ mode** — process mono sum / stereo difference independently.
-  Backlog item 8; a `BandScope` (`Stereo | Mid | Side`) per band.
-
-- **Global hotkeys** — toggle power/EQ or cycle presets from anywhere (FxSound
-  and consumer apps have them). Per-OS global hotkey registration.
+  Backlog item 8; a `BandScope` (`Stereo | Mid | Side`) per band. 
 
 - **Input-device / source selection** — eqMac lets you pick the capture source;
   we only follow the output device. Expose an input picker.
@@ -49,13 +46,7 @@ angle so it can be picked up directly.
 ## Lower / niche
 
 - **Per-band solo/listen** — audition one band in isolation while tuning. Small
-  DSP + a UI affordance.
-
-- **VST plugin hosting** — EqualizerAPO hosts VST. Large effort, niche on Linux.
-
-- **Spectrum-grab / EQ-match / draw-curve** — match a target spectrum or draw an
-  EQ shape freehand (FabFilter). Large; overlaps the existing reference/Auto-EQ
-  work.
+  DSP + a UI affordance. ( Add eye icon or listen ear icon )
 
 - **Output dithering** — TPDF dither before F32 truncation. Backlog item 8.
 

@@ -1,7 +1,8 @@
 use crate::channel::ChannelMatrix;
+use crate::dither::DitherStage;
 use crate::effects::{
-    AmbienceEffect, BassBoostEffect, DynamicBoostEffect, Effect, FidelityEffect, LoudnessEffect,
-    SurroundEffect,
+    AmbienceEffect, BassBoostEffect, CrossfeedEffect, DynamicBoostEffect, Effect, FidelityEffect,
+    LoudnessEffect, SurroundEffect,
 };
 use crate::filter::ApoFilter;
 
@@ -13,18 +14,20 @@ pub enum FxEffect {
     DynamicBoost,
     Bass,
     Loudness,
+    Crossfeed,
 }
 
 impl FxEffect {
     /// Every effect, in chain order. Adding a variant forces this array to be
     /// updated, propagating to every `ALL` iteration.
-    pub const ALL: [FxEffect; 6] = [
+    pub const ALL: [FxEffect; 7] = [
         FxEffect::Fidelity,
         FxEffect::Ambience,
         FxEffect::Surround,
         FxEffect::DynamicBoost,
         FxEffect::Bass,
         FxEffect::Loudness,
+        FxEffect::Crossfeed,
     ];
 }
 
@@ -41,6 +44,9 @@ pub struct ProcessorChain {
     pub dynamic_boost: DynamicBoostEffect,
     pub bass: BassBoostEffect,
     pub loudness: LoudnessEffect,
+    pub crossfeed: CrossfeedEffect,
+    /// Final-stage TPDF dither (off by default → bit-exact).
+    pub dither: DitherStage,
     /// Optional output remap applied *after* EQ + effects, mapping the `channels`
     /// processed channels to a (possibly different) output channel count: swap,
     /// permutation, duplication, drop, up/downmix. `None` (or a square identity)
@@ -96,6 +102,16 @@ impl ProcessorChain {
         self.dynamic_boost.process(buf, channels);
         self.bass.process(buf, channels);
         self.loudness.process(buf, channels);
+        // Crossfeed narrows the final stereo image, so it runs last — after every
+        // other effect (including Surround, which widens it) has shaped the sound.
+        self.crossfeed.process(buf, channels);
+        // Dither is the very last stage, right before the output truncation.
+        self.dither.apply(buf, channels);
+    }
+
+    /// Set (or clear) the output dither target bit depth. `None` = off.
+    pub fn set_dither(&mut self, bits: Option<u32>) {
+        self.dither.set_bits(bits);
     }
 
     pub fn set_effect_intensity(&mut self, effect: FxEffect, value: f64) {
@@ -106,6 +122,7 @@ impl ProcessorChain {
             FxEffect::DynamicBoost => self.dynamic_boost.set_intensity(value),
             FxEffect::Bass => self.bass.set_intensity(value),
             FxEffect::Loudness => self.loudness.set_intensity(value),
+            FxEffect::Crossfeed => self.crossfeed.set_intensity(value),
         }
     }
 
@@ -123,6 +140,7 @@ impl ProcessorChain {
             }
             FxEffect::Bass => (self.bass.intensity(), self.bass.enabled()),
             FxEffect::Loudness => (self.loudness.intensity(), self.loudness.enabled()),
+            FxEffect::Crossfeed => (self.crossfeed.intensity(), self.crossfeed.enabled()),
         }
     }
 
@@ -134,6 +152,7 @@ impl ProcessorChain {
             FxEffect::DynamicBoost => self.dynamic_boost.set_enabled(on),
             FxEffect::Bass => self.bass.set_enabled(on),
             FxEffect::Loudness => self.loudness.set_enabled(on),
+            FxEffect::Crossfeed => self.crossfeed.set_enabled(on),
         }
     }
 
@@ -147,6 +166,7 @@ impl ProcessorChain {
         self.dynamic_boost.reset();
         self.bass.reset();
         self.loudness.reset();
+        self.crossfeed.reset();
     }
 
     /// Rebind every sample-rate-dependent coefficient to a new output rate.
@@ -180,6 +200,7 @@ impl ProcessorChain {
             carry_settings(&self.dynamic_boost, DynamicBoostEffect::new(sample_rate));
         self.bass = carry_settings(&self.bass, BassBoostEffect::new(ch, sample_rate));
         self.loudness = carry_settings(&self.loudness, LoudnessEffect::new(ch, sample_rate));
+        self.crossfeed = carry_settings(&self.crossfeed, CrossfeedEffect::new(ch, sample_rate));
     }
 
     /// Rebind every channel-count-dependent buffer to a new processing channel
@@ -205,6 +226,8 @@ impl ProcessorChain {
         self.dynamic_boost = carry_settings(&self.dynamic_boost, DynamicBoostEffect::new(sr));
         self.bass = carry_settings(&self.bass, BassBoostEffect::new(channels, sr));
         self.loudness = carry_settings(&self.loudness, LoudnessEffect::new(channels, sr));
+        self.crossfeed = carry_settings(&self.crossfeed, CrossfeedEffect::new(channels, sr));
+        self.dither.set_channels(channels);
     }
 
     /// The channel count the chain emits: the routing matrix's output width when
@@ -302,6 +325,8 @@ impl ProcessorChainBuilder {
             dynamic_boost: DynamicBoostEffect::new(sr),
             bass: BassBoostEffect::new(channels, sr),
             loudness: LoudnessEffect::new(channels, sr),
+            crossfeed: CrossfeedEffect::new(channels, sr),
+            dither: DitherStage::new(channels),
             routing: None,
         }
     }
@@ -471,6 +496,22 @@ mod tests {
                 i * gain
             );
         }
+    }
+
+    #[test]
+    fn chain_dither_quantizes_output_when_enabled() {
+        // With dither on, the chain's output must land on the target grid; with
+        // it off (the default) the chain stays a bit-exact passthrough (covered
+        // by `full_default_chain_is_bit_perfect_passthrough`).
+        let mut chain = ProcessorChain::builder().channels(2).build();
+        chain.set_dither(Some(16));
+        let q = 1.0 / f64::from(1u32 << 15);
+        let mut buf: Vec<f64> = (0..256).map(|i| (f64::from(i) * 0.05).sin() * 0.4).collect();
+        chain.process(&mut buf);
+        assert!(
+            buf.iter().all(|&y| ((y / q).round() - y / q).abs() < 1e-6),
+            "chain output should be quantised to the grid when dither is on"
+        );
     }
 
     #[test]

@@ -78,7 +78,10 @@ pub struct ChainSnapshot {
     pub dynamic_boost: EffectSnapshot,
     pub bass: EffectSnapshot,
     pub loudness: EffectSnapshot,
+    pub crossfeed: EffectSnapshot,
     pub num_filters: u32,
+    /// Output dither target bit depth (`0` = off; else 16/20/24).
+    pub dither_bits: u32,
     pub filters: [FilterSnapshot; MAX_FILTERS],
     /// Square output routing matrix dimension: `0` = none/identity (passthrough);
     /// else `N` means an `N×N` remap stored row-major in the first `N*N` entries
@@ -100,7 +103,9 @@ impl Default for ChainSnapshot {
             dynamic_boost: EffectSnapshot::default(),
             bass: EffectSnapshot::default(),
             loudness: EffectSnapshot::default(),
+            crossfeed: EffectSnapshot::default(),
             num_filters: 0,
+            dither_bits: 0,
             filters: [FilterSnapshot::default(); MAX_FILTERS],
             route_channels: 0,
             _pad_route: 0,
@@ -202,6 +207,7 @@ fn effect(chain: &ProcessorChain, e: FxEffect) -> EffectSnapshot {
         ),
         FxEffect::Bass => (chain.bass.intensity(), chain.bass.enabled()),
         FxEffect::Loudness => (chain.loudness.intensity(), chain.loudness.enabled()),
+        FxEffect::Crossfeed => (chain.crossfeed.intensity(), chain.crossfeed.enabled()),
     };
     EffectSnapshot {
         enabled: u32::from(enabled),
@@ -235,7 +241,9 @@ impl ChainSnapshot {
             dynamic_boost: effect(chain, FxEffect::DynamicBoost),
             bass: effect(chain, FxEffect::Bass),
             loudness: effect(chain, FxEffect::Loudness),
+            crossfeed: effect(chain, FxEffect::Crossfeed),
             num_filters: n as u32,
+            dither_bits: chain.dither.bits().unwrap_or(0),
             filters,
             route_channels,
             _pad_route: 0,
@@ -287,6 +295,9 @@ impl ChainSnapshot {
         chain.set_effect_enabled(FxEffect::Bass, self.bass.enabled != 0);
         chain.set_effect_intensity(FxEffect::Loudness, self.loudness.intensity);
         chain.set_effect_enabled(FxEffect::Loudness, self.loudness.enabled != 0);
+        chain.set_effect_intensity(FxEffect::Crossfeed, self.crossfeed.intensity);
+        chain.set_effect_enabled(FxEffect::Crossfeed, self.crossfeed.enabled != 0);
+        chain.set_dither((self.dither_bits != 0).then_some(self.dither_bits));
         chain
     }
 
@@ -309,6 +320,9 @@ impl ChainSnapshot {
         chain.set_effect_enabled(FxEffect::Bass, self.bass.enabled != 0);
         chain.set_effect_intensity(FxEffect::Loudness, self.loudness.intensity);
         chain.set_effect_enabled(FxEffect::Loudness, self.loudness.enabled != 0);
+        chain.set_effect_intensity(FxEffect::Crossfeed, self.crossfeed.intensity);
+        chain.set_effect_enabled(FxEffect::Crossfeed, self.crossfeed.enabled != 0);
+        chain.set_dither((self.dither_bits != 0).then_some(self.dither_bits));
 
         // Routing is format-independent state on the chain; apply it in place at
         // the chain's live width (square-only; mismatched/absent → passthrough).

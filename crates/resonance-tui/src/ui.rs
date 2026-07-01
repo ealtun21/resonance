@@ -2589,6 +2589,7 @@ mod tests {
             meters: Meters::default(),
             apps: vec![],
             sinks: vec![],
+            dither_bits: None,
         }
     }
 

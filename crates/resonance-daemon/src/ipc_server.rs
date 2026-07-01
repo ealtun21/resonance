@@ -184,6 +184,7 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
         Command::SetAppMute { key, muted } => handle_set_app_mute(state, key, muted),
         Command::SetSinkVolume { name, volume } => handle_set_sink_volume(state, name, volume),
         Command::SetSinkMute { name, muted } => handle_set_sink_mute(state, name, muted),
+        Command::SetDither { bits } => handle_set_dither(state, bits),
         // The actual cleanup + exit happens in `handle_client` after this Ok is
         // flushed to the client (see the `is_shutdown` branch there).
         Command::Shutdown => Response::Ok,
@@ -268,6 +269,14 @@ fn handle_set_effect_intensity(state: &SharedState, effect: FxEffectId, value: f
             chain.set_effect_intensity(fx, value);
         },
     );
+    Response::Ok
+}
+
+/// Set (or clear) the final-stage output dither target bit depth.
+fn handle_set_dither(state: &SharedState, bits: Option<u32>) -> Response {
+    state.send(AudioCommand::SetDither { bits }, move |chain| {
+        chain.set_dither(bits);
+    });
     Response::Ok
 }
 
@@ -666,6 +675,10 @@ fn handle_apply_state(
         enabled,
         effects,
         bands,
+        // ApplyState carries EQ + effects only (undo/redo, bulk edits); dither is
+        // owned by SetDither, so preserve the live setting across the rebuild
+        // rather than clobbering it to off.
+        dither_bits: state.snapshot().dither_bits,
     };
     state.rebuild_chain(|ch, sr| profile.clone().into_chain(ch, sr));
     Response::Ok
