@@ -1,6 +1,6 @@
 use resonance_dsp::chain::FxEffect;
 use resonance_dsp::channel::{ChannelMask as DspMask, ChannelMatrix as DspMatrix};
-use resonance_dsp::filter::FilterType;
+use resonance_dsp::filter::{BandScope as DspScope, FilterType};
 use serde::{Deserialize, Serialize};
 
 pub mod curve;
@@ -277,6 +277,9 @@ pub enum Command {
     /// HP/LP; ignored by single-biquad band types. `index` matches a band's
     /// position in `DaemonState::bands`.
     SetBandSlope { index: usize, slope_db_oct: u8 },
+    /// Set an EQ band's stereo scope (Stereo/Mid/Side). `index` matches a band's
+    /// position in `DaemonState::bands`.
+    SetBandScope { index: usize, scope: BandScope },
 }
 
 /// One of the two in-memory comparison slots for quick A/B auditioning.
@@ -475,6 +478,69 @@ impl From<BandType> for FilterType {
     }
 }
 
+/// Serializable stereo scope of a band — the wire/disk mirror of the DSP
+/// `resonance_dsp::filter::BandScope`. `Stereo` (default) processes each channel
+/// independently; `Mid`/`Side` process the mono sum / stereo difference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum BandScope {
+    #[default]
+    Stereo,
+    Mid,
+    Side,
+}
+
+impl BandScope {
+    /// Short label for table columns.
+    #[must_use]
+    pub fn abbrev(self) -> &'static str {
+        match self {
+            BandScope::Stereo => "St",
+            BandScope::Mid => "M",
+            BandScope::Side => "S",
+        }
+    }
+
+    /// Full human-readable name.
+    #[must_use]
+    pub fn full(self) -> &'static str {
+        match self {
+            BandScope::Stereo => "Stereo",
+            BandScope::Mid => "Mid",
+            BandScope::Side => "Side",
+        }
+    }
+
+    /// Cycle order for a UI toggle: Stereo → Mid → Side → Stereo.
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            BandScope::Stereo => BandScope::Mid,
+            BandScope::Mid => BandScope::Side,
+            BandScope::Side => BandScope::Stereo,
+        }
+    }
+}
+
+impl From<BandScope> for DspScope {
+    fn from(s: BandScope) -> Self {
+        match s {
+            BandScope::Stereo => DspScope::Stereo,
+            BandScope::Mid => DspScope::Mid,
+            BandScope::Side => DspScope::Side,
+        }
+    }
+}
+
+impl From<DspScope> for BandScope {
+    fn from(s: DspScope) -> Self {
+        match s {
+            DspScope::Stereo => BandScope::Stereo,
+            DspScope::Mid => BandScope::Mid,
+            DspScope::Side => BandScope::Side,
+        }
+    }
+}
+
 // `State(DaemonState)` is large and the by-far most common reply; boxing it
 // would add an allocation to the hot path for no real memory win (a Response is
 // short-lived and never held in bulk).
@@ -607,6 +673,10 @@ pub struct BandState {
     /// default keeps profiles written before slopes existed loading as 12.
     #[serde(default = "default_slope_db_oct")]
     pub slope_db_oct: u8,
+    /// Stereo scope: `Stereo` (default), `Mid`, or `Side`. `serde` default keeps
+    /// profiles written before mid/side existed loading as `Stereo`.
+    #[serde(default)]
+    pub scope: BandScope,
 }
 
 /// Serde default for [`BandState::slope_db_oct`] — 12 dB/oct (single biquad),
@@ -776,6 +846,7 @@ mod tests {
                 enabled: true,
                 channels: ChannelMask::single(0),
                 slope_db_oct: 24,
+                scope: BandScope::Mid,
             }],
             effects: EffectsState {
                 fidelity_intensity: 0.5,
@@ -926,6 +997,7 @@ mod tests {
                 enabled: true,
                 channels: ChannelMask::single(1),
                 slope_db_oct: 48,
+                scope: BandScope::Side,
             }],
             effects: EffectsState {
                 fidelity_intensity: 0.5,

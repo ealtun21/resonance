@@ -1399,6 +1399,7 @@ impl App {
                             enabled: true,
                             channels: ChannelMask::ALL,
                             slope_db_oct: resonance_ipc::default_slope_db_oct(),
+                            scope: resonance_ipc::BandScope::Stereo,
                         })
                         .collect();
                     AutoEqDone {

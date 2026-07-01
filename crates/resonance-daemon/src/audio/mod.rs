@@ -219,6 +219,11 @@ pub fn apply_command(chain: &mut ProcessorChain, cmd: AudioCommand) {
                 let _ = f.set_slope(slope_db_oct, sr);
             }
         }
+        AudioCommand::SetBandScope { index, scope } => {
+            if let Some(f) = chain.filters.get_mut(index) {
+                f.scope = scope.into();
+            }
+        }
         AudioCommand::SetBandChannels { index, mask } => {
             if let Some(f) = chain.filters.get_mut(index) {
                 f.mask = mask;

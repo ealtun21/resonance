@@ -4,7 +4,7 @@ use crate::effects::{
     AmbienceEffect, BassBoostEffect, CrossfeedEffect, DynamicBoostEffect, Effect, FidelityEffect,
     LoudnessEffect, SurroundEffect,
 };
-use crate::filter::ApoFilter;
+use crate::filter::{ApoFilter, BandScope};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FxEffect {
@@ -82,15 +82,52 @@ impl ProcessorChain {
         // on each sample once the band count grows.
         for filter in &mut self.filters {
             let frames = buf.len() / channels;
-            for frame in 0..frames {
-                for ch in 0..channels {
-                    // Per-channel EQ: a band only touches the channels its mask
-                    // selects; excluded channels pass through and their biquad
-                    // state for this band stays at rest. `ChannelMask::ALL` (the
-                    // default) makes this a no-op branch — the global case.
-                    if filter.mask.contains(ch) {
-                        let idx = frame * channels + ch;
-                        buf[idx] = filter.process_channel(buf[idx], ch);
+            match filter.scope {
+                BandScope::Stereo => {
+                    for frame in 0..frames {
+                        for ch in 0..channels {
+                            // Per-channel EQ: a band only touches the channels its
+                            // mask selects; excluded channels pass through and
+                            // their biquad state stays at rest. `ChannelMask::ALL`
+                            // (the default) makes this a no-op branch — the global
+                            // case.
+                            if filter.mask.contains(ch) {
+                                let idx = frame * channels + ch;
+                                buf[idx] = filter.process_channel(buf[idx], ch);
+                            }
+                        }
+                    }
+                }
+                // Mid/side: process the mono sum / stereo difference of the front
+                // L/R pair (channels 0 and 1). Channels ≥2 pass through; the band
+                // mask is not used (scope targets the front pair by definition).
+                BandScope::Mid | BandScope::Side => {
+                    if channels < 2 {
+                        // Mono has no side information: Mid processes the single
+                        // channel; Side is a no-op.
+                        if filter.scope == BandScope::Mid {
+                            for frame in 0..frames {
+                                let idx = frame * channels;
+                                buf[idx] = filter.process_channel(buf[idx], 0);
+                            }
+                        }
+                        continue;
+                    }
+                    for frame in 0..frames {
+                        let il = frame * channels;
+                        let ir = il + 1;
+                        let (l, r) = (buf[il], buf[ir]);
+                        let m = (l + r) * 0.5;
+                        let s = (l - r) * 0.5;
+                        // Mid uses biquad state slot 0, Side slot 1, so the two
+                        // scopes never share running history within a band.
+                        let (m2, s2) = if filter.scope == BandScope::Mid {
+                            (filter.process_channel(m, 0), s)
+                        } else {
+                            (m, filter.process_channel(s, 1))
+                        };
+                        buf[il] = m2 + s2;
+                        buf[ir] = m2 - s2;
                     }
                 }
             }
@@ -527,5 +564,128 @@ mod tests {
         let mut buf = input.clone();
         chain.process(&mut buf);
         assert_eq!(buf, input);
+    }
+
+    // ── Mid/side band scope ─────────────────────────────────────────────────
+
+    fn ms_chain(scope: crate::filter::BandScope) -> ProcessorChain {
+        use crate::filter::{ApoFilter, FilterType};
+        ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48_000.0)
+            .add_filter(
+                ApoFilter::builder()
+                    .filter_type(FilterType::Peaking)
+                    .freq(1_000.0)
+                    .gain_db(12.0)
+                    .q(1.0)
+                    .scope(scope)
+                    .enabled(true)
+                    .channels(2)
+                    .sample_rate(48_000.0)
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+    }
+
+    fn tone_1k(frames: usize) -> Vec<f64> {
+        (0..frames)
+            .map(|i| (2.0 * std::f64::consts::PI * 1_000.0 / 48_000.0 * i as f64).sin() * 0.5)
+            .collect()
+    }
+
+    fn ch_rms(buf: &[f64], ch: usize) -> f64 {
+        let v: Vec<f64> = buf.iter().skip(ch).step_by(2).copied().collect();
+        (v.iter().map(|x| x * x).sum::<f64>() / v.len() as f64).sqrt()
+    }
+
+    fn side_rms(buf: &[f64]) -> f64 {
+        let sd: Vec<f64> = buf.chunks(2).map(|f| (f[0] - f[1]) / 2.0).collect();
+        (sd.iter().map(|x| x * x).sum::<f64>() / sd.len() as f64).sqrt()
+    }
+
+    #[test]
+    fn mid_band_ignores_pure_side_signal() {
+        use crate::filter::BandScope;
+        // A pure side signal (L = +x, R = −x) has zero mid content, so a
+        // Mid-scoped band must leave it untouched.
+        let mut chain = ms_chain(BandScope::Mid);
+        let s = tone_1k(2048);
+        let mut buf: Vec<f64> = s.iter().flat_map(|&x| [x, -x]).collect();
+        let input = buf.clone();
+        chain.process(&mut buf);
+        for (a, b) in input.iter().zip(&buf) {
+            assert!(
+                (a - b).abs() < 1e-9,
+                "mid band must not touch a pure side signal"
+            );
+        }
+    }
+
+    #[test]
+    fn mid_band_boosts_mono_signal() {
+        use crate::filter::BandScope;
+        // A mono signal is pure mid, so a +12 dB Mid band at the tone frequency
+        // must boost it.
+        let mut chain = ms_chain(BandScope::Mid);
+        let s = tone_1k(4096);
+        let mut buf: Vec<f64> = s.iter().flat_map(|&x| [x, x]).collect();
+        let before = ch_rms(&buf, 0);
+        chain.process(&mut buf);
+        let after = ch_rms(&buf, 0);
+        assert!(
+            after > before * 2.0,
+            "mid band should boost a mono signal: {before:.3} → {after:.3}"
+        );
+    }
+
+    #[test]
+    fn side_band_ignores_mono_signal() {
+        use crate::filter::BandScope;
+        // A mono signal has zero side content, so a Side-scoped band leaves it be.
+        let mut chain = ms_chain(BandScope::Side);
+        let s = tone_1k(2048);
+        let mut buf: Vec<f64> = s.iter().flat_map(|&x| [x, x]).collect();
+        let input = buf.clone();
+        chain.process(&mut buf);
+        for (a, b) in input.iter().zip(&buf) {
+            assert!(
+                (a - b).abs() < 1e-9,
+                "side band must not touch a mono signal"
+            );
+        }
+    }
+
+    #[test]
+    fn side_band_boosts_pure_side_signal() {
+        use crate::filter::BandScope;
+        let mut chain = ms_chain(BandScope::Side);
+        let s = tone_1k(4096);
+        let mut buf: Vec<f64> = s.iter().flat_map(|&x| [x, -x]).collect();
+        let before = side_rms(&buf);
+        chain.process(&mut buf);
+        let after = side_rms(&buf);
+        assert!(
+            after > before * 2.0,
+            "side band should boost a pure side signal: {before:.3} → {after:.3}"
+        );
+    }
+
+    #[test]
+    fn stereo_scope_boosts_both_channels_equally() {
+        use crate::filter::BandScope;
+        // The default Stereo scope processes each channel independently — a mono
+        // input comes out boosted equally on both channels.
+        let mut chain = ms_chain(BandScope::Stereo);
+        let s = tone_1k(4096);
+        let mut buf: Vec<f64> = s.iter().flat_map(|&x| [x, x]).collect();
+        let before = ch_rms(&buf, 0);
+        chain.process(&mut buf);
+        let (l, r) = (ch_rms(&buf, 0), ch_rms(&buf, 1));
+        assert!(
+            l > before * 2.0 && (l - r).abs() < 1e-6,
+            "stereo band should boost both channels equally: L {l:.3} R {r:.3}"
+        );
     }
 }

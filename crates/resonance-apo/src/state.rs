@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use resonance_dsp::chain::{FxEffect, ProcessorChain};
 use resonance_dsp::channel::{ChannelMask, ChannelMatrix};
 use resonance_dsp::effects::Effect;
-use resonance_dsp::filter::{ApoFilter, FilterType};
+use resonance_dsp::filter::{ApoFilter, BandScope, FilterType};
 
 /// Maximum number of EQ bands carried in the shared block.
 pub const MAX_FILTERS: usize = 32;
@@ -52,6 +52,8 @@ pub struct FilterSnapshot {
     /// Filter slope in dB/oct (12/24/48) for shelves + HP/LP; `0`/`12` = single
     /// biquad. Ignored by the single-biquad band types.
     pub slope_db_oct: u32,
+    /// Stereo scope: `0` = Stereo (default), `1` = Mid, `2` = Side.
+    pub scope: u32,
     pub freq: f64,
     pub gain_db: f64,
     pub q: f64,
@@ -229,6 +231,7 @@ impl ChainSnapshot {
                 kind: filter_type_to_u32(f.filter_type),
                 enabled: u32::from(f.enabled),
                 slope_db_oct: u32::from(f.slope_db_oct),
+                scope: scope_to_u32(f.scope),
                 freq: f.freq,
                 gain_db: f.gain_db,
                 q: f.q,
@@ -275,6 +278,7 @@ impl ChainSnapshot {
                 .gain_db(f.gain_db)
                 .q(f.q)
                 .slope_db_oct(f.slope_db_oct as u8)
+                .scope(scope_from_u32(f.scope))
                 .enabled(f.enabled != 0)
                 .channels(channels)
                 .sample_rate(sample_rate)
@@ -348,11 +352,32 @@ impl ChainSnapshot {
                 sample_rate,
             );
             let _ = slot.set_slope(f.slope_db_oct as u8, sample_rate);
+            slot.scope = scope_from_u32(f.scope);
             slot.enabled = f.enabled != 0;
             // Per-channel target is plain state (no coefficient/history impact).
             slot.mask = ChannelMask::from_bits(f.channels);
         }
         true
+    }
+}
+
+/// Stable `BandScope` → `u32` mapping for the shared block (must round-trip).
+#[must_use]
+pub fn scope_to_u32(s: BandScope) -> u32 {
+    match s {
+        BandScope::Stereo => 0,
+        BandScope::Mid => 1,
+        BandScope::Side => 2,
+    }
+}
+
+/// Inverse of [`scope_to_u32`]; unknown values fall back to `Stereo`.
+#[must_use]
+pub fn scope_from_u32(v: u32) -> BandScope {
+    match v {
+        1 => BandScope::Mid,
+        2 => BandScope::Side,
+        _ => BandScope::Stereo,
     }
 }
 

@@ -1039,6 +1039,7 @@ fn demo_state() -> DaemonState {
         enabled,
         channels,
         slope_db_oct: 12,
+        scope: resonance_ipc::BandScope::Stereo,
     };
     DaemonState {
         enabled: true,
