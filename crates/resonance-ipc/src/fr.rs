@@ -113,6 +113,7 @@ mod tests {
             q,
             enabled: true,
             channels: ChannelMask::ALL,
+            slope_db_oct: 12,
         }]
     }
 

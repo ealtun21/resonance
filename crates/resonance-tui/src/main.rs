@@ -175,6 +175,9 @@ fn handle_normal(app: &mut App, key: KeyEvent) {
         KeyCode::Char('a') if band_focus => app.add_band(),
         KeyCode::Char('d') | KeyCode::Delete if band_focus => app.remove_band(),
         KeyCode::Char('t') if band_focus => app.cycle_band_type(),
+        // Cycle the selected band's filter slope 12→24→48 (shelves + HP/LP only;
+        // gated inside the call). Uppercase so lowercase `s` keeps settings.
+        KeyCode::Char('S') if band_focus => app.cycle_band_slope(),
         // Per-band channel targeting (multichannel only; gated inside the call).
         KeyCode::Char('c') if band_focus => app.begin_select_band_channels(),
         // L/R channel swap (≥2 channels; gated inside the call).

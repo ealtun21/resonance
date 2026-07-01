@@ -920,6 +920,31 @@ impl App {
         self.refresh_state();
     }
 
+    /// Cycle the filter slope of the selected band (`S` key): 12 → 24 → 48 → 12
+    /// dB/oct. Only shelves + HP/LP have a slope; other (single-biquad) band
+    /// types show a status hint instead of a no-op edit.
+    pub fn cycle_band_slope(&mut self) {
+        if !matches!(self.focus, Panel::Bands | Panel::Graph) {
+            return;
+        }
+        let Some(state) = &self.state else { return };
+        let idx = self.band_cursor;
+        let Some(band) = state.bands.get(idx) else {
+            return;
+        };
+        if !band.band_type.uses_slope() {
+            self.set_status("slope applies to shelves + HP/LP only");
+            return;
+        }
+        let next = resonance_ipc::next_slope_db_oct(band.slope_db_oct);
+        self.push_undo();
+        self.send(Command::SetBandSlope {
+            index: idx,
+            slope_db_oct: next,
+        });
+        self.refresh_state();
+    }
+
     pub fn remove_band(&mut self) {
         let Some(state) = &self.state else { return };
         if state.bands.is_empty() {
@@ -1373,6 +1398,7 @@ impl App {
                             q: fl.q,
                             enabled: true,
                             channels: ChannelMask::ALL,
+                            slope_db_oct: resonance_ipc::default_slope_db_oct(),
                         })
                         .collect();
                     AutoEqDone {

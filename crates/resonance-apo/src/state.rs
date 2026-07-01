@@ -49,6 +49,9 @@ pub struct FilterSnapshot {
     pub kind: u32,
     /// `0` = bypassed, `1` = active.
     pub enabled: u32,
+    /// Filter slope in dB/oct (12/24/48) for shelves + HP/LP; `0`/`12` = single
+    /// biquad. Ignored by the single-biquad band types.
+    pub slope_db_oct: u32,
     pub freq: f64,
     pub gain_db: f64,
     pub q: f64,
@@ -225,6 +228,7 @@ impl ChainSnapshot {
             *dst = FilterSnapshot {
                 kind: filter_type_to_u32(f.filter_type),
                 enabled: u32::from(f.enabled),
+                slope_db_oct: u32::from(f.slope_db_oct),
                 freq: f.freq,
                 gain_db: f.gain_db,
                 q: f.q,
@@ -270,6 +274,7 @@ impl ChainSnapshot {
                 .freq(f.freq)
                 .gain_db(f.gain_db)
                 .q(f.q)
+                .slope_db_oct(f.slope_db_oct as u8)
                 .enabled(f.enabled != 0)
                 .channels(channels)
                 .sample_rate(sample_rate)
@@ -342,6 +347,7 @@ impl ChainSnapshot {
                 f.q,
                 sample_rate,
             );
+            let _ = slot.set_slope(f.slope_db_oct as u8, sample_rate);
             slot.enabled = f.enabled != 0;
             // Per-channel target is plain state (no coefficient/history impact).
             slot.mask = ChannelMask::from_bits(f.channels);

@@ -53,6 +53,11 @@ pub enum AudioCommand {
         index: usize,
         band_type: BandType,
     },
+    /// Change an EQ band's filter slope (12/24/48 dB/oct).
+    SetBandSlope {
+        index: usize,
+        slope_db_oct: u8,
+    },
     /// Retarget an existing band to a channel subset (per-channel EQ).
     SetBandChannels {
         index: usize,
@@ -265,6 +270,7 @@ impl SharedState {
                 q: f.q,
                 enabled: f.enabled,
                 channels: resonance_ipc::ChannelMask::from_dsp(f.mask),
+                slope_db_oct: f.slope_db_oct,
             })
             .collect();
 

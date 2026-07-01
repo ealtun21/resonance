@@ -60,6 +60,9 @@ impl Profile {
                     q: b.q,
                     enabled: b.enabled,
                     channels: ChannelMask(b.channels),
+                    // Presets (.fac / APO .txt) carry no portable slope token, so
+                    // preset-derived bands default to 12 dB/oct (single biquad).
+                    slope_db_oct: resonance_ipc::default_slope_db_oct(),
                 }
             })
             .collect();
@@ -108,6 +111,7 @@ impl Profile {
                 .freq(b.freq)
                 .gain_db(b.gain_db)
                 .q(b.q)
+                .slope_db_oct(b.slope_db_oct)
                 .enabled(b.enabled)
                 .channels(channels)
                 .sample_rate(sample_rate)
@@ -440,6 +444,7 @@ mod tests {
                     q: 1.0,
                     enabled: true,
                     channels: ChannelMask::ALL,
+                    slope_db_oct: 12,
                 },
                 BandState {
                     band_type: BandType::Peaking,
@@ -448,6 +453,7 @@ mod tests {
                     q: 1.0,
                     enabled: true,
                     channels: ChannelMask::single(0),
+                    slope_db_oct: 24,
                 },
             ],
         };
