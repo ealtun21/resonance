@@ -209,7 +209,8 @@ impl GuiApp {
         // opts in via the Channels section's "Per-channel EQ" toggle (lets a
         // stereo user do L/R-specific EQ).
         let show_ch = state.channels > 2 || (self.per_channel_eq && state.channels >= 2);
-        let cols = BandColumns::resolve(avail, kit::SP_S, show_ch, self.show_slope, self.show_scope);
+        let cols =
+            BandColumns::resolve(avail, kit::SP_S, show_ch, self.show_slope, self.show_scope);
 
         bands_header(ui, &cols);
 

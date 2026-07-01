@@ -131,7 +131,10 @@ impl GuiApp {
                     ui.label(egui::RichText::new("Advanced features").strong());
                     ui.weak("Hidden by default to keep the main view clean.");
                     ui.add_space(4.0);
-                    ui.checkbox(&mut self.show_slope, "Filter slope column (12/24/48 dB/oct)");
+                    ui.checkbox(
+                        &mut self.show_slope,
+                        "Filter slope column (12/24/48 dB/oct)",
+                    );
                     ui.checkbox(&mut self.show_scope, "Stereo scope column (Mid/Side)");
                     ui.checkbox(&mut self.show_dither, "Output dither section");
 
