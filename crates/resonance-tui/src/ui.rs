@@ -121,6 +121,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::raw(""),
         head("Global"),
         key("+ / -", "preamp ±0.5 dB"),
+        key("D", "cycle output dither (off / 16 / 20 / 24-bit)"),
         key("p", "power on/off"),
         key("w", "swap L/R channels (≥2ch)"),
         key("l", "load preset (file browser)"),
@@ -150,7 +151,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
 // ── Footer / contextual help ───────────────────────────────────────────────
 
 fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
-    let common = "[Tab] focus  [↑↓] select  [←→] adjust  [+/-] preamp  [Space] toggle  [l] load  [s] settings  [o] output  [A] apps  [O] outputs  [p] power  [?] help  [q] quit";
+    let common = "[Tab] focus  [↑↓] select  [←→] adjust  [+/-] preamp  [D] dither  [Space] toggle  [l] load  [s] settings  [o] output  [A] apps  [O] outputs  [p] power  [?] help  [q] quit";
     let mut ctx = match app.focus {
         Panel::Effects => "  •  [←→] intensity".to_string(),
         Panel::Apps => "  •  [←→] volume  [Space] mute  [A] hide".to_string(),
@@ -272,6 +273,12 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
     let preamp_db = app.state.as_ref().map_or(0.0, |s| s.preamp_db);
     let (preamp, preamp_color) = preamp_label(preamp_db);
 
+    let dither_bits = app.state.as_ref().and_then(|s| s.dither_bits);
+    let (dither, dither_color) = match dither_bits {
+        None => ("dither off".to_string(), Color::DarkGray),
+        Some(b) => (format!("dither {b}-bit"), Color::Cyan),
+    };
+
     let output_str = app
         .state
         .as_ref()
@@ -322,6 +329,8 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         Span::styled(sr, Style::default().fg(Color::DarkGray)),
         sep(),
         Span::styled(preamp, Style::default().fg(preamp_color)),
+        sep(),
+        Span::styled(dither, Style::default().fg(dither_color)),
         sep(),
     ];
     if let Some(ch) = ch_str {

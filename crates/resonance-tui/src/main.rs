@@ -184,6 +184,9 @@ fn handle_normal(app: &mut App, key: KeyEvent) {
         // `a`/`o` keep their band-add / output-selector meanings).
         KeyCode::Char('A') => app.toggle_apps_panel(),
         KeyCode::Char('O') => app.toggle_sinks_panel(),
+        // Cycle output dither depth (uppercase, so lowercase `d` keeps its
+        // delete-band meaning): Off → 16 → 20 → 24 → Off.
+        KeyCode::Char('D') => app.cycle_dither(),
         KeyCode::Char('?') => app.show_help(),
         _ => {}
     }
