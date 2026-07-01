@@ -78,6 +78,13 @@ enum Sub {
     Unmap,
     /// List output→profile mappings
     Maps,
+    /// Set an EQ band's filter slope in dB/oct (shelves + HP/LP only)
+    BandSlope {
+        /// Band index (1-based, as shown in `status`)
+        index: usize,
+        /// Slope: 12 | 24 | 48 dB/oct
+        slope: u8,
+    },
     /// Reset to defaults: flat EQ, all effects off, 0 dB preamp
     Reset,
     /// Export the current EQ to an `EqualizerAPO` .txt file
@@ -339,6 +346,18 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
             } else {
                 Ok(Command::SetOutputTarget { node_name: name })
             }
+        }
+        Sub::BandSlope { index, slope } => {
+            if index == 0 {
+                bail!("band index is 1-based (see `status`)");
+            }
+            if !matches!(slope, 12 | 24 | 48) {
+                bail!("slope must be 12, 24 or 48 dB/oct, got {slope}");
+            }
+            Ok(Command::SetBandSlope {
+                index: index - 1,
+                slope_db_oct: slope,
+            })
         }
         Sub::Reset => Ok(Command::Reset),
         Sub::Export { path } => Ok(Command::ExportApo {
@@ -720,11 +739,18 @@ fn print_state(p: &Paint, s: &resonance_ipc::DaemonState) {
                 p.dim("off")
             };
             let chlabel = mask_label(b.channels, &s.channel_layout, s.channels);
-            let tail = if chlabel.is_empty() {
+            // Slope only applies to shelves + HP/LP; hide it for single-biquad types.
+            let slope_tail = if b.band_type.uses_slope() {
+                format!("  {}", p.dim(&format!("{} dB/oct", b.slope_db_oct)))
+            } else {
+                String::new()
+            };
+            let ch_tail = if chlabel.is_empty() {
                 String::new()
             } else {
                 format!("  {}", p.dim(&chlabel))
             };
+            let tail = format!("{slope_tail}{ch_tail}");
             println!(
                 "  {:>2}  {}  {:>8.1} Hz  {:+5.1} dB  Q {:>4.2}  {state}{tail}",
                 i + 1,
