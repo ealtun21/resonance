@@ -40,6 +40,8 @@ pub(crate) fn channels_visible(show_channels: bool, channels: usize) -> bool {
 
 /// Build the compact status-bar hint naming hidden-but-active advanced
 /// features, or `None` when nothing hidden is doing anything.
+// `slope`/`scope` are deliberately parallel feature names.
+#[allow(clippy::similar_names)]
 pub(crate) fn advanced_hint_label(
     dither: bool,
     slope: bool,
@@ -1228,8 +1230,8 @@ impl App {
 
     /// Whether per-channel controls should surface. Progressive disclosure:
     /// stereo/mono users never see the channel column or the picker — only
-    /// >2-channel devices reveal per-band channel targeting; stereo reveals it
-    /// only when the user opts in via the `show_channels` pref.
+    /// Reveal per-band channel targeting on devices with more than 2 channels;
+    /// stereo reveals it only when the user opts in via the `show_channels` pref.
     pub(crate) fn show_ch(&self) -> bool {
         self.state
             .as_ref()
@@ -1239,6 +1241,8 @@ impl App {
     /// Compact hint for the status bar: names advanced features that are hidden
     /// (their toggle off) yet hold a non-default value, so nothing runs
     /// invisibly. `None` when every hidden feature is at its default.
+    // `slope`/`scope` are deliberately parallel feature names.
+    #[allow(clippy::similar_names)]
     pub(crate) fn advanced_active_hint(&self) -> Option<String> {
         let s = self.state.as_ref()?;
         let dither = !self.prefs.show_dither && s.dither_bits.is_some();

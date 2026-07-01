@@ -142,9 +142,11 @@ mod tests {
 
     #[test]
     fn advanced_toggles_roundtrip() {
-        let mut p = Prefs::default();
-        p.show_slope = true;
-        p.show_channels = true;
+        let p = Prefs {
+            show_slope: true,
+            show_channels: true,
+            ..Default::default()
+        };
         let s = toml::to_string(&p).unwrap();
         let back: Prefs = toml::from_str(&s).unwrap();
         assert!(back.show_slope);
