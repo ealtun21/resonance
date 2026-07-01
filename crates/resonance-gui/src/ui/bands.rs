@@ -64,12 +64,19 @@ impl BandColumns {
     /// channel column should appear. `avail` is already clamped to a sane minimum.
     // `show_slope` and `show_scope` are deliberately parallel column flags.
     #[allow(clippy::similar_names)]
-    fn resolve(avail: f32, gap: f32, show_ch: bool) -> Self {
+    fn resolve(
+        avail: f32,
+        gap: f32,
+        show_ch: bool,
+        show_slope_pref: bool,
+        show_scope_pref: bool,
+    ) -> Self {
         // Collapse columns as the table narrows: drop the gain graph first, then
-        // the Slope selector, then the Scope selector, then the Type combo.
+        // the Slope selector, then the Scope selector, then the Type combo. Slope
+        // and Scope are additionally gated behind their advanced-visibility prefs.
         let show_graph = avail >= 560.0;
-        let show_slope = avail >= 464.0;
-        let show_scope = avail >= 410.0;
+        let show_slope = show_slope_pref && avail >= 464.0;
+        let show_scope = show_scope_pref && avail >= 410.0;
         let show_type = avail >= 360.0;
         let n_cols = 6
             + usize::from(show_type)
@@ -202,7 +209,7 @@ impl GuiApp {
         // opts in via the Channels section's "Per-channel EQ" toggle (lets a
         // stereo user do L/R-specific EQ).
         let show_ch = state.channels > 2 || (self.per_channel_eq && state.channels >= 2);
-        let cols = BandColumns::resolve(avail, kit::SP_S, show_ch);
+        let cols = BandColumns::resolve(avail, kit::SP_S, show_ch, self.show_slope, self.show_scope);
 
         bands_header(ui, &cols);
 
@@ -646,6 +653,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn slope_scope_columns_require_prefs() {
+        // Prefs off ⇒ columns hidden even on a very wide table.
+        let c = BandColumns::resolve(1000.0, 8.0, false, false, false);
+        assert!(!c.show_slope);
+        assert!(!c.show_scope);
+
+        // Prefs on + wide ⇒ both shown.
+        let c = BandColumns::resolve(1000.0, 8.0, false, true, true);
+        assert!(c.show_slope);
+        assert!(c.show_scope);
+
+        // Prefs on but mid-narrow (>=410, <464): scope fits, slope doesn't.
+        let c = BandColumns::resolve(430.0, 8.0, false, true, true);
+        assert!(!c.show_slope);
+        assert!(c.show_scope);
+    }
+
+    #[test]
     fn channel_tag_all_and_none() {
         let layout = vec!["FL".into(), "FR".into(), "FC".into()];
         assert_eq!(channel_tag(ChannelMask::ALL, &layout, 3), "all");
@@ -684,20 +709,20 @@ mod tests {
     #[test]
     fn columns_collapse_as_width_shrinks() {
         let gap = 6.0;
-        // Wide: every optional column shows.
-        let wide = BandColumns::resolve(700.0, gap, true);
+        // Wide: every optional column shows (slope/scope prefs on).
+        let wide = BandColumns::resolve(700.0, gap, true, true, true);
         assert!(wide.show_graph && wide.show_slope && wide.show_scope && wide.show_type);
         // The graph drops first below 560; slope + scope + type still show.
-        let mid = BandColumns::resolve(500.0, gap, true);
+        let mid = BandColumns::resolve(500.0, gap, true, true, true);
         assert!(!mid.show_graph && mid.show_slope && mid.show_scope && mid.show_type);
         // The slope selector drops below 464; scope + type still show.
-        let tight = BandColumns::resolve(440.0, gap, true);
+        let tight = BandColumns::resolve(440.0, gap, true, true, true);
         assert!(!tight.show_graph && !tight.show_slope && tight.show_scope && tight.show_type);
         // The scope selector drops below 410; type still shows.
-        let tighter = BandColumns::resolve(390.0, gap, true);
+        let tighter = BandColumns::resolve(390.0, gap, true, true, true);
         assert!(!tighter.show_slope && !tighter.show_scope && tighter.show_type);
         // The Type combo drops below 360.
-        let narrow = BandColumns::resolve(300.0, gap, true);
+        let narrow = BandColumns::resolve(300.0, gap, true, true, true);
         assert!(
             !narrow.show_graph && !narrow.show_slope && !narrow.show_scope && !narrow.show_type
         );
@@ -706,14 +731,14 @@ mod tests {
     #[test]
     fn graph_width_clamps_to_minimum() {
         // Even at an absurd width the flexible graph never collapses past 60px.
-        let cols = BandColumns::resolve(480.0, 6.0, true);
+        let cols = BandColumns::resolve(480.0, 6.0, true, true, true);
         assert!(cols.graph_w >= 60.0);
     }
 
     #[test]
     fn show_ch_passes_through_to_layout() {
-        assert!(!BandColumns::resolve(700.0, 6.0, false).show_ch);
-        assert!(BandColumns::resolve(700.0, 6.0, true).show_ch);
+        assert!(!BandColumns::resolve(700.0, 6.0, false, true, true).show_ch);
+        assert!(BandColumns::resolve(700.0, 6.0, true, true, true).show_ch);
     }
 
     #[test]

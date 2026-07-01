@@ -201,16 +201,14 @@ impl GuiApp {
                         section_hint(ui, "Effects", "DSP sound effects", |ui| {
                             self.effects_section(ui, s);
                         });
-                        // Output stage (dither) sits directly under the effects rack.
-                        ui.add_space(12.0);
-                        section_hint(ui, "Output", "dither", |ui| {
-                            self.output_section(ui, s);
-                        });
-                        // Channels sits under Effects (matches the design mock).
-                        // Multi-channel-only — stereo users still get the L/R swap.
-                        if s.channels >= 2 {
+                        // Output stage (dither) — advanced, off by default. The
+                        // Channels controls now live in the Settings dialog (gear
+                        // icon) to keep the main view uncluttered.
+                        if self.show_dither {
                             ui.add_space(12.0);
-                            section(ui, "Channels", |ui| self.channels_section(ui, s));
+                            section_hint(ui, "Output", "dither", |ui| {
+                                self.output_section(ui, s);
+                            });
                         }
                     });
                 }
@@ -273,10 +271,12 @@ impl GuiApp {
                     section_hint(ui, "Effects", "DSP sound effects", |ui| {
                         self.effects_section(ui, s);
                     });
-                    ui.add_space(GAP);
-                    section_hint(ui, "Output", "dither", |ui| {
-                        self.output_section(ui, s);
-                    });
+                    if self.show_dither {
+                        ui.add_space(GAP);
+                        section_hint(ui, "Output", "dither", |ui| {
+                            self.output_section(ui, s);
+                        });
+                    }
                     if !s.apps.is_empty() {
                         ui.add_space(GAP);
                         section_hint(ui, "Applications", "per-app volume", |ui| {
@@ -291,10 +291,7 @@ impl GuiApp {
                     }
                     ui.add_space(GAP);
                     section(ui, "EQ bands", |ui| self.bands_section(ui, s));
-                    if s.channels >= 2 {
-                        ui.add_space(GAP);
-                        section(ui, "Channels", |ui| self.channels_section(ui, s));
-                    }
+                    // Channels controls relocated to the Settings dialog.
                 }
                 ui.add_space(GAP);
                 section_hint(ui, "Device → Profile", "auto-switch", |ui| {
