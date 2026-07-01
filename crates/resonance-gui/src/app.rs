@@ -1538,11 +1538,67 @@ impl GuiApp {
     pub(crate) fn export_profile_named(&mut self, name: String, path: String) {
         let _ = self.cmd_tx.send(WorkerCmd::ExportNamed(name, path));
     }
+
+    /// Names advanced features that are hidden yet non-default, so nothing runs
+    /// invisibly. `None` when every hidden feature is at its default.
+    // `slope`/`scope` are deliberately parallel feature names.
+    #[allow(clippy::similar_names)]
+    pub(crate) fn advanced_active_hint(&self) -> Option<String> {
+        let s = self.state.as_ref()?;
+        // The per-band Ch column is visible on >2ch or when per-channel EQ is on.
+        let ch_visible = s.channels > 2 || (self.per_channel_eq && s.channels >= 2);
+        let dither = !self.show_dither && s.dither_bits.is_some();
+        let slope = !self.show_slope
+            && s.bands
+                .iter()
+                .any(|b| b.band_type.uses_slope() && b.slope_db_oct != 12);
+        let scope = !self.show_scope
+            && s.bands
+                .iter()
+                .any(|b| b.scope != resonance_ipc::BandScope::Stereo);
+        let channels = !ch_visible && s.bands.iter().any(|b| !b.channels.is_global(s.channels));
+        advanced_hint_label(dither, slope, scope, channels)
+    }
+}
+
+/// Build the compact status-bar hint naming hidden-but-active advanced
+/// features, or `None` when nothing hidden is doing anything.
+// `slope`/`scope` are deliberately parallel feature names.
+#[allow(clippy::similar_names)]
+pub(crate) fn advanced_hint_label(
+    dither: bool,
+    slope: bool,
+    scope: bool,
+    channels: bool,
+) -> Option<String> {
+    let parts: Vec<&str> = [
+        ("dither", dither),
+        ("slope", slope),
+        ("scope", scope),
+        ("channels", channels),
+    ]
+    .into_iter()
+    .filter_map(|(name, on)| on.then_some(name))
+    .collect();
+    (!parts.is_empty()).then(|| format!("adv: {}", parts.join(" ")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn advanced_hint_label_lists_active_features() {
+        assert_eq!(advanced_hint_label(false, false, false, false), None);
+        assert_eq!(
+            advanced_hint_label(true, false, true, false).as_deref(),
+            Some("adv: dither scope")
+        );
+        assert_eq!(
+            advanced_hint_label(true, true, true, true).as_deref(),
+            Some("adv: dither slope scope channels")
+        );
+    }
 
     /// The demo measurement spans 20 Hz → 20 kHz over exactly 96 log-spaced
     /// points, strictly increasing in frequency, with finite dB values.

@@ -653,7 +653,7 @@ impl GuiApp {
                 khz(s.sample_rate)
             };
 
-            let segs: Vec<(String, String, egui::Color32)> = vec![
+            let mut segs: Vec<(String, String, egui::Color32)> = vec![
                 (format!("{} · ", backend_label()), rate, t.text),
                 (String::new(), format!("{} ch", s.channels.max(1)), t.dim),
                 ("in ".into(), format!("{:>4} dB", db(m.in_peak)), lvl_col),
@@ -670,6 +670,11 @@ impl GuiApp {
                     },
                 ),
             ];
+            // Compact hint when a hidden advanced feature holds a non-default
+            // value (e.g. dither on while its section is hidden).
+            if let Some(hint) = self.advanced_active_hint() {
+                segs.push((String::new(), hint, self.palette.boost));
+            }
             let n = segs.len();
             for (i, (label, value, vcol)) in segs.iter().enumerate() {
                 seg(ui, label, value, *vcol);
