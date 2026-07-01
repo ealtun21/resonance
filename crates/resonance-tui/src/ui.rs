@@ -2262,7 +2262,8 @@ fn render_tab_devices(s: &SettingsState, app: &App, frame: &mut Frame, area: Rec
 
 fn render_tab_prefs(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect) {
     let prefs = &app.prefs;
-    let items: [(&str, String, &str); 6] = [
+    let swap_state = if app.is_swapped_lr() { "swapped" } else { "—" };
+    let items: Vec<(&str, String, &str)> = vec![
         ("FPS", prefs.fps.to_string(), "(applied next launch)"),
         (
             "Refresh ms",
@@ -2288,6 +2289,31 @@ fn render_tab_prefs(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect)
             "Show spectrum",
             prefs.show_spectrum.to_string(),
             "(Space/Enter toggles; off = larger graph)",
+        ),
+        (
+            "Show slope column",
+            prefs.show_slope.to_string(),
+            "(advanced: per-band filter slope + [S] key)",
+        ),
+        (
+            "Show scope column",
+            prefs.show_scope.to_string(),
+            "(advanced: per-band mid/side scope + [M] key)",
+        ),
+        (
+            "Show dither",
+            prefs.show_dither.to_string(),
+            "(advanced: output dither indicator + [D] key)",
+        ),
+        (
+            "Show channels",
+            prefs.show_channels.to_string(),
+            "(advanced: per-band Ch column + [c]/[w] keys)",
+        ),
+        (
+            "Swap L / R",
+            swap_state.to_string(),
+            "(Space/Enter swaps front L/R; needs ≥2ch)",
         ),
     ];
 

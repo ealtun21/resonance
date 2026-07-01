@@ -1343,6 +1343,13 @@ impl App {
         self.refresh_state();
     }
 
+    /// True when the current routing is exactly the front-L/R swap matrix.
+    pub(crate) fn is_swapped_lr(&self) -> bool {
+        self.state.as_ref().is_some_and(|s| {
+            s.channels >= 2 && s.routing.as_ref() == Some(&RoutingMatrix::swap(s.channels, 0, 1))
+        })
+    }
+
     /// Toggle a front L/R swap (`w`). If the routing is already exactly the L/R
     /// swap, clear it (back to straight passthrough); otherwise install it.
     /// Mirrors the GUI's "Swap L/R" control; available from 2 channels up.
@@ -2119,6 +2126,25 @@ impl App {
                 self.prefs.show_spectrum = !self.prefs.show_spectrum;
                 self.prefs.save();
             }
+            6 => {
+                self.prefs.show_slope = !self.prefs.show_slope;
+                self.prefs.save();
+            }
+            7 => {
+                self.prefs.show_scope = !self.prefs.show_scope;
+                self.prefs.save();
+            }
+            8 => {
+                self.prefs.show_dither = !self.prefs.show_dither;
+                self.prefs.save();
+            }
+            9 => {
+                self.prefs.show_channels = !self.prefs.show_channels;
+                self.prefs.save();
+            }
+            // Swap L/R lives here too (parity with the GUI's relocated channel
+            // controls) so it's reachable even when the channels column is hidden.
+            10 => self.toggle_swap_lr(),
             _ => {}
         }
     }
