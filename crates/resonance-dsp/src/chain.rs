@@ -506,7 +506,9 @@ mod tests {
         let mut chain = ProcessorChain::builder().channels(2).build();
         chain.set_dither(Some(16));
         let q = 1.0 / f64::from(1u32 << 15);
-        let mut buf: Vec<f64> = (0..256).map(|i| (f64::from(i) * 0.05).sin() * 0.4).collect();
+        let mut buf: Vec<f64> = (0..256)
+            .map(|i| (f64::from(i) * 0.05).sin() * 0.4)
+            .collect();
         chain.process(&mut buf);
         assert!(
             buf.iter().all(|&y| ((y / q).round() - y / q).abs() < 1e-6),

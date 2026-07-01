@@ -610,7 +610,9 @@ fn side_rms(buf: &[f64]) -> f64 {
 fn crossfeed_bypass_at_zero_is_bit_exact() {
     let mut fx = CrossfeedEffect::new(2, SR);
     // Default intensity is 0 → the effect must be a bit-exact passthrough.
-    let input: Vec<f64> = (0..512).map(|i| (f64::from(i) * 0.03).sin() * 0.5).collect();
+    let input: Vec<f64> = (0..512)
+        .map(|i| (f64::from(i) * 0.03).sin() * 0.5)
+        .collect();
     let mut buf = input.clone();
     fx.process(&mut buf, 2);
     assert_eq!(buf, input);
@@ -656,7 +658,11 @@ fn crossfeed_bleeds_into_silent_channel() {
     fx.set_intensity(1.0);
     fx.process(&mut buf, 2);
     let (_l, r) = deinterleave(&buf);
-    assert!(rms(&r) > 0.01, "right channel should get bleed, got {}", rms(&r));
+    assert!(
+        rms(&r) > 0.01,
+        "right channel should get bleed, got {}",
+        rms(&r)
+    );
 }
 
 #[test]
@@ -695,7 +701,10 @@ fn crossfeed_preserves_low_freq_mono_level() {
     fx.process(&mut buf, 2);
     let (l1, _) = deinterleave(&buf);
     let db = 20.0 * (rms(&l1) / before).log10();
-    assert!(db.abs() < 0.5, "mono low-freq level within 0.5 dB, got {db:.2} dB");
+    assert!(
+        db.abs() < 0.5,
+        "mono low-freq level within 0.5 dB, got {db:.2} dB"
+    );
 }
 
 #[test]
@@ -703,8 +712,13 @@ fn crossfeed_stable_across_rates() {
     for sr in [44_100.0, 96_000.0, 192_000.0] {
         let mut fx = CrossfeedEffect::new(2, sr);
         fx.set_intensity(1.0);
-        let mut buf: Vec<f64> = (0..1024).map(|i| (f64::from(i) * 0.05).sin() * 0.5).collect();
+        let mut buf: Vec<f64> = (0..1024)
+            .map(|i| (f64::from(i) * 0.05).sin() * 0.5)
+            .collect();
         fx.process(&mut buf, 2);
-        assert!(buf.iter().all(|s| s.is_finite()), "non-finite output at {sr} Hz");
+        assert!(
+            buf.iter().all(|s| s.is_finite()),
+            "non-finite output at {sr} Hz"
+        );
     }
 }

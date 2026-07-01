@@ -107,7 +107,9 @@ mod tests {
     fn dither_off_is_bit_exact() {
         let mut d = DitherStage::new(2);
         // Default is off.
-        let input: Vec<f64> = (0..512).map(|i| (f64::from(i) * 0.03).sin() * 0.5).collect();
+        let input: Vec<f64> = (0..512)
+            .map(|i| (f64::from(i) * 0.03).sin() * 0.5)
+            .collect();
         let mut buf = input.clone();
         d.apply(&mut buf, 2);
         assert_eq!(buf, input);
@@ -118,7 +120,9 @@ mod tests {
         let mut d = DitherStage::new(1);
         d.set_bits(Some(16));
         let q = lsb(16);
-        let mut buf: Vec<f64> = (0..1024).map(|i| (f64::from(i) * 0.05).sin() * 0.4).collect();
+        let mut buf: Vec<f64> = (0..1024)
+            .map(|i| (f64::from(i) * 0.05).sin() * 0.4)
+            .collect();
         d.apply(&mut buf, 1);
         for &y in &buf {
             let k = y / q;
@@ -136,9 +140,7 @@ mod tests {
         let mut buf: Vec<Complex<f64>> = signal.iter().map(|&x| Complex::new(x, 0.0)).collect();
         fft.process(&mut buf);
         // Sum power at the 2nd–7th harmonic bins (the distortion spurs).
-        (2..=7)
-            .map(|h| buf[h * fund_bin].norm_sqr())
-            .sum::<f64>()
+        (2..=7).map(|h| buf[h * fund_bin].norm_sqr()).sum::<f64>()
     }
 
     #[test]
@@ -168,7 +170,9 @@ mod tests {
         // otherwise a no-op "dither" would trivially pass (a clean sine has no
         // harmonics). This guards the comparison below.
         assert!(
-            dithered.iter().all(|&y| ((y / q).round() - y / q).abs() < 1e-6),
+            dithered
+                .iter()
+                .all(|&y| ((y / q).round() - y / q).abs() < 1e-6),
             "dithered output must be quantised to the target grid"
         );
 
@@ -189,7 +193,10 @@ mod tests {
         let q = lsb(16);
         let mut buf = vec![0.0f64; 4096];
         d.apply(&mut buf, 1);
-        assert!(buf.iter().any(|&s| s != 0.0), "dither noise should be present");
+        assert!(
+            buf.iter().any(|&s| s != 0.0),
+            "dither noise should be present"
+        );
         assert!(
             buf.iter().all(|&s| s.abs() <= q + 1e-12 && s.is_finite()),
             "dithered silence must stay within one LSB and be finite"
