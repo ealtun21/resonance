@@ -657,6 +657,34 @@ mod tests {
         assert!((p.bands[0].q - 2.0).abs() < 0.01);
     }
 
+    // Fuzz property (`fuzz/fuzz_targets/fuzz_apo.rs`): `parse_apo` must never
+    // panic on any input — only ever return `Ok`/`Err`. This transitively covers
+    // the `GraphicEQ:` curve fitter. A 3-minute libFuzzer run found no panic;
+    // these adversarial classes lock that in as a fast regression.
+    #[test]
+    fn parse_apo_never_panics_on_adversarial_input() {
+        let cases: &[&str] = &[
+            "",                          // empty
+            "\0\0\0\0",                  // NUL bytes
+            "Filter",                    // keyword only
+            "Filter 1: ON",              // no type token
+            "Filter 1: ON PK Fc",        // dangling key, no value
+            "Filter 1: ON PK Fc Gain Q", // keys with no values
+            "Preamp:",                   // empty preamp value
+            "Channel:",                  // empty channel value
+            "Channel: 0",                // 0 is below the 1-based numeric floor
+            "GraphicEQ:",                // empty graphic curve
+            "GraphicEQ: ;;;;",           // only separators
+            "GraphicEQ: -",              // lone minus (glued-pair split edge)
+            "GraphicEQ: 20",             // single freq, no gain
+            "GraphicEQ: 20-",            // glued pair with empty gain
+        ];
+        for c in cases {
+            // The only contract is "does not panic"; the Result value is irrelevant.
+            let _ = parse_apo(c);
+        }
+    }
+
     #[test]
     fn write_apo_emits_all_keywords() {
         use ApoFilterType::*;

@@ -1,0 +1,10 @@
+Preamp: 0 dB
+Filter 1: ON PK Fc 100 Hz Gain 1 dB Q 1
+Channel: L
+Filter 2: ON PK Fc 1000 Hz Gain -3 dB Q 1
+Channel: R
+Filter 3: ON PK Fc 2000 Hz Gain 2 dB Q 1
+Channel: all
+Filter 4: ON LS 6dB Fc 8000 Hz Gain 1 dB
+Filter 5: OFF NO Fc 60 Hz Q 4
+Filter 6: ON None

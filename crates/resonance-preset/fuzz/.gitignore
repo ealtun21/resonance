@@ -1,0 +1,6 @@
+/target
+/coverage
+/Cargo.lock
+# The seed corpus (fuzz/corpus/*) IS committed — it is part of the deliverable.
+# Only the crash/timeout artifacts libFuzzer drops on failure are ignored.
+/artifacts
