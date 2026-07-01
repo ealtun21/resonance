@@ -3,7 +3,7 @@
 //! lower area).
 
 use crate::app::{GuiApp, ServiceAction, ServiceFn};
-use crate::card_layout::{CardCol, CardId};
+use crate::card_layout::{CardCol, CardId, CardLayout};
 use crate::ui::kit;
 use crate::ui::widgets::{padded_scroll, section, section_hint};
 use eframe::egui;
@@ -236,11 +236,98 @@ impl GuiApp {
     /// compact draggable tiles with drop zones.
     fn render_lower_column(&mut self, ui: &mut egui::Ui, s: &DaemonState, col: CardCol) {
         let ids = self.layout.column(col).to_vec();
-        for id in &ids {
-            if self.render_card(ui, s, *id) {
-                ui.add_space(12.0);
+        if self.layout_edit {
+            // Only show the drop gaps once a drag is in flight, so an idle edit
+            // mode stays uncluttered.
+            let dragging = egui::DragAndDrop::has_payload_of_type::<CardId>(ui.ctx());
+            for (idx, id) in ids.iter().enumerate() {
+                if dragging {
+                    self.drop_gap(ui, col, idx);
+                }
+                self.card_tile(ui, *id);
+                ui.add_space(6.0);
+            }
+            if dragging {
+                self.drop_gap(ui, col, ids.len());
+            } else if ids.is_empty() {
+                ui.weak("(empty — drag a card here)");
+            }
+        } else {
+            for id in &ids {
+                if self.render_card(ui, s, *id) {
+                    ui.add_space(12.0);
+                }
             }
         }
+    }
+
+    /// A compact draggable tile (grip + card name) shown in edit mode. The whole
+    /// tile is the drag source carrying the card's `CardId`.
+    // `&mut self` matches its sibling edit-mode helpers (`drop_gap`,
+    // `layout_edit_banner`) that DO mutate state; kept as a method for a
+    // consistent `self.card_tile(...)` call shape at the render_lower_column
+    // call site rather than a one-off associated function.
+    #[allow(clippy::unused_self)]
+    fn card_tile(&mut self, ui: &mut egui::Ui, id: CardId) {
+        ui.dnd_drag_source(egui::Id::new(("card_tile", id)), id, |ui| {
+            let t = kit::tokens(ui);
+            egui::Frame::default()
+                .fill(ui.visuals().faint_bg_color)
+                .stroke(egui::Stroke::new(1.0, t.line))
+                .corner_radius(egui::CornerRadius::same(kit::R_CARD as u8))
+                .inner_margin(egui::Margin::symmetric(10, 8))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.set_width(ui.available_width());
+                        let (r, _) =
+                            ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+                        crate::ui::icons::draw(
+                            ui.painter(),
+                            crate::ui::icons::Icon::Grip,
+                            r,
+                            t.dim,
+                        );
+                        ui.add_space(6.0);
+                        ui.label(id.title());
+                    });
+                });
+        });
+    }
+
+    /// A thin full-width drop target between/around card tiles in edit mode. When
+    /// a card is released over it, records the pending move to `(col, idx)`.
+    fn drop_gap(&mut self, ui: &mut egui::Ui, col: CardCol, idx: usize) {
+        let frame = egui::Frame::default().inner_margin(egui::Margin::symmetric(0, 3));
+        let (_, payload) = ui.dnd_drop_zone::<CardId, _>(frame, |ui| {
+            ui.allocate_exact_size(
+                egui::vec2(ui.available_width().max(1.0), 8.0),
+                egui::Sense::hover(),
+            );
+        });
+        if let Some(p) = payload {
+            self.pending_card_move = Some((*p, col, idx));
+        }
+    }
+
+    /// The banner shown across the top of the controls strip while arranging.
+    fn layout_edit_banner(&mut self, ui: &mut egui::Ui) {
+        let t = kit::tokens(ui);
+        egui::Frame::default()
+            .fill(t.accent.gamma_multiply(0.18))
+            .inner_margin(egui::Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Arranging layout — drag cards between the side columns.");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Done").clicked() {
+                            self.layout_edit = false;
+                        }
+                        if ui.button("Reset").clicked() {
+                            self.layout = CardLayout::default();
+                        }
+                    });
+                });
+            });
     }
 
     /// Wide layout: three columns — Effects | EQ bands (flexible centre) |
@@ -248,6 +335,13 @@ impl GuiApp {
     /// (thin splitter rules between them). EQ bands takes all the slack so its
     /// table grows into the space rather than leaving a centred island.
     fn lower_columns(&mut self, ui: &mut egui::Ui, state: Option<&DaemonState>) {
+        // Edit-mode banner spans the top of the controls strip.
+        if self.layout_edit {
+            egui::Panel::top("layout_edit_banner")
+                .frame(egui::Frame::NONE)
+                .show_separator_line(false)
+                .show_inside(ui, |ui| self.layout_edit_banner(ui));
+        }
         // Frame::NONE on every column so they share one top inset (the panels'
         // default frames differ — that's why EQ bands sat lower than its
         // neighbours) and no separator lines, so the three cards float on the body
@@ -293,6 +387,11 @@ impl GuiApp {
                     self.bands_card(ui, s);
                 }
             });
+        // Apply a card move requested by a drop this frame, now that both columns
+        // have finished rendering (never mutate the lists mid-iteration).
+        if let Some((id, col, idx)) = self.pending_card_move.take() {
+            self.layout.move_card(id, col, idx);
+        }
     }
 
     /// Narrow layout: the lower sections stacked as the same collapsible cards

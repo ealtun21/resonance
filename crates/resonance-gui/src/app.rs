@@ -703,7 +703,7 @@ impl GuiApp {
                 .and_then(|s| s.get_string("card_layout"))
                 .map(|s| CardLayout::from_json_or_default(&s))
                 .unwrap_or_default(),
-            layout_edit: false,
+            layout_edit: std::env::var("RESONANCE_EDIT_LAYOUT").is_ok(),
             pending_card_move: None,
             hidden_curves: std::collections::HashSet::new(),
             demo: std::env::var("RESONANCE_DEMO").is_ok(),
