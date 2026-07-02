@@ -52,6 +52,11 @@ enum Sub {
         /// off | 16 | 20 | 24
         depth: String,
     },
+    /// Load a convolution impulse response (room/speaker correction, HRTF)
+    Ir {
+        /// Path to a .wav IR, or: off (unload) | on (re-arm) | bypass (keep loaded, skip)
+        target: String,
+    },
     /// Save the current settings as a named profile
     Save {
         /// Profile name
@@ -325,6 +330,15 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
         }
         Sub::Dither { depth } => Ok(Command::SetDither {
             bits: parse_dither(&depth)?,
+        }),
+        Sub::Ir { target } => Ok(match target.to_ascii_lowercase().as_str() {
+            "off" | "clear" | "none" => Command::ClearConvolutionIr,
+            "on" | "enable" => Command::SetConvolutionEnabled { enabled: true },
+            "bypass" | "disable" => Command::SetConvolutionEnabled { enabled: false },
+            // Anything else is a path to a .wav impulse response.
+            _ => Command::SetConvolutionIr {
+                path: absolutize(target),
+            },
         }),
         Sub::Set { effect, value } => {
             if value > 100 {
@@ -731,6 +745,19 @@ fn print_state(p: &Paint, s: &resonance_ipc::DaemonState) {
     );
 
     println!("{}{}", label("dither"), dither_label(s.dither_bits));
+
+    if let Some(c) = &s.convolution {
+        let detail = if c.enabled {
+            let ms = c.latency_frames as f64 / s.sample_rate * 1000.0;
+            format!(
+                "{} ({}ch, {} taps, +{ms:.1} ms)",
+                c.name, c.ir_channels, c.taps
+            )
+        } else {
+            format!("{} {}", c.name, p.dim("(bypassed)"))
+        };
+        println!("{}{}", label("ir"), detail);
+    }
 
     // Effects with intensity bars. Iterate `FxEffectId::ALL` so new effects
     // (Loudness, Crossfeed, …) show up automatically and stay in chain order.
