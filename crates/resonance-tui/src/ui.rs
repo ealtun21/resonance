@@ -150,9 +150,15 @@ fn render_help(app: &App, frame: &mut Frame, area: Rect) {
     if app.prefs.show_dither {
         adv.push(key("D", "cycle output dither (off / 16 / 20 / 24-bit)"));
     }
+    if app.prefs.show_ir {
+        adv.push(key(
+            "I",
+            "impulse-response picker (Enter load, t bypass, x remove)",
+        ));
+    }
     if adv.is_empty() {
         adv.push(Line::from(Span::styled(
-            "  (enable slope / scope / dither / channels in Settings → Preferences)",
+            "  (enable slope / scope / dither / IR / channels in Settings → Preferences)",
             Style::default().fg(Color::DarkGray).italic(),
         )));
     }
@@ -178,14 +184,15 @@ fn render_help(app: &App, frame: &mut Frame, area: Rect) {
 // ── Footer / contextual help ───────────────────────────────────────────────
 
 fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
-    // The dither shortcut is only advertised when its toggle is on.
+    // The dither/IR shortcuts are only advertised when their toggles are on.
     let dither_hint = if app.prefs.show_dither {
         "  [D] dither"
     } else {
         ""
     };
+    let ir_hint = if app.prefs.show_ir { "  [I] IR" } else { "" };
     let common = format!(
-        "[Tab] focus  [↑↓] select  [←→] adjust  [+/-] preamp{dither_hint}  [Space] toggle  [l] load  [s] settings  [o] output  [A] apps  [O] outputs  [p] power  [?] help  [q] quit"
+        "[Tab] focus  [↑↓] select  [←→] adjust  [+/-] preamp{dither_hint}{ir_hint}  [Space] toggle  [l] load  [s] settings  [o] output  [A] apps  [O] outputs  [p] power  [?] help  [q] quit"
     );
     // Band/graph slope + scope hints are gated behind their toggles.
     let band_adv = {
@@ -381,6 +388,16 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
     // hint below covers a non-default hidden dither).
     if app.prefs.show_dither {
         spans.push(Span::styled(dither, Style::default().fg(dither_color)));
+        spans.push(sep());
+    }
+    // Convolution IR indicator, same visibility rule as dither.
+    if app.prefs.show_ir {
+        let (ir, ir_color) = match app.state.as_ref().and_then(|s| s.convolution.as_ref()) {
+            None => ("ir off".to_string(), Color::DarkGray),
+            Some(c) if c.enabled => (format!("ir {}", c.name), Color::Cyan),
+            Some(c) => (format!("ir {} (byp)", c.name), Color::DarkGray),
+        };
+        spans.push(Span::styled(ir, Style::default().fg(ir_color)));
         spans.push(sep());
     }
     // Compact hint when a hidden advanced feature holds a non-default value.
@@ -1595,12 +1612,17 @@ fn render_browser(b: &Browser, frame: &mut Frame, area: Rect) {
     let verb = match b.purpose {
         crate::browser::BrowsePurpose::LoadPreset => "Load Preset",
         crate::browser::BrowsePurpose::LoadMeasurement => "Load Measurement",
+        crate::browser::BrowsePurpose::LoadIr => "Load Impulse Response",
+    };
+    let footer = match b.purpose {
+        crate::browser::BrowsePurpose::LoadIr => {
+            " ↑↓ move   →/Enter load   ← back   t bypass   x remove   Esc cancel "
+        }
+        _ => " ↑↓ move   →/Enter open   ← back   Esc cancel ",
     };
     let block = Block::default()
         .title(Line::from(format!(" {verb} — {cwd} ")).fg(Color::Yellow))
-        .title_bottom(
-            Line::from(" ↑↓ move   →/Enter open   ← back   Esc cancel ").fg(Color::DarkGray),
-        )
+        .title_bottom(Line::from(footer).fg(Color::DarkGray))
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(Color::Yellow));
@@ -2365,6 +2387,11 @@ fn render_tab_prefs(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect)
             "(advanced: output dither indicator + [D] key)",
         ),
         (
+            "Show IR",
+            prefs.show_ir.to_string(),
+            "(advanced: convolution IR indicator + [I] key)",
+        ),
+        (
             "Show channels",
             prefs.show_channels.to_string(),
             "(advanced: per-band Ch column + [c]/[w] keys)",
@@ -2703,6 +2730,7 @@ mod tests {
             apps: vec![],
             sinks: vec![],
             dither_bits: None,
+            convolution: None,
         }
     }
 

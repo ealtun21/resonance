@@ -6,6 +6,7 @@
 
 mod app;
 mod browser;
+mod card_layout;
 mod curve;
 mod icon;
 mod ipc;

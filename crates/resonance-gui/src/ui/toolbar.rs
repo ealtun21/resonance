@@ -444,6 +444,10 @@ impl GuiApp {
                 if kit::menu_item(ui, "Reset layout", false) {
                     self.reset_layout(ui.ctx());
                 }
+                let editing = self.layout_edit;
+                if kit::menu_item(ui, "Edit layout", editing) {
+                    self.layout_edit = !editing;
+                }
                 // Theme moved to the Settings dialog (gear icon).
             },
         );

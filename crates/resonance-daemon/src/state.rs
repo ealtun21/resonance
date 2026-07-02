@@ -2,13 +2,17 @@ use crate::meters::AtomicMeters;
 use resonance_dsp::channel::{ChannelMask, ChannelMatrix};
 use resonance_dsp::{chain::FxEffect, chain::ProcessorChain};
 use resonance_ipc::{
-    AppStream, BandScope, BandState, BandType, DaemonState, EffectsState, FxEffectId,
-    RoutingMatrix, SinkVolume, default_channel_layout,
+    AppStream, BandScope, BandState, BandType, ConvolutionState, DaemonState, EffectsState,
+    FxEffectId, RoutingMatrix, SinkVolume, default_channel_layout,
 };
 use rtrb::Producer;
 use std::sync::{Arc, Mutex};
 
 pub const SPECTRUM_BINS: usize = 64;
+
+/// Rolling post-DSP capture depth in mono samples (~5.5 s at 48 kHz, 1 MiB).
+/// Serves `Command::CaptureOutput` for the `resonance verify` harness.
+pub const CAPTURE_BUF: usize = 1 << 18;
 
 /// Commands sent from the IPC/tokio thread to the RT audio thread.
 #[derive(Debug)]
@@ -72,6 +76,13 @@ pub enum AudioCommand {
     SetRouting {
         matrix: Option<ChannelMatrix>,
     },
+    /// Swap in a fully-prepared convolution engine (IR decoded, resampled and
+    /// FFT-transformed on the IPC thread — the RT thread only installs it).
+    SetConvolution(Box<resonance_dsp::convolution::ConvolutionEngine>),
+    /// Bypass or re-arm the convolution stage without dropping its IR.
+    SetConvolutionEnabled(bool),
+    /// Drop the convolution IR entirely (passthrough, zero added latency).
+    ClearConvolution,
 }
 
 /// Per-application volume/mute requests, forwarded from the IPC thread to
@@ -106,6 +117,11 @@ pub struct Inner {
     pub needs_resync: bool,
     /// Latest spectrum — updated by the spectrum task, read by IPC handler.
     pub spectrum: [f32; SPECTRUM_BINS],
+    /// Rolling buffer of the freshest post-DSP mono samples (fed by the
+    /// spectrum task from the RT sample ring, capped at [`CAPTURE_BUF`]).
+    /// Read by `CaptureOutput` so `resonance verify` can measure the live
+    /// output without a soundcard loopback.
+    pub capture: std::collections::VecDeque<f32>,
     /// Available `PipeWire` Audio/Sink names (updated by `pw_node`).
     pub available_sinks: Vec<String>,
     /// Friendly `node.description` per sink as `(node_name, description)` (updated by `pw_node`).
@@ -160,6 +176,7 @@ impl SharedState {
             audio_tx,
             needs_resync: false,
             spectrum: [0.0; SPECTRUM_BINS],
+            capture: std::collections::VecDeque::with_capacity(CAPTURE_BUF),
             available_sinks: Vec::new(),
             sink_descriptions: Vec::new(),
             preferred_output: None,
@@ -326,6 +343,15 @@ impl SharedState {
             meters: inner.meters.snapshot(),
             apps: inner.apps.clone(),
             sinks: inner.sinks.clone(),
+            convolution: chain.convolution.info().map(|i| ConvolutionState {
+                path: i.path,
+                name: i.name,
+                ir_sample_rate: i.ir_sample_rate,
+                ir_channels: i.ir_channels,
+                taps: i.taps,
+                latency_frames: i.latency_frames,
+                enabled: chain.convolution.enabled(),
+            }),
         }
     }
 
@@ -511,6 +537,40 @@ mod tests {
         );
         // The mirror chain is now the rebuilt one, so it matches the live width.
         assert_eq!(state.0.lock().unwrap().chain.channels, 6);
+    }
+
+    #[test]
+    fn snapshot_reports_convolution_state() {
+        let state = shared();
+        assert!(
+            state.snapshot().convolution.is_none(),
+            "no IR loaded → None"
+        );
+        {
+            let mut inner = state.0.lock().unwrap();
+            let ir = resonance_dsp::convolution::IrData {
+                name: "room".into(),
+                path: "/irs/room.wav".into(),
+                sample_rate: 48_000.0,
+                channels: vec![vec![1.0, 0.5, 0.25]],
+            };
+            inner
+                .chain
+                .convolution
+                .load_ir(std::sync::Arc::new(ir))
+                .unwrap();
+        }
+        let conv = state.snapshot().convolution.expect("IR loaded → Some");
+        assert_eq!(conv.name, "room");
+        assert_eq!(conv.path, "/irs/room.wav");
+        assert_eq!(conv.ir_channels, 1);
+        assert_eq!(conv.taps, 3);
+        assert!(conv.enabled);
+        assert_eq!(
+            conv.latency_frames,
+            resonance_dsp::convolution::BLOCK,
+            "active convolution reports one block of latency"
+        );
     }
 
     #[test]

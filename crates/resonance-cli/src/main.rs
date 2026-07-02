@@ -1,4 +1,5 @@
 mod autoeq;
+mod verify;
 
 use anyhow::{Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -51,6 +52,38 @@ enum Sub {
     Dither {
         /// off | 16 | 20 | 24
         depth: String,
+    },
+    /// Load a convolution impulse response (room/speaker correction, HRTF)
+    Ir {
+        /// Path to a .wav IR, or: off (unload) | on (re-arm) | bypass (keep loaded, skip)
+        target: String,
+    },
+    /// Verify the live audio path with test tones (pitch + frequency response)
+    Verify {
+        /// Comma-separated probe frequencies in Hz
+        #[arg(long, default_value = "60,150,400,1000,2500,6000,12000")]
+        freqs: String,
+        /// Max per-tone deviation from the expected curve, in dB
+        #[arg(long, default_value_t = 2.0)]
+        tolerance_db: f64,
+        /// Test-tone level (0–1 full scale)
+        #[arg(long, default_value_t = 0.25)]
+        amp: f64,
+        /// Wait after starting each tone before measuring (ms)
+        #[arg(long, default_value_t = 600)]
+        settle_ms: u64,
+        /// Length of audio measured per tone (ms)
+        #[arg(long, default_value_t = 500)]
+        capture_ms: u64,
+        /// Save the measured response to a JSON baseline (for later A/B)
+        #[arg(long)]
+        save_baseline: Option<String>,
+        /// Compare against a saved baseline instead of the EQ prediction
+        #[arg(long)]
+        baseline: Option<String>,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Save the current settings as a named profile
     Save {
@@ -298,6 +331,38 @@ fn main() -> Result<()> {
         return run_sink(name, action);
     }
 
+    // `verify` orchestrates tone playback + capture + analysis itself.
+    if let Sub::Verify {
+        freqs,
+        tolerance_db,
+        amp,
+        settle_ms,
+        capture_ms,
+        save_baseline,
+        baseline,
+        json,
+    } = sub
+    {
+        let freqs = freqs
+            .split(',')
+            .map(|s| {
+                s.trim()
+                    .parse::<f64>()
+                    .map_err(|_| anyhow::anyhow!("bad frequency '{s}'"))
+            })
+            .collect::<Result<Vec<f64>>>()?;
+        return verify::run(&verify::Options {
+            freqs,
+            tolerance_db,
+            amp: amp.clamp(0.01, 1.0),
+            settle_ms,
+            capture_ms: capture_ms.max(100),
+            save_baseline,
+            baseline,
+            json,
+        });
+    }
+
     let cmd = to_ipc_command(sub)?;
     let response = send(cmd)?;
     print_response(response);
@@ -325,6 +390,15 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
         }
         Sub::Dither { depth } => Ok(Command::SetDither {
             bits: parse_dither(&depth)?,
+        }),
+        Sub::Ir { target } => Ok(match target.to_ascii_lowercase().as_str() {
+            "off" | "clear" | "none" => Command::ClearConvolutionIr,
+            "on" | "enable" => Command::SetConvolutionEnabled { enabled: true },
+            "bypass" | "disable" => Command::SetConvolutionEnabled { enabled: false },
+            // Anything else is a path to a .wav impulse response.
+            _ => Command::SetConvolutionIr {
+                path: absolutize(target),
+            },
         }),
         Sub::Set { effect, value } => {
             if value > 100 {
@@ -406,7 +480,8 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
         | Sub::App { .. }
         | Sub::Sinks
         | Sub::Sink { .. }
-        | Sub::Completions { .. } => {
+        | Sub::Completions { .. }
+        | Sub::Verify { .. } => {
             unreachable!()
         }
     }
@@ -640,6 +715,16 @@ fn print_response(resp: Response) {
                 println!("{}  {}  {}", p.cyan(&output), p.dim("→"), p.bold(&profile));
             }
         }
+        // Raw capture is consumed by `verify`, never printed directly.
+        Response::Capture { rate, samples } => {
+            println!(
+                "{}",
+                p.dim(&format!(
+                    "captured {} samples @ {rate:.0} Hz",
+                    samples.len()
+                ))
+            );
+        }
         Response::Imported(name) => {
             println!("{} {}", p.dim("imported as profile"), p.bold(&name));
         }
@@ -731,6 +816,19 @@ fn print_state(p: &Paint, s: &resonance_ipc::DaemonState) {
     );
 
     println!("{}{}", label("dither"), dither_label(s.dither_bits));
+
+    if let Some(c) = &s.convolution {
+        let detail = if c.enabled {
+            let ms = c.latency_frames as f64 / s.sample_rate * 1000.0;
+            format!(
+                "{} ({}ch, {} taps, +{ms:.1} ms)",
+                c.name, c.ir_channels, c.taps
+            )
+        } else {
+            format!("{} {}", c.name, p.dim("(bypassed)"))
+        };
+        println!("{}{}", label("ir"), detail);
+    }
 
     // Effects with intensity bars. Iterate `FxEffectId::ALL` so new effects
     // (Loudness, Crossfeed, …) show up automatically and stay in chain order.

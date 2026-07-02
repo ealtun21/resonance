@@ -5,6 +5,7 @@
 //! authoritative `DaemonState` is re-fetched immediately afterwards (and on a
 //! periodic poll) so widgets always reflect the daemon.
 
+use crate::card_layout::{CardCol, CardId, CardLayout};
 use crate::curve;
 use crate::ipc::IpcClient;
 use crate::state::{Confirm, Dialog, Snapshot};
@@ -341,6 +342,16 @@ pub struct GuiApp {
     pub(crate) show_slope: bool,
     pub(crate) show_scope: bool,
     pub(crate) show_dither: bool,
+    /// Gates the Convolution (impulse response) section under Effects.
+    pub(crate) show_ir: bool,
+    /// User's arrangement of the movable control cards (persisted).
+    pub(crate) layout: CardLayout,
+    /// Session-only "arrange the layout" mode: shows draggable card tiles + drop
+    /// zones instead of the live cards. Never persisted.
+    pub(crate) layout_edit: bool,
+    /// A card move requested this frame by a drop, applied after the columns
+    /// finish rendering (so the lists aren't mutated mid-iteration).
+    pub(crate) pending_card_move: Option<(CardId, CardCol, usize)>,
     /// Graph series the user has hidden via the legend's eye toggles (keyed by
     /// the legend label, e.g. "FL"/"Result FR"/"Target"). Session-only.
     pub(crate) hidden_curves: std::collections::HashSet<String>,
@@ -689,6 +700,17 @@ impl GuiApp {
                 .storage
                 .and_then(|s| s.get_string("show_dither"))
                 .is_some_and(|v| v == "true"),
+            show_ir: cc
+                .storage
+                .and_then(|s| s.get_string("show_ir"))
+                .is_some_and(|v| v == "true"),
+            layout: cc
+                .storage
+                .and_then(|s| s.get_string("card_layout"))
+                .map(|s| CardLayout::from_json_or_default(&s))
+                .unwrap_or_default(),
+            layout_edit: std::env::var("RESONANCE_EDIT_LAYOUT").is_ok(),
+            pending_card_move: None,
             hidden_curves: std::collections::HashSet::new(),
             demo: std::env::var("RESONANCE_DEMO").is_ok(),
             open_customizer: std::env::var("RESONANCE_OPEN").as_deref() == Ok("customize"),
@@ -1193,6 +1215,7 @@ fn demo_state() -> DaemonState {
             },
         ],
         dither_bits: None,
+        convolution: None,
     }
 }
 
@@ -1220,6 +1243,10 @@ impl eframe::App for GuiApp {
         storage.set_string("show_slope", self.show_slope.to_string());
         storage.set_string("show_scope", self.show_scope.to_string());
         storage.set_string("show_dither", self.show_dither.to_string());
+        storage.set_string("show_ir", self.show_ir.to_string());
+        if let Ok(j) = serde_json::to_string(&self.layout) {
+            storage.set_string("card_layout", j);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1414,6 +1441,7 @@ impl GuiApp {
     /// later ones draw on top).
     fn render_dialogs(&mut self, ctx: &egui::Context) {
         self.preset_dialog(ctx);
+        self.ir_dialog(ctx);
         self.export_dialog(ctx);
         self.confirm_dialog(ctx);
         self.help_dialog(ctx);
@@ -1440,6 +1468,7 @@ impl GuiApp {
             d.remove::<PanelState>(egui::Id::new("controls_panel"));
             d.remove::<PanelState>(egui::Id::new("graph_narrow"));
         });
+        self.layout = CardLayout::default();
         self.set_status("layout reset");
     }
 
@@ -1548,6 +1577,7 @@ impl GuiApp {
         // The per-band Ch column is visible on >2ch or when per-channel EQ is on.
         let ch_visible = s.channels > 2 || (self.per_channel_eq && s.channels >= 2);
         let dither = !self.show_dither && s.dither_bits.is_some();
+        let ir = !self.show_ir && s.convolution.as_ref().is_some_and(|c| c.enabled);
         let slope = !self.show_slope
             && s.bands
                 .iter()
@@ -1557,7 +1587,7 @@ impl GuiApp {
                 .iter()
                 .any(|b| b.scope != resonance_ipc::BandScope::Stereo);
         let channels = !ch_visible && s.bands.iter().any(|b| !b.channels.is_global(s.channels));
-        advanced_hint_label(dither, slope, scope, channels)
+        advanced_hint_label(dither, ir, slope, scope, channels)
     }
 }
 
@@ -1567,12 +1597,14 @@ impl GuiApp {
 #[allow(clippy::similar_names)]
 pub(crate) fn advanced_hint_label(
     dither: bool,
+    ir: bool,
     slope: bool,
     scope: bool,
     channels: bool,
 ) -> Option<String> {
     let parts: Vec<&str> = [
         ("dither", dither),
+        ("ir", ir),
         ("slope", slope),
         ("scope", scope),
         ("channels", channels),
@@ -1589,14 +1621,14 @@ mod tests {
 
     #[test]
     fn advanced_hint_label_lists_active_features() {
-        assert_eq!(advanced_hint_label(false, false, false, false), None);
+        assert_eq!(advanced_hint_label(false, false, false, false, false), None);
         assert_eq!(
-            advanced_hint_label(true, false, true, false).as_deref(),
+            advanced_hint_label(true, false, false, true, false).as_deref(),
             Some("adv: dither scope")
         );
         assert_eq!(
-            advanced_hint_label(true, true, true, true).as_deref(),
-            Some("adv: dither slope scope channels")
+            advanced_hint_label(true, true, true, true, true).as_deref(),
+            Some("adv: dither ir slope scope channels")
         );
     }
 

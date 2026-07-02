@@ -64,6 +64,8 @@ rustfft = "6"
 # Async sample-rate conversion (sinc/FFT) for capture↔playback rate
 # reconciliation. Pure Rust, allocation-free hot path via process_into_buffer.
 rubato = "3"
+# WAV decoding for convolution impulse responses. Pure Rust.
+hound = "3"
 
 # Shared-memory control bridge (daemon → Windows APO)
 memmap2 = "0.9"

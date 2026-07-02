@@ -280,6 +280,18 @@ pub enum Command {
     /// Set an EQ band's stereo scope (Stereo/Mid/Side). `index` matches a band's
     /// position in `DaemonState::bands`.
     SetBandScope { index: usize, scope: BandScope },
+    /// Load a WAV impulse response into the convolution stage (room/speaker
+    /// correction, HRTF). The daemon reads the file, resamples it to the DSP
+    /// rate and swaps the prepared kernel in; the stage arms on success.
+    SetConvolutionIr { path: String },
+    /// Drop the convolution IR entirely (passthrough, zero added latency).
+    ClearConvolutionIr,
+    /// Bypass or re-arm the convolution stage without dropping the loaded IR.
+    SetConvolutionEnabled { enabled: bool },
+    /// Return the freshest post-DSP output samples the daemon has buffered
+    /// (mono, channel-averaged — the spectrum feed). Powers the `resonance
+    /// verify` live audio-path harness.
+    CaptureOutput { frames: u32 },
 }
 
 /// One of the two in-memory comparison slots for quick A/B auditioning.
@@ -555,6 +567,15 @@ pub enum Response {
     /// List of output→profile mappings (output node.name, profile name)
     Mappings(Vec<(String, String)>),
     Error(String),
+    /// Raw post-DSP capture (reply to `CaptureOutput`): the DSP rate the
+    /// samples were produced at, plus the freshest mono samples oldest-first.
+    /// May be shorter than requested while the buffer is still filling; empty
+    /// on platforms where the daemon owns no audio path (Windows/APO).
+    /// Appended LAST — postcard encodes variants by ordinal (see `Command`).
+    Capture {
+        rate: f64,
+        samples: Vec<f32>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -615,6 +636,29 @@ pub struct DaemonState {
     /// default, same compatibility note as `apps`/`sinks`.
     #[serde(default)]
     pub dither_bits: Option<u32>,
+    /// Convolution stage status (`None` = no IR loaded). Appended LAST +
+    /// `serde` default, same compatibility note as `apps`/`sinks`.
+    #[serde(default)]
+    pub convolution: Option<ConvolutionState>,
+}
+
+/// Status of the convolution/IR stage, for `status` output and the UIs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConvolutionState {
+    /// Source WAV path (used to restore the IR from saved profiles).
+    pub path: String,
+    /// Display name (file stem).
+    pub name: String,
+    /// Native sample rate of the IR file (Hz).
+    pub ir_sample_rate: f64,
+    /// Channel count of the IR file (1 = applied to every audio channel).
+    pub ir_channels: usize,
+    /// Taps actually convolved at the DSP rate (after resample + length cap).
+    pub taps: usize,
+    /// Fixed added latency in frames at the DSP rate (0 while bypassed).
+    pub latency_frames: usize,
+    /// False = loaded but bypassed (`SetConvolutionEnabled`).
+    pub enabled: bool,
 }
 
 impl DaemonState {
@@ -867,6 +911,12 @@ mod tests {
         });
         command_round_trip(&Command::SetDither { bits: Some(16) });
         command_round_trip(&Command::SetDither { bits: None });
+        command_round_trip(&Command::SetConvolutionIr {
+            path: "/irs/room.wav".into(),
+        });
+        command_round_trip(&Command::ClearConvolutionIr);
+        command_round_trip(&Command::SetConvolutionEnabled { enabled: false });
+        command_round_trip(&Command::CaptureOutput { frames: 48_000 });
         command_round_trip(&Command::SetBandChannels {
             index: 1,
             channels: ChannelMask::from_indices([0, 2, 4]),
@@ -1044,9 +1094,34 @@ mod tests {
                 muted: false,
             }],
             dither_bits: Some(24),
+            convolution: Some(ConvolutionState {
+                path: "/irs/room.wav".into(),
+                name: "room".into(),
+                ir_sample_rate: 44_100.0,
+                ir_channels: 2,
+                taps: 65_536,
+                latency_frames: 256,
+                enabled: true,
+            }),
         };
         let bytes = to_stdvec(&Response::State(st)).expect("encode");
         let _: Response = from_bytes(&bytes).expect("decode");
+    }
+
+    #[test]
+    fn convolution_state_round_trips_through_postcard() {
+        let c = ConvolutionState {
+            path: "/irs/hrtf.wav".into(),
+            name: "hrtf".into(),
+            ir_sample_rate: 48_000.0,
+            ir_channels: 1,
+            taps: 512,
+            latency_frames: 256,
+            enabled: false,
+        };
+        let bytes = to_stdvec(&c).unwrap();
+        let back: ConvolutionState = from_bytes(&bytes).unwrap();
+        assert_eq!(c, back);
     }
 
     #[test]
@@ -1164,6 +1239,10 @@ mod tests {
             Response::Imported("rock".into()),
             Response::Mappings(vec![("dev".into(), "prof".into())]),
             Response::Error("boom".into()),
+            Response::Capture {
+                rate: 48_000.0,
+                samples: vec![0.0, 0.5, -0.5],
+            },
         ] {
             let bytes = to_stdvec(&r).expect("encode");
             let _: Response = from_bytes(&bytes).expect("decode");

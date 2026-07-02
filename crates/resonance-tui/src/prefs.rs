@@ -35,6 +35,8 @@ pub struct Prefs {
     #[serde(default = "default_false")]
     pub show_dither: bool,
     #[serde(default = "default_false")]
+    pub show_ir: bool,
+    #[serde(default = "default_false")]
     pub show_channels: bool,
 }
 
@@ -82,6 +84,7 @@ impl Default for Prefs {
             show_slope: default_false(),
             show_scope: default_false(),
             show_dither: default_false(),
+            show_ir: default_false(),
             show_channels: default_false(),
         }
     }

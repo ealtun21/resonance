@@ -15,6 +15,7 @@ path = "src/main.rs"
 resonance-ipc = { path = "../resonance-ipc" }
 resonance-dsp = { path = "../resonance-dsp" }
 resonance-preset = { path = "../resonance-preset" }
+hound = { workspace = true }
 # Shared reference/measurement state + squig.link downloader (UI-agnostic).
 resonance-reference = { path = "../resonance-reference" }
 # AutoEQ fit (LGPL-3.0 — Rust port of peqdb/autoeq-c; see that crate).

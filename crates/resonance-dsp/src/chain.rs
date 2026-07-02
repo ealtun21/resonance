@@ -1,4 +1,5 @@
 use crate::channel::ChannelMatrix;
+use crate::convolution::ConvolutionEngine;
 use crate::dither::DitherStage;
 use crate::effects::{
     AmbienceEffect, BassBoostEffect, CrossfeedEffect, DynamicBoostEffect, Effect, FidelityEffect,
@@ -38,6 +39,10 @@ pub struct ProcessorChain {
     pub enabled: bool,
     pub preamp_db: f64,
     pub filters: Vec<ApoFilter>,
+    /// Impulse-response convolution (room/speaker correction, HRTF). Runs right
+    /// after the filter bank — the two linear stages sit together, ahead of the
+    /// nonlinear effects. Off + empty by default (bit-exact passthrough).
+    pub convolution: ConvolutionEngine,
     pub fidelity: FidelityEffect,
     pub ambience: AmbienceEffect,
     pub surround: SurroundEffect,
@@ -133,6 +138,7 @@ impl ProcessorChain {
             }
         }
 
+        self.convolution.process(buf, channels);
         self.fidelity.process(buf, channels);
         self.ambience.process(buf, channels);
         self.surround.process(buf, channels);
@@ -197,6 +203,7 @@ impl ProcessorChain {
         self.filters
             .iter_mut()
             .for_each(super::filter::ApoFilter::reset);
+        self.convolution.reset();
         self.fidelity.reset();
         self.ambience.reset();
         self.surround.reset();
@@ -229,6 +236,9 @@ impl ProcessorChain {
             // intent is untouched.
             f.rebind(sample_rate);
         }
+        // Re-prepare the convolution kernel from its retained source IR at the
+        // new rate (no-op when nothing is loaded).
+        self.convolution.rebind_sample_rate(sample_rate);
         let ch = self.channels;
         self.fidelity = carry_settings(&self.fidelity, FidelityEffect::new(ch, sample_rate));
         self.ambience = carry_settings(&self.ambience, AmbienceEffect::new(ch, sample_rate));
@@ -256,6 +266,7 @@ impl ProcessorChain {
         for f in &mut self.filters {
             f.set_channels(channels);
         }
+        self.convolution.set_channels(channels);
         let sr = self.sample_rate;
         self.fidelity = carry_settings(&self.fidelity, FidelityEffect::new(channels, sr));
         self.ambience = carry_settings(&self.ambience, AmbienceEffect::new(channels, sr));
@@ -356,6 +367,7 @@ impl ProcessorChainBuilder {
             enabled: true,
             preamp_db: self.preamp_db,
             filters: self.filters,
+            convolution: ConvolutionEngine::new(channels, sr),
             fidelity: FidelityEffect::new(channels, sr),
             ambience: AmbienceEffect::new(channels, sr),
             surround: SurroundEffect::new(sr),

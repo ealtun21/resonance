@@ -195,6 +195,9 @@ fn handle_normal(app: &mut App, key: KeyEvent) {
         // Cycle output dither depth (uppercase, so lowercase `d` keeps its
         // delete-band meaning): Off → 16 → 20 → 24 → Off.
         KeyCode::Char('D') if app.prefs.show_dither => app.cycle_dither(),
+        // Convolution impulse-response picker (uppercase, matching the other
+        // advanced keys). Enter loads/replaces; `t` bypasses, `x` removes.
+        KeyCode::Char('I') if app.prefs.show_ir => app.open_ir_browser(),
         KeyCode::Char('?') => app.show_help(),
         _ => {}
     }
@@ -392,6 +395,10 @@ fn handle_browse(app: &mut App, key: KeyEvent) {
         KeyCode::PageDown => app.browse_move(10),
         KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => app.browse_enter(),
         KeyCode::Left | KeyCode::Backspace | KeyCode::Char('h') => app.browse_parent(),
+        // IR-picker extras (no-ops for other browse purposes): toggle bypass /
+        // remove the loaded impulse response without picking a file.
+        KeyCode::Char('t') => app.browse_ir_toggle(),
+        KeyCode::Char('x') => app.browse_ir_clear(),
         _ => {}
     }
 }
