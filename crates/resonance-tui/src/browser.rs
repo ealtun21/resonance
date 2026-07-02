@@ -179,8 +179,36 @@ fn read_head(path: &Path, max: usize) -> std::io::Result<String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// Build a human-readable preview for a preset file (falls back to a raw head).
+/// Build a human-readable preview for a preset file: the sidecar metadata
+/// block (when one exists) above the parsed file summary.
 fn preview_file(path: &Path) -> Vec<String> {
+    let mut out = meta_block(path);
+    out.extend(preview_body(path));
+    out
+}
+
+/// Sidecar metadata (`author` / `description` / `tags`) as preview lines, ending
+/// in a blank separator. Empty when the preset has no sidecar — or an empty one
+/// — so plain presets preview exactly as before.
+fn meta_block(path: &Path) -> Vec<String> {
+    let Some(meta) = resonance_preset::metadata::PresetMeta::load_for(path) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = meta
+        .author
+        .iter()
+        .map(|a| format!("author : {a}"))
+        .chain(meta.description.iter().map(|d| format!("about  : {d}")))
+        .chain((!meta.tags.is_empty()).then(|| format!("tags   : {}", meta.tags.join(", "))))
+        .collect();
+    if !out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+/// The parsed-file preview summary (falls back to a raw head).
+fn preview_body(path: &Path) -> Vec<String> {
     const MAX_BANDS: usize = 16;
 
     // WAV impulse responses are binary — summarise the header instead of
@@ -329,4 +357,64 @@ fn graphic_eq_preview(content: &str) -> Option<Vec<String>> {
         "Fitted to parametric bands".to_string(),
         "(shelves + peaks) on import.".to_string(),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use resonance_preset::metadata::PresetMeta;
+    use std::path::PathBuf;
+
+    /// Fresh scratch dir per test so parallel tests never share sidecars.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("resonance-browser-test-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn preview_prepends_metadata_block_when_sidecar_exists() {
+        let dir = scratch("with-meta");
+        let preset = dir.join("flat.txt");
+        std::fs::write(&preset, "Preamp: -3 dB\n").unwrap();
+        PresetMeta {
+            author: Some("Jane".into()),
+            description: Some("studio flat".into()),
+            tags: vec!["flat".into(), "studio".into()],
+        }
+        .save_for(&preset)
+        .unwrap();
+
+        let lines = preview_file(&preset);
+        assert!(lines[0].contains("Jane"));
+        assert!(lines[1].contains("studio flat"));
+        assert!(lines[2].contains("flat, studio"));
+        // Blank separator, then the parsed preset content follows.
+        assert_eq!(lines[3], "");
+        assert!(lines.iter().any(|l| l.contains("preamp -3.0 dB")));
+    }
+
+    #[test]
+    fn preview_unchanged_without_sidecar() {
+        let dir = scratch("no-meta");
+        let preset = dir.join("flat.txt");
+        std::fs::write(&preset, "Preamp: -3 dB\n").unwrap();
+
+        let lines = preview_file(&preset);
+        // No metadata block: the preset summary starts on the first line.
+        assert!(lines[0].starts_with('⮞'));
+    }
+
+    #[test]
+    fn preview_skips_empty_sidecars() {
+        // A sidecar with no displayable field must not leave a stray blank block.
+        let dir = scratch("empty-meta");
+        let preset = dir.join("flat.txt");
+        std::fs::write(&preset, "Preamp: -3 dB\n").unwrap();
+        std::fs::write(PresetMeta::sidecar_path(&preset), "").unwrap();
+
+        let lines = preview_file(&preset);
+        assert!(lines[0].starts_with('⮞'));
+    }
 }
