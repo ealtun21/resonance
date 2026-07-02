@@ -82,7 +82,23 @@ fn attach_ir(
     }
     if let Some(ir) = ir {
         match chain.convolution.load_ir(ir.clone()) {
-            Ok(()) => chain.convolution.set_enabled(snap.convolution_enabled != 0),
+            Ok(()) => {
+                chain.convolution.set_enabled(snap.convolution_enabled != 0);
+                // Diagnostic: probe the prepared kernel with an impulse so the
+                // effective response is visible in the log (sum ≈ DC gain).
+                let mut probe = chain.convolution.clone();
+                let mut buf = vec![0.0f64; 2048];
+                buf[0] = 1.0;
+                probe.process(&mut buf, 1);
+                let sum: f64 = buf.iter().sum();
+                let peak = buf.iter().fold(0.0f64, |a, &b| a.max(b.abs()));
+                log::line(&format!(
+                    "IR attached: taps {}, ir_rate {}, engine_rate {}, probe dc {sum:.4} peak {peak:.4}",
+                    chain.convolution.info().map_or(0, |i| i.taps),
+                    ir.sample_rate,
+                    chain.sample_rate,
+                ));
+            }
             Err(e) => log::line(&format!("convolution IR rejected: {e}")),
         }
     }
