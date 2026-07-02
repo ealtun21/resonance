@@ -106,13 +106,26 @@ fn attach_ir(
 
 /// Load the IR blob the snapshot references, or `None` (blob missing/corrupt →
 /// run without convolution rather than erroring inside audiodg).
+///
+/// Retries briefly: on Windows a freshly renamed file can be transiently
+/// unreadable (sharing violation while an on-access scanner holds it), which
+/// would otherwise turn a valid IR into unity passthrough at format lock.
+/// Callers are init/worker paths, never the RT callback.
 fn load_ir_blob(
     snap: &ChainSnapshot,
 ) -> Option<std::sync::Arc<resonance_dsp::convolution::IrData>> {
     if snap.convolution_generation == 0 {
         return None;
     }
-    if let Some((generation, ir)) = state::read_ir_blob(&state::default_ir_path()) {
+    let mut read = state::read_ir_blob(&state::default_ir_path());
+    for _ in 0..5 {
+        if read.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        read = state::read_ir_blob(&state::default_ir_path());
+    }
+    if let Some((generation, ir)) = read {
         log::line(&format!(
             "IR blob loaded: gen {generation}, {} ch, {} frames @ {} Hz",
             ir.channels.len(),
@@ -215,11 +228,17 @@ fn worker_loop(weak: Weak<Shared>) {
                     let sr = f64::from_bits(shared.sample_rate_bits.load(Ordering::Acquire));
                     // An IR change (new blob generation) always takes the
                     // rebuild path: the kernel prep (resample + FFT) must run
-                    // here on the worker, then swap in whole.
+                    // here on the worker, then swap in whole. Only latch the
+                    // generation once the blob actually READ — a transient
+                    // read failure (scanner holding the fresh file) must retry
+                    // on the next tick, not disable convolution until the next
+                    // IR change.
                     let ir_changed = snap.convolution_generation != last_ir_gen;
                     if ir_changed {
                         cached_ir = load_ir_blob(&snap);
-                        last_ir_gen = snap.convolution_generation;
+                        if cached_ir.is_some() || snap.convolution_generation == 0 {
+                            last_ir_gen = snap.convolution_generation;
+                        }
                     }
                     // Update in place to preserve filter/effect state (click-free
                     // live edits). Only a structural change (band added/removed,
@@ -584,6 +603,11 @@ mod hires_harness {
         let p = resonance_apo_create();
         assert!(!p.is_null(), "create returned null");
         resonance_apo_lock(p, 2, rate, max_frames);
+        // Let the worker reach steady state before driving audio: the tight
+        // process loop below runs faster than real time, so on a slow runner a
+        // worker-side chain rebuild (25 ms tick) can otherwise land mid-tone
+        // and split the analysis window across two chain instances.
+        std::thread::sleep(std::time::Duration::from_millis(150));
 
         let frames = (rate * 0.5) as usize;
         let amp = 0.2f64; // +12 dB → 0.2·3.98 ≈ 0.8 peak, no clipping
