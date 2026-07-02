@@ -4137,7 +4137,11 @@ dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
+ "hound",
  "resonance-ipc",
+ "rustfft",
+ "serde",
+ "serde_json",
  "ureq",
 ]
 
