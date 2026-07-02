@@ -104,6 +104,28 @@ fn attach_ir(
     }
 }
 
+/// Render + attach the linear-phase FIR realisation of the chain's static
+/// bands. No-op unless the chain's mode is Linear (armed by `build_chain`
+/// from the snapshot). Kernel synthesis is an FFT — callers must be off the
+/// RT path (worker thread / format lock), same rule as [`attach_ir`]. On a
+/// failed render the chain simply keeps its IIR bank (never silence).
+fn attach_eq_fir(chain: &mut ProcessorChain, sample_rate: f64) {
+    if chain.phase_mode != resonance_dsp::chain::PhaseMode::Linear {
+        return;
+    }
+    let ch = chain.channels;
+    let Some(ir) = resonance_dsp::linphase::render(&chain.filters, ch, sample_rate) else {
+        return; // no linearizable bands — IIR fallback is already correct
+    };
+    let taps = ir.channels.first().map_or(0, Vec::len);
+    match chain.eq_fir.load_ir(std::sync::Arc::new(ir)) {
+        Ok(()) => log::line(&format!(
+            "linear-phase kernel attached: {taps} taps at {sample_rate} Hz"
+        )),
+        Err(e) => log::line(&format!("linear-phase kernel rejected: {e}")),
+    }
+}
+
 /// Load the IR blob the snapshot references, or `None` (blob missing/corrupt →
 /// run without convolution rather than erroring inside audiodg).
 ///
@@ -255,6 +277,7 @@ fn worker_loop(weak: Weak<Shared>) {
                     if need_rebuild {
                         let mut c = build_chain(Some(&snap), channels, sr);
                         attach_ir(&mut c, &snap, cached_ir.as_ref());
+                        attach_eq_fir(&mut c, sr);
                         if let Ok(mut g) = shared.state.lock() {
                             if let Some(l) = g.as_mut() {
                                 l.chain = c;
@@ -422,6 +445,7 @@ pub extern "C" fn resonance_apo_lock(
         if let Some(s) = snap.as_ref() {
             attach_ir(&mut chain, s, load_ir_blob(s).as_ref());
         }
+        attach_eq_fir(&mut chain, sample_rate);
         chain.reset();
         let scratch = vec![0.0f64; (max_frames as usize).saturating_mul(ch)];
         let routed = scratch.clone();
