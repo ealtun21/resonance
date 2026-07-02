@@ -259,6 +259,15 @@ enum DaemonAction {
 }
 
 fn main() -> Result<()> {
+    // Piped invocations (`resonance status | head`) must end quietly when the
+    // reader closes early, not panic on EPIPE — restore the default SIGPIPE
+    // disposition that the Rust runtime masks.
+    #[cfg(unix)]
+    // SAFETY: installing SIG_DFL for SIGPIPE before any other thread exists.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     let cli = Cli::parse();
 
     let sub = cli.cmd.unwrap_or(Sub::Status);

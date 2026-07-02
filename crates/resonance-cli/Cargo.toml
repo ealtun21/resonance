@@ -26,3 +26,14 @@ serde_json = { workspace = true }
 
 [lints]
 workspace = true
+
+# EPIPE handling: restore the default SIGPIPE disposition so piped output
+# (`status | head`) exits quietly instead of panicking.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+# `verify` on Windows: the daemon owns no audio path there (the APO does), so
+# the harness plays its tone and captures the post-APO result itself via
+# WASAPI (cpal output stream + loopback capture on the same endpoint).
+[target.'cfg(windows)'.dependencies]
+cpal = { workspace = true }
