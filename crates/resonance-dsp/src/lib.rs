@@ -1,5 +1,6 @@
 pub mod chain;
 pub mod channel;
+pub mod convolution;
 pub mod dither;
 pub mod effects;
 pub mod filter;
