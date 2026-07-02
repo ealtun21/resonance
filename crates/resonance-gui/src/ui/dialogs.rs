@@ -137,6 +137,10 @@ impl GuiApp {
                     );
                     ui.checkbox(&mut self.show_scope, "Stereo scope column (Mid/Side)");
                     ui.checkbox(&mut self.show_dither, "Output dither section");
+                    ui.checkbox(
+                        &mut self.show_ir,
+                        "Convolution section (WAV impulse response)",
+                    );
 
                     ui.add_space(8.0);
                     ui.separator();
@@ -286,6 +290,122 @@ impl GuiApp {
 
         if let Some(path) = to_load {
             self.import_and_load(path);
+            close = true;
+        }
+        if !open || close {
+            self.dialog = Dialog::None;
+        }
+    }
+
+    // ── Impulse-response (convolution) picker ───────────────────────────────
+
+    /// `.wav` picker for the convolution stage — the Load-preset navigator with
+    /// a WAV-header preview, sending `SetConvolutionIr` on pick.
+    pub(crate) fn ir_dialog(&mut self, ctx: &egui::Context) {
+        let Dialog::LoadIr(browser) = &mut self.dialog else {
+            return;
+        };
+        let mut open = true;
+        let mut close = false;
+        let mut to_load: Option<String> = None;
+
+        let pal = self.palette;
+        let vh = ctx.content_rect().height();
+        let list_h = (vh * 0.42).clamp(120.0, 320.0);
+        let prev_h = (vh * 0.16).clamp(48.0, 90.0);
+        dialog_window(ctx, "Load impulse response")
+            .id(egui::Id::new("resonance_load_ir_dialog"))
+            .open(&mut open)
+            .show(ctx, |ui| {
+                if let Some(p) = nav_bar(ui, browser) {
+                    to_load = Some(p);
+                }
+                ui.add_space(4.0);
+
+                let kbd = ctx.memory(|m| m.focused().is_none());
+                let mut activate: Option<usize> = None;
+                if kbd {
+                    ui.input(|i| {
+                        if i.key_pressed(egui::Key::ArrowDown) {
+                            browser.move_cursor(1);
+                        }
+                        if i.key_pressed(egui::Key::ArrowUp) {
+                            browser.move_cursor(-1);
+                        }
+                        if i.key_pressed(egui::Key::Backspace) {
+                            browser.parent();
+                        }
+                        if i.key_pressed(egui::Key::Enter) {
+                            activate = Some(browser.cursor);
+                        }
+                    });
+                }
+
+                let mut select: Option<usize> = None;
+                kit::well_frame(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("ir_files")
+                        .auto_shrink([false, false])
+                        .min_scrolled_height(list_h)
+                        .max_height(list_h)
+                        .show(ui, |ui| {
+                            for (i, it) in browser.entries.iter().enumerate() {
+                                let label = format!("{}  {}", entry_icon(it), it.name);
+                                let resp = kit::list_row(ui, i == browser.cursor, &label)
+                                    .on_hover_text(it.path.display().to_string());
+                                if resp.clicked() {
+                                    select = Some(i);
+                                }
+                                if resp.double_clicked() {
+                                    activate = Some(i);
+                                }
+                            }
+                        });
+                });
+                if let Some(i) = select {
+                    browser.select(i);
+                }
+                if let Some(i) = activate {
+                    if let Some(path) = browser.activate(i) {
+                        to_load = Some(path);
+                    }
+                }
+
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Preview").color(pal.neutral));
+                kit::well_frame(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("ir_preview")
+                        .auto_shrink([false, false])
+                        .min_scrolled_height(prev_h)
+                        .max_height(prev_h)
+                        .show(ui, |ui| {
+                            if browser.preview.is_empty() {
+                                ui.weak("select a .wav to preview");
+                            }
+                            for line in &browser.preview {
+                                ui.monospace(line);
+                            }
+                        });
+                });
+
+                ui.separator();
+                let loadable = browser
+                    .selected()
+                    .is_some_and(|it| !it.is_dir && it.is_preset);
+                ui.horizontal(|ui| {
+                    if kit::button(ui, "Load", true, loadable) {
+                        to_load = browser.activate(browser.cursor);
+                    }
+                    if kit::button(ui, "Cancel", false, true) {
+                        close = true;
+                    }
+                });
+            });
+
+        if let Some(path) = to_load {
+            self.queue(Command::SetConvolutionIr { path });
+            self.set_status("loading impulse response…");
             close = true;
         }
         if !open || close {

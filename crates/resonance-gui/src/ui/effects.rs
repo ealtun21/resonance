@@ -102,4 +102,61 @@ impl GuiApp {
             }
         });
     }
+
+    /// Convolution / impulse-response stage: shows the loaded IR (toggle · name
+    /// · taps/latency caption) with Replace/Remove, or a Load button when empty.
+    /// Not routed through `queue_edit` — the undo snapshot doesn't cover the IR
+    /// (it is preserved across `ApplyState`, like dither).
+    pub(crate) fn convolution_section(&mut self, ui: &mut egui::Ui, state: &DaemonState) {
+        if let Some(c) = state.convolution.clone() {
+            let mut on = c.enabled;
+            ui.horizontal(|ui| {
+                ui.set_min_height(22.0);
+                ui.spacing_mut().item_spacing.x = kit::SP_S;
+                if kit::toggle(ui, &mut on) {
+                    self.queue(Command::SetConvolutionEnabled { enabled: on });
+                }
+                let t = kit::tokens(ui);
+                ui.colored_label(if on { t.text } else { t.faint }, &c.name)
+                    .on_hover_text(&c.path);
+            });
+            let ms = c.latency_frames as f64 / state.sample_rate.max(1.0) * 1000.0;
+            let detail = if on {
+                format!(
+                    "{} ch · {} taps · +{ms:.1} ms latency",
+                    c.ir_channels, c.taps
+                )
+            } else {
+                format!("{} ch · {} taps · bypassed", c.ir_channels, c.taps)
+            };
+            ui.weak(detail);
+            ui.add_space(kit::SP_XS);
+            ui.horizontal(|ui| {
+                if kit::button(ui, "Replace…", false, true) {
+                    self.open_ir_dialog();
+                }
+                if kit::button(ui, "Remove", false, true) {
+                    self.queue(Command::ClearConvolutionIr);
+                }
+            });
+        } else {
+            ui.weak("Convolve the output with a WAV impulse response (room correction, HRTF).");
+            ui.add_space(kit::SP_XS);
+            if kit::button(ui, "Load IR…", true, true) {
+                self.open_ir_dialog();
+            }
+        }
+    }
+
+    /// Open the `.wav` impulse-response picker, starting at the user's home.
+    pub(crate) fn open_ir_dialog(&mut self) {
+        let start = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map_or_else(|| std::path::PathBuf::from("."), std::path::PathBuf::from);
+        self.dialog = crate::state::Dialog::LoadIr(crate::browser::Browser::with_exts(
+            start,
+            false,
+            crate::browser::IR_EXTS,
+        ));
+    }
 }

@@ -34,6 +34,8 @@ pub(crate) enum Dialog {
     /// App settings: advanced-feature toggles, channel controls, theme.
     Settings,
     LoadPreset(Browser),
+    /// Pick a `.wav` impulse response for the convolution stage.
+    LoadIr(Browser),
     /// Export the current chain: a directory navigator plus a filename field.
     ExportProfile(SaveDialog),
     /// Pick a local curve file — load it as a measurement, or (when `as_target`)

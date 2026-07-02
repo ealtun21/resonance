@@ -197,6 +197,13 @@ impl GuiApp {
                         self.output_section(ui, s);
                     });
                 }
+                // Convolution (impulse response) likewise rides under Effects.
+                if self.show_ir {
+                    ui.add_space(12.0);
+                    section_hint(ui, "Convolution", "impulse response", |ui| {
+                        self.convolution_section(ui, s);
+                    });
+                }
                 true
             }
             CardId::Applications => {

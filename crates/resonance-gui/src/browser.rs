@@ -10,9 +10,15 @@ pub struct Item {
     pub name: String,
     pub path: PathBuf,
     pub is_dir: bool,
-    /// File this navigator considers loadable (`.fac` / `.txt` / `.toml`).
+    /// File this navigator considers loadable (matches the browser's extension
+    /// set — presets by default, `.wav` for the impulse-response picker).
     pub is_preset: bool,
 }
+
+/// Preset extensions the default navigator lists (`Browser::new`).
+const PRESET_EXTS: &[&str] = &["fac", "txt", "toml"];
+/// WAV impulse responses, for the convolution IR picker.
+pub const IR_EXTS: &[&str] = &["wav"];
 
 pub struct Browser {
     pub cwd: PathBuf,
@@ -29,10 +35,21 @@ pub struct Browser {
     /// Save dialogs list every file (so existing names show); load dialogs
     /// list only loadable presets.
     show_non_presets: bool,
+    /// Extensions this navigator treats as loadable.
+    exts: &'static [&'static str],
 }
 
 impl Browser {
     pub fn new(start: PathBuf, show_non_presets: bool) -> Self {
+        Self::with_exts(start, show_non_presets, PRESET_EXTS)
+    }
+
+    /// A navigator for a custom loadable-extension set (e.g. [`IR_EXTS`]).
+    pub fn with_exts(
+        start: PathBuf,
+        show_non_presets: bool,
+        exts: &'static [&'static str],
+    ) -> Self {
         let cwd = first_existing_dir(start);
         let mut b = Self {
             path_edit: cwd.display().to_string(),
@@ -43,13 +60,14 @@ impl Browser {
             preview: Vec::new(),
             filter: String::new(),
             show_non_presets,
+            exts,
         };
         b.reload();
         b
     }
 
     fn reload(&mut self) {
-        self.all = read_entries(&self.cwd, self.show_non_presets);
+        self.all = read_entries(&self.cwd, self.show_non_presets, self.exts);
         self.path_edit = self.cwd.display().to_string();
         self.cursor = 0;
         self.refilter();
@@ -192,7 +210,7 @@ fn shellexpand_tilde(s: &str) -> String {
     }
 }
 
-fn read_entries(dir: &Path, show_non_presets: bool) -> Vec<Item> {
+fn read_entries(dir: &Path, show_non_presets: bool, exts: &[&str]) -> Vec<Item> {
     let mut dirs: Vec<Item> = Vec::new();
     let mut files: Vec<Item> = Vec::new();
 
@@ -212,7 +230,7 @@ fn read_entries(dir: &Path, show_non_presets: bool) -> Vec<Item> {
                     is_preset: false,
                 });
             } else {
-                let preset = is_preset(&name);
+                let preset = has_ext(&name, exts);
                 if preset || show_non_presets {
                     files.push(Item {
                         name,
@@ -235,12 +253,10 @@ fn read_entries(dir: &Path, show_non_presets: bool) -> Vec<Item> {
     out
 }
 
-pub fn is_preset(name: &str) -> bool {
-    Path::new(name).extension().is_some_and(|e| {
-        ["fac", "txt", "toml"]
-            .iter()
-            .any(|ext| e.eq_ignore_ascii_case(ext))
-    })
+fn has_ext(name: &str, exts: &[&str]) -> bool {
+    Path::new(name)
+        .extension()
+        .is_some_and(|e| exts.iter().any(|ext| e.eq_ignore_ascii_case(ext)))
 }
 
 /// Our own `.toml` export format (mirror of the daemon's `Profile`), used here
@@ -255,6 +271,37 @@ struct ProfilePreview {
 
 fn preview_file(path: &Path) -> Vec<String> {
     const MAX_BANDS: usize = 16;
+
+    // WAV impulse responses are binary — summarise the header instead of
+    // reading the file as text.
+    if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("wav"))
+    {
+        return match hound::WavReader::open(path) {
+            Ok(r) => {
+                let spec = r.spec();
+                let frames = r.duration();
+                let secs = f64::from(frames) / f64::from(spec.sample_rate);
+                vec![
+                    "WAV impulse response".to_string(),
+                    format!(
+                        "{} ch · {} Hz · {}-bit {}",
+                        spec.channels,
+                        spec.sample_rate,
+                        spec.bits_per_sample,
+                        match spec.sample_format {
+                            hound::SampleFormat::Float => "float",
+                            hound::SampleFormat::Int => "int",
+                        }
+                    ),
+                    format!("{frames} frames ({secs:.2} s)"),
+                ]
+            }
+            Err(e) => vec![format!("(cannot read WAV: {e})")],
+        };
+    }
+
     let Ok(content) = std::fs::read_to_string(path) else {
         return vec!["(cannot read file)".to_string()];
     };
