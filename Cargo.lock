@@ -4141,6 +4141,7 @@ dependencies = [
  "hound",
  "libc",
  "resonance-ipc",
+ "resonance-preset",
  "rustfft",
  "serde",
  "serde_json",
@@ -4235,6 +4236,7 @@ dependencies = [
  "resonance-dsp",
  "serde",
  "thiserror 2.0.18",
+ "toml",
 ]
 
 [[package]]
