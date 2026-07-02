@@ -1156,4 +1156,185 @@ mod tests {
         // Zero channels rejects everything.
         assert!(!channel_indices_in_range(0, 0, 0));
     }
+
+    // ── Convolution end-to-end (real WAV file → dispatch → chain) ──────────
+
+    fn test_state() -> (SharedState, rtrb::Consumer<AudioCommand>) {
+        let (tx, rx) = rtrb::RingBuffer::new(16);
+        let (route_tx, _route_rx) = std::sync::mpsc::channel();
+        let (app_tx, _app_rx) = std::sync::mpsc::channel();
+        let (sink_tx, _sink_rx) = std::sync::mpsc::channel();
+        (
+            SharedState::new(
+                tx,
+                route_tx,
+                std::sync::Arc::new(crate::meters::AtomicMeters::default()),
+                app_tx,
+                sink_tx,
+            ),
+            rx,
+        )
+    }
+
+    /// Write a mono float32 WAV at 48 kHz (the test chains' rate → no resample,
+    /// so tap values survive exactly) and return its path.
+    fn write_test_ir(dir_tag: &str, taps: &[f32]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(dir_tag);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ir.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 48_000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut w = hound::WavWriter::create(&path, spec).unwrap();
+        for &t in taps {
+            w.write_sample(t).unwrap();
+        }
+        w.finalize().unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn set_convolution_ir_loads_wav_end_to_end() {
+        use resonance_dsp::convolution::BLOCK;
+        let path = write_test_ir("resonance-ipcconv-load", &[1.0, 0.5]);
+        let (state, mut rx) = test_state();
+
+        let resp = dispatch(
+            Command::SetConvolutionIr {
+                path: path.to_string_lossy().into_owned(),
+            },
+            &state,
+        )
+        .await;
+        assert!(
+            matches!(resp, Response::Ok),
+            "load should succeed: {resp:?}"
+        );
+
+        // The snapshot (shadow chain) reflects the loaded IR.
+        let conv = state.snapshot().convolution.expect("IR should be loaded");
+        assert_eq!(conv.name, "ir");
+        assert_eq!(conv.taps, 2);
+        assert_eq!(conv.ir_channels, 1);
+        assert!(conv.enabled);
+        assert_eq!(conv.latency_frames, BLOCK);
+
+        // The RT thread receives the prepared engine over the command ring and
+        // actually convolves: an impulse comes out delayed by one block with
+        // the file's tap values.
+        let mut rt_chain = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48_000.0)
+            .build();
+        while let Ok(cmd) = rx.pop() {
+            crate::audio::apply_command(&mut rt_chain, cmd);
+        }
+        let frames = 3 * BLOCK;
+        let mut buf = vec![0.0f64; frames * 2];
+        buf[0] = 1.0; // impulse, both channels of frame 0
+        buf[1] = 1.0;
+        rt_chain.process(&mut buf);
+        for ch in 0..2 {
+            assert!(
+                (buf[BLOCK * 2 + ch] - 1.0).abs() < 1e-9,
+                "h[0] should appear at frame BLOCK on ch{ch}"
+            );
+            assert!(
+                (buf[(BLOCK + 1) * 2 + ch] - 0.5).abs() < 1e-9,
+                "h[1] should appear at frame BLOCK+1 on ch{ch}"
+            );
+            assert!(
+                buf[ch].abs() < 1e-12,
+                "priming region must be silent on ch{ch}"
+            );
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn convolution_toggle_and_clear_round_trip() {
+        let path = write_test_ir("resonance-ipcconv-toggle", &[1.0]);
+        let (state, _rx) = test_state();
+
+        // Toggling with nothing loaded is a clean error, not a silent no-op.
+        let resp = dispatch(Command::SetConvolutionEnabled { enabled: false }, &state).await;
+        assert!(matches!(resp, Response::Error(_)));
+
+        let path_str = path.to_string_lossy().into_owned();
+        let resp = dispatch(Command::SetConvolutionIr { path: path_str }, &state).await;
+        assert!(matches!(resp, Response::Ok));
+
+        // Bypass: still reported (so the UI can re-arm it) but with zero latency.
+        let resp = dispatch(Command::SetConvolutionEnabled { enabled: false }, &state).await;
+        assert!(matches!(resp, Response::Ok));
+        let conv = state
+            .snapshot()
+            .convolution
+            .expect("IR kept while bypassed");
+        assert!(!conv.enabled);
+        assert_eq!(conv.latency_frames, 0);
+
+        // Clear drops it entirely.
+        let resp = dispatch(Command::ClearConvolutionIr, &state).await;
+        assert!(matches!(resp, Response::Ok));
+        assert!(state.snapshot().convolution.is_none());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn missing_wav_file_returns_error_and_loads_nothing() {
+        let (state, _rx) = test_state();
+        let resp = dispatch(
+            Command::SetConvolutionIr {
+                path: "/nonexistent/definitely/missing-ir.wav".to_string(),
+            },
+            &state,
+        )
+        .await;
+        match resp {
+            Response::Error(e) => assert!(e.contains("missing-ir.wav"), "error names file: {e}"),
+            other => panic!("expected Error, got {other:?}"),
+        }
+        assert!(state.snapshot().convolution.is_none());
+    }
+
+    #[test]
+    fn apply_profile_chain_restores_ir_from_wav_file() {
+        let path = write_test_ir("resonance-ipcconv-profile", &[0.25]);
+        let (state, _rx) = test_state();
+        let profile = Profile {
+            preamp_db: 0.0,
+            enabled: true,
+            effects: EffectsState::default(),
+            bands: vec![],
+            dither_bits: None,
+            convolution: Some(ConvolutionProfile {
+                path: path.to_string_lossy().into_owned(),
+                enabled: true,
+            }),
+        };
+        apply_profile_chain(&profile, &state);
+        let conv = state.snapshot().convolution.expect("profile restores IR");
+        assert_eq!(conv.taps, 1);
+        assert!(conv.enabled);
+
+        // A profile pointing at a missing file still applies — the IR is just
+        // dropped (warned), never a failed profile load.
+        let broken = Profile {
+            convolution: Some(ConvolutionProfile {
+                path: "/nonexistent/gone.wav".to_string(),
+                enabled: true,
+            }),
+            ..profile
+        };
+        apply_profile_chain(&broken, &state);
+        assert!(state.snapshot().convolution.is_none());
+
+        let _ = std::fs::remove_file(&path);
+    }
 }
