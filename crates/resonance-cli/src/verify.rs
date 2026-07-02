@@ -438,7 +438,7 @@ mod win {
             // else means an exclusive-mode oddity this harness doesn't handle.
             bail!("unsupported endpoint format {:?}", config.sample_format());
         }
-        let rate = f64::from(config.sample_rate().0);
+        let rate = f64::from(config.sample_rate());
         let channels = usize::from(config.channels());
         let stream_config: cpal::StreamConfig = config.into();
 
