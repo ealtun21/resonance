@@ -18,6 +18,12 @@ pub struct Preset {
     pub eq_enabled: bool,
     pub bands: Vec<EqBand>,
     pub effects: FxEffects,
+    /// Convolution impulse-response path from an `EqualizerAPO` `Convolution:`
+    /// directive — as written in the file (possibly relative; the loader
+    /// resolves it against the config file's directory, as `EqualizerAPO`
+    /// does). `serde(default)` keeps older serialized presets loading.
+    #[serde(default)]
+    pub convolution: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

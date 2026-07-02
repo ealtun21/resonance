@@ -69,6 +69,66 @@ fn build_chain(snap: Option<&ChainSnapshot>, channels: usize, sample_rate: f64) 
     }
 }
 
+/// Attach the sidecar IR to a freshly built chain per the snapshot's
+/// convolution fields. Kernel preparation (resample + FFT) happens right here —
+/// callers must be off the RT path (worker thread / format lock).
+fn attach_ir(
+    chain: &mut ProcessorChain,
+    snap: &ChainSnapshot,
+    ir: Option<&std::sync::Arc<resonance_dsp::convolution::IrData>>,
+) {
+    if snap.convolution_generation == 0 {
+        return;
+    }
+    if let Some(ir) = ir {
+        match chain.convolution.load_ir(ir.clone()) {
+            Ok(()) => {
+                chain.convolution.set_enabled(snap.convolution_enabled != 0);
+                // Diagnostic: probe the prepared kernel with an impulse so the
+                // effective response is visible in the log (sum ≈ DC gain).
+                let mut probe = chain.convolution.clone();
+                let mut buf = vec![0.0f64; 2048];
+                buf[0] = 1.0;
+                probe.process(&mut buf, 1);
+                let sum: f64 = buf.iter().sum();
+                let peak = buf.iter().fold(0.0f64, |a, &b| a.max(b.abs()));
+                log::line(&format!(
+                    "IR attached: taps {}, ir_rate {}, engine_rate {}, probe dc {sum:.4} peak {peak:.4}",
+                    chain.convolution.info().map_or(0, |i| i.taps),
+                    ir.sample_rate,
+                    chain.sample_rate,
+                ));
+            }
+            Err(e) => log::line(&format!("convolution IR rejected: {e}")),
+        }
+    }
+}
+
+/// Load the IR blob the snapshot references, or `None` (blob missing/corrupt →
+/// run without convolution rather than erroring inside audiodg).
+fn load_ir_blob(
+    snap: &ChainSnapshot,
+) -> Option<std::sync::Arc<resonance_dsp::convolution::IrData>> {
+    if snap.convolution_generation == 0 {
+        return None;
+    }
+    match state::read_ir_blob(&state::default_ir_path()) {
+        Some((generation, ir)) => {
+            log::line(&format!(
+                "IR blob loaded: gen {generation}, {} ch, {} frames @ {} Hz",
+                ir.channels.len(),
+                ir.frames(),
+                ir.sample_rate
+            ));
+            Some(std::sync::Arc::new(ir))
+        }
+        None => {
+            log::line("IR blob referenced by snapshot but unreadable — convolution off");
+            None
+        }
+    }
+}
+
 /// Worker thread: rebuild the chain on daemon changes, and (only when a client
 /// is watching) compute the spectrum off the RT thread and publish telemetry.
 // `weak` is moved into and owned for the lifetime of this spawned worker thread.
@@ -78,6 +138,10 @@ fn worker_loop(weak: Weak<Shared>) {
     let path = state::default_state_path();
     let mut file: Option<SharedFile> = None;
     let mut last_gen: u64 = u64::MAX;
+    // Convolution IR cache: reloaded from the sidecar blob when the snapshot's
+    // generation stamp changes. Kernel prep runs on THIS thread, never the RT.
+    let mut last_ir_gen: u32 = 0;
+    let mut cached_ir: Option<std::sync::Arc<resonance_dsp::convolution::IrData>> = None;
 
     // FFT setup (cheap to keep around; only used while watching).
     let mut planner = FftPlanner::<f32>::new();
@@ -152,17 +216,29 @@ fn worker_loop(weak: Weak<Shared>) {
                 let channels = shared.channels.load(Ordering::Acquire);
                 if channels != 0 {
                     let sr = f64::from_bits(shared.sample_rate_bits.load(Ordering::Acquire));
+                    // An IR change (new blob generation) always takes the
+                    // rebuild path: the kernel prep (resample + FFT) must run
+                    // here on the worker, then swap in whole.
+                    let ir_changed = snap.convolution_generation != last_ir_gen;
+                    if ir_changed {
+                        cached_ir = load_ir_blob(&snap);
+                        last_ir_gen = snap.convolution_generation;
+                    }
                     // Update in place to preserve filter/effect state (click-free
-                    // live edits). Only a structural change (band added/removed)
-                    // needs a rebuild, which we do outside the lock.
-                    let mut need_rebuild = false;
-                    if let Ok(mut g) = shared.state.lock() {
-                        if let Some(l) = g.as_mut() {
-                            need_rebuild = !snap.apply_to(&mut l.chain, sr);
+                    // live edits). Only a structural change (band added/removed,
+                    // IR presence/content change) needs a rebuild, done outside
+                    // the lock.
+                    let mut need_rebuild = ir_changed;
+                    if !need_rebuild {
+                        if let Ok(mut g) = shared.state.lock() {
+                            if let Some(l) = g.as_mut() {
+                                need_rebuild = !snap.apply_to(&mut l.chain, sr);
+                            }
                         }
                     }
                     if need_rebuild {
-                        let c = build_chain(Some(&snap), channels, sr);
+                        let mut c = build_chain(Some(&snap), channels, sr);
+                        attach_ir(&mut c, &snap, cached_ir.as_ref());
                         if let Ok(mut g) = shared.state.lock() {
                             if let Some(l) = g.as_mut() {
                                 l.chain = c;
@@ -325,6 +401,11 @@ pub extern "C" fn resonance_apo_lock(
             .ok()
             .and_then(|f| f.read());
         let mut chain = build_chain(snap.as_ref(), ch, sample_rate);
+        // Format lock is initialisation, not the streaming callback — safe to
+        // read + prepare the convolution IR here.
+        if let Some(s) = snap.as_ref() {
+            attach_ir(&mut chain, s, load_ir_blob(s).as_ref());
+        }
         chain.reset();
         let scratch = vec![0.0f64; (max_frames as usize).saturating_mul(ch)];
         let routed = scratch.clone();
@@ -626,6 +707,105 @@ mod hires_harness {
                 "rate {r:.0}: output peak {peak_hz:.1} Hz (want {TONE}) — pitch shift?"
             );
         }
+    }
+
+    #[test]
+    fn apo_convolution_rate_mismatched_ir_is_transparent() {
+        // The live-VM scenario that failed: a 96 kHz delta IR convolved by a
+        // 48 kHz engine. The engine must resample the kernel (gain-compensated)
+        // and stay ~0 dB — a broken downsample path shows up as a huge loss.
+        let mut chain = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48_000.0)
+            .build();
+        chain
+            .convolution
+            .load_ir(std::sync::Arc::new(resonance_dsp::convolution::IrData {
+                name: "delta96".into(),
+                path: "/delta96.wav".into(),
+                sample_rate: 96_000.0,
+                channels: vec![{
+                    let mut v = vec![0.0; 64];
+                    v[32] = 1.0;
+                    v
+                }],
+            }))
+            .unwrap();
+        {
+            let mut w = ApoStateWriter::create(&default_state_path()).expect("state writer");
+            w.publish(&chain);
+        }
+        let (gain_db, peak_hz) = measure(48_000.0, 1_000.0);
+        assert!(
+            gain_db.abs() < 1.0,
+            "96k delta IR at 48k engine should be ~0 dB, got {gain_db:.2}"
+        );
+        assert!((peak_hz - 1_000.0).abs() < 8.0, "pitch intact: {peak_hz}");
+        // Restore a flat default state for the following tests.
+        {
+            let mut w = ApoStateWriter::create(&default_state_path()).expect("state writer");
+            w.publish(
+                &ProcessorChain::builder()
+                    .channels(2)
+                    .sample_rate(48_000.0)
+                    .build(),
+            );
+        }
+        let _ = std::fs::remove_file(crate::state::default_ir_path());
+    }
+
+    #[test]
+    fn apo_convolution_ir_from_blob_is_applied() {
+        // A single-tap 0.5 IR = a broadband −6.02 dB. Publish a flat chain with
+        // it loaded; the APO must read the sidecar blob at format lock, prepare
+        // the kernel and convolve — measured straight off the process path.
+        let mut chain = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48_000.0)
+            .build();
+        chain
+            .convolution
+            .load_ir(std::sync::Arc::new(resonance_dsp::convolution::IrData {
+                name: "half".into(),
+                path: "/half.wav".into(),
+                sample_rate: 48_000.0,
+                channels: vec![vec![0.5]],
+            }))
+            .unwrap();
+        {
+            let mut w = ApoStateWriter::create(&default_state_path()).expect("state writer");
+            w.publish(&chain);
+        }
+        let (gain_db, peak_hz) = measure(48_000.0, 1_000.0);
+        assert!(
+            (gain_db + 6.02).abs() < 0.5,
+            "0.5-tap IR should measure ≈ −6 dB through the APO, got {gain_db:.2}"
+        );
+        assert!((peak_hz - 1_000.0).abs() < 8.0, "pitch intact: {peak_hz}");
+
+        // Bypassed IR = unity again.
+        chain.convolution.set_enabled(false);
+        {
+            let mut w = ApoStateWriter::create(&default_state_path()).expect("state writer");
+            w.publish(&chain);
+        }
+        let (gain_db, _) = measure(48_000.0, 1_000.0);
+        assert!(
+            gain_db.abs() < 0.5,
+            "bypassed IR should measure ≈ 0 dB, got {gain_db:.2}"
+        );
+
+        // Clean up so later tests see a flat default state.
+        {
+            let mut w = ApoStateWriter::create(&default_state_path()).expect("state writer");
+            w.publish(
+                &ProcessorChain::builder()
+                    .channels(2)
+                    .sample_rate(48_000.0)
+                    .build(),
+            );
+        }
+        let _ = std::fs::remove_file(crate::state::default_ir_path());
     }
 
     // These share `default_state_path()` and global engine state with the rate

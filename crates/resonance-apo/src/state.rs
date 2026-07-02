@@ -36,7 +36,17 @@ pub const STATE_MAGIC: u32 = 0x4F50_4152;
 /// Layout version; bump on any `#[repr(C)]` change below.
 /// v3: per-band channel mask + square routing matrix.
 /// v4: + Loudness effect snapshot.
-pub const STATE_VERSION: u32 = 4;
+/// v5: + convolution (enabled flag + IR-blob generation; samples live in the
+///     sidecar blob file, see [`default_ir_path`]).
+pub const STATE_VERSION: u32 = 5;
+
+/// `"RIRB"` little-endian — sanity tag for the IR-blob sidecar.
+pub const IR_BLOB_MAGIC: u32 = 0x4252_4952;
+/// IR-blob layout version.
+pub const IR_BLOB_VERSION: u32 = 1;
+/// Upper bound on stored IR samples (all channels summed) — bounds the blob
+/// file and the APO-side read (2 s cap × 8 ch × 192 kHz ≈ 3 M samples).
+pub const IR_BLOB_MAX_SAMPLES: usize = 4 << 20;
 
 /// Number of spectrum bins carried in telemetry (matches the daemon's display).
 pub const TELEMETRY_BINS: usize = 64;
@@ -87,6 +97,12 @@ pub struct ChainSnapshot {
     pub num_filters: u32,
     /// Output dither target bit depth (`0` = off; else 16/20/24).
     pub dither_bits: u32,
+    /// Convolution stage: `0` = no IR; else the generation stamp of the IR-blob
+    /// sidecar (see [`default_ir_path`]) whose samples to convolve. The APO
+    /// reloads the blob when this changes.
+    pub convolution_generation: u32,
+    /// `1` = convolve, `0` = loaded-but-bypassed (or none).
+    pub convolution_enabled: u32,
     pub filters: [FilterSnapshot; MAX_FILTERS],
     /// Square output routing matrix dimension: `0` = none/identity (passthrough);
     /// else `N` means an `N×N` remap stored row-major in the first `N*N` entries
@@ -111,6 +127,8 @@ impl Default for ChainSnapshot {
             crossfeed: EffectSnapshot::default(),
             num_filters: 0,
             dither_bits: 0,
+            convolution_generation: 0,
+            convolution_enabled: 0,
             filters: [FilterSnapshot::default(); MAX_FILTERS],
             route_channels: 0,
             _pad_route: 0,
@@ -251,6 +269,10 @@ impl ChainSnapshot {
             crossfeed: effect(chain, FxEffect::Crossfeed),
             num_filters: n as u32,
             dither_bits: chain.dither.bits().unwrap_or(0),
+            // The blob generation is owned by the SharedFile writer (it knows
+            // when the sidecar was written); `publish` stamps it after this.
+            convolution_generation: 0,
+            convolution_enabled: u32::from(chain.convolution.enabled()),
             filters,
             route_channels,
             _pad_route: 0,
@@ -336,6 +358,17 @@ impl ChainSnapshot {
         // Routing is format-independent state on the chain; apply it in place at
         // the chain's live width (square-only; mismatched/absent → passthrough).
         chain.routing = route_matrix(self.route_channels, &self.route_gains, chain.channels);
+
+        // Convolution: the bypass flag toggles in place. IR presence changing
+        // (loaded↔none) needs the caller to reload the blob and rebuild; an IR
+        // *content* change (same presence, new generation) is detected by the
+        // worker's own generation tracking, not here.
+        if (self.convolution_generation != 0) != chain.convolution.source().is_some() {
+            return false;
+        }
+        chain
+            .convolution
+            .set_enabled(self.convolution_enabled != 0 && chain.convolution.source().is_some());
 
         let n = self.num_filters.min(MAX_FILTERS as u32) as usize;
         if chain.filters.len() != n {
@@ -439,6 +472,117 @@ pub fn default_state_path() -> PathBuf {
     }
 }
 
+/// IR-blob sidecar path for a given state file: `apo_state.bin` →
+/// `apo_state.ir.blob` (same directory, so `audiodg.exe` can read it for the
+/// same reason it can read the state file).
+#[must_use]
+pub fn ir_path_for(state_path: &Path) -> PathBuf {
+    state_path.with_extension("ir.blob")
+}
+
+/// Default IR-blob sidecar path (pairs with [`default_state_path`]).
+#[must_use]
+pub fn default_ir_path() -> PathBuf {
+    ir_path_for(&default_state_path())
+}
+
+/// Write the impulse response as a sidecar blob the APO can read: a fixed
+/// little-endian header (`magic, version, generation, channels, frames, pad,
+/// rate: f64`) followed by the samples channel-planar as `f32`. Written to a
+/// sibling temp file then renamed, so the APO never observes a torn blob.
+///
+/// # Errors
+///
+/// Returns an [`io::Error`] when the file cannot be written or renamed, or the
+/// IR exceeds [`IR_BLOB_MAX_SAMPLES`].
+pub fn write_ir_blob(
+    path: &Path,
+    generation: u32,
+    ir: &resonance_dsp::convolution::IrData,
+) -> io::Result<()> {
+    let channels = ir.channels.len();
+    let frames = ir.frames();
+    let total = channels.saturating_mul(frames);
+    if total == 0 || total > IR_BLOB_MAX_SAMPLES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("IR blob size {total} samples out of range"),
+        ));
+    }
+    let mut buf = Vec::with_capacity(32 + total * 4);
+    buf.extend_from_slice(&IR_BLOB_MAGIC.to_le_bytes());
+    buf.extend_from_slice(&IR_BLOB_VERSION.to_le_bytes());
+    buf.extend_from_slice(&generation.to_le_bytes());
+    buf.extend_from_slice(&(channels as u32).to_le_bytes());
+    buf.extend_from_slice(&(frames as u32).to_le_bytes());
+    buf.extend_from_slice(&0u32.to_le_bytes());
+    buf.extend_from_slice(&ir.sample_rate.to_le_bytes());
+    for ch in &ir.channels {
+        for &s in ch {
+            buf.extend_from_slice(&(s as f32).to_le_bytes());
+        }
+    }
+    let tmp = path.with_extension("blob.tmp");
+    std::fs::write(&tmp, &buf)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Read + validate an IR blob. Returns `(generation, ir)` or `None` on any
+/// mismatch (missing file, bad magic/version, inconsistent sizes) — the APO
+/// treats every failure as "no IR" rather than erroring inside audiodg.
+#[must_use]
+pub fn read_ir_blob(path: &Path) -> Option<(u32, resonance_dsp::convolution::IrData)> {
+    let data = std::fs::read(path).ok()?;
+    if data.len() < 32 {
+        return None;
+    }
+    let u32_at = |o: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(data.get(o..o + 4)?.try_into().ok()?))
+    };
+    let magic = u32_at(0)?;
+    let version = u32_at(4)?;
+    let generation = u32_at(8)?;
+    let channels = u32_at(12)? as usize;
+    let frames = u32_at(16)? as usize;
+    if magic != IR_BLOB_MAGIC || version != IR_BLOB_VERSION {
+        return None;
+    }
+    let rate = f64::from_le_bytes(data.get(24..32)?.try_into().ok()?);
+    let total = channels.checked_mul(frames)?;
+    if channels == 0
+        || frames == 0
+        || total > IR_BLOB_MAX_SAMPLES
+        || data.len() < 32 + total * 4
+        || rate <= 0.0
+        || !rate.is_finite()
+    {
+        return None;
+    }
+    let mut chans = Vec::with_capacity(channels);
+    let mut off = 32;
+    for _ in 0..channels {
+        let mut v = Vec::with_capacity(frames);
+        for _ in 0..frames {
+            let s = f32::from_le_bytes(data.get(off..off + 4)?.try_into().ok()?);
+            if !s.is_finite() {
+                return None;
+            }
+            v.push(f64::from(s));
+            off += 4;
+        }
+        chans.push(v);
+    }
+    Some((
+        generation,
+        resonance_dsp::convolution::IrData {
+            name: "apo-ir".to_string(),
+            path: path.to_string_lossy().into_owned(),
+            sample_rate: rate,
+            channels: chans,
+        },
+    ))
+}
+
 /// The shared file, mapped read-write by both the daemon and the APO.
 ///
 /// Two independent seqlock regions: the daemon owns the chain `snapshot`
@@ -446,6 +590,12 @@ pub fn default_state_path() -> PathBuf {
 /// reads). The daemon owns the `telemetry_enabled` gate.
 pub struct SharedFile {
     mmap: memmap2::MmapMut,
+    /// Writer-side IR sidecar tracking (daemon only): the `Arc` identity of the
+    /// last IR written to the blob, and the generation stamped on it. `0` ptr =
+    /// none written this session.
+    last_ir_ptr: usize,
+    ir_generation: u32,
+    ir_path: PathBuf,
 }
 
 impl SharedFile {
@@ -473,7 +623,17 @@ impl SharedFile {
         file.set_len(STATE_SIZE as u64)?;
         // SAFETY: file is sized to STATE_SIZE and owned for the map's lifetime.
         let mmap = unsafe { memmap2::MmapMut::map_mut(&file)? };
-        let this = Self { mmap };
+        // Seed the IR generation from wall time so a daemon restart never
+        // reuses a previous session's stamp with different blob contents.
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |d| (d.as_secs() as u32) | 1);
+        let this = Self {
+            mmap,
+            last_ir_ptr: 0,
+            ir_generation: seed,
+            ir_path: ir_path_for(path),
+        };
         // SAFETY: map is STATE_SIZE bytes; SharedState is repr(C).
         let st = unsafe { &*this.mmap.as_ptr().cast::<SharedState>() };
         if st.magic != STATE_MAGIC || st.version != STATE_VERSION {
@@ -513,14 +673,42 @@ impl SharedFile {
 
     // ---- chain snapshot: daemon writes, APO reads ----
 
-    /// Publish the daemon's current chain under the seqlock.
+    /// Publish the daemon's current chain under the seqlock, syncing the IR
+    /// sidecar blob first so the APO never sees a generation whose samples
+    /// aren't on disk yet.
     pub fn publish(&mut self, chain: &ProcessorChain) {
-        let snap = ChainSnapshot::from_chain(chain);
+        let conv_gen = self.sync_ir_blob(chain);
+        let mut snap = ChainSnapshot::from_chain(chain);
+        snap.convolution_generation = conv_gen;
         let st = self.state_mut();
         let g = st.generation.load(Ordering::Relaxed);
         st.generation.store(g.wrapping_add(1), Ordering::Release); // odd: writing
         st.snapshot = snap;
         st.generation.store(g.wrapping_add(2), Ordering::Release); // even: done
+    }
+
+    /// Write the chain's IR to the sidecar blob when it changed (tracked by the
+    /// source `Arc`'s identity). Returns the generation to stamp into the
+    /// snapshot: `0` = no IR (or the blob write failed — the APO then treats it
+    /// as no IR rather than convolving stale samples).
+    fn sync_ir_blob(&mut self, chain: &ProcessorChain) -> u32 {
+        let Some(ir) = chain.convolution.source() else {
+            self.last_ir_ptr = 0;
+            return 0;
+        };
+        let ptr = std::sync::Arc::as_ptr(ir) as usize;
+        if ptr == self.last_ir_ptr {
+            return self.ir_generation;
+        }
+        let next = self.ir_generation.wrapping_add(1).max(1);
+        if write_ir_blob(&self.ir_path, next, ir).is_ok() {
+            self.ir_generation = next;
+            self.last_ir_ptr = ptr;
+            self.ir_generation
+        } else {
+            self.last_ir_ptr = 0;
+            0
+        }
     }
 
     /// Current chain generation (cheap; lets the APO poller skip unchanged state).
@@ -776,6 +964,130 @@ mod tests {
         assert!((rebuilt.preamp_db + 3.5).abs() < 1e-9);
 
         std::fs::remove_file(&path).ok();
+    }
+
+    fn test_ir(taps: Vec<f64>) -> std::sync::Arc<resonance_dsp::convolution::IrData> {
+        std::sync::Arc::new(resonance_dsp::convolution::IrData {
+            name: "t".into(),
+            path: "/t.wav".into(),
+            sample_rate: 48_000.0,
+            channels: vec![taps],
+        })
+    }
+
+    #[test]
+    fn ir_blob_round_trips_and_rejects_corruption() {
+        let path = temp_path("irblob").with_extension("blob");
+        let ir = resonance_dsp::convolution::IrData {
+            name: "x".into(),
+            path: "/x.wav".into(),
+            sample_rate: 44_100.0,
+            channels: vec![vec![1.0, 0.5, -0.25], vec![0.0, 0.125, 0.75]],
+        };
+        write_ir_blob(&path, 7, &ir).unwrap();
+        let (generation, back) = read_ir_blob(&path).expect("blob reads back");
+        assert_eq!(generation, 7);
+        assert_eq!(back.channels.len(), 2);
+        assert_eq!(back.frames(), 3);
+        assert_eq!(back.sample_rate, 44_100.0);
+        assert!((back.channels[0][1] - 0.5).abs() < 1e-6);
+        assert!((back.channels[1][2] - 0.75).abs() < 1e-6);
+
+        // Truncated + garbage files must read as "no IR", never panic.
+        let data = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &data[..20]).unwrap();
+        assert!(read_ir_blob(&path).is_none(), "truncated header rejected");
+        std::fs::write(&path, &data[..data.len() - 4]).unwrap();
+        assert!(read_ir_blob(&path).is_none(), "truncated samples rejected");
+        std::fs::write(&path, b"not a blob at all").unwrap();
+        assert!(read_ir_blob(&path).is_none(), "garbage rejected");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn publish_stamps_ir_generation_and_reuses_it_for_same_arc() {
+        let path = temp_path("irgen");
+        let mut w = ApoStateWriter::create(&path).unwrap();
+        let r = SharedFile::open(&path).unwrap();
+        let blob = ir_path_for(&path);
+
+        // No IR → generation 0, enabled 0.
+        let mut chain = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48_000.0)
+            .build();
+        w.publish(&chain);
+        let snap = r.read().unwrap();
+        assert_eq!(snap.convolution_generation, 0);
+        assert_eq!(snap.convolution_enabled, 0);
+
+        // IR loaded → non-zero generation, blob on disk with the same stamp.
+        chain.convolution.load_ir(test_ir(vec![1.0, 0.5])).unwrap();
+        w.publish(&chain);
+        let snap1 = r.read().unwrap();
+        assert_ne!(snap1.convolution_generation, 0);
+        assert_eq!(snap1.convolution_enabled, 1);
+        let (blob_gen, blob_ir) = read_ir_blob(&blob).expect("sidecar written");
+        assert_eq!(blob_gen, snap1.convolution_generation);
+        assert_eq!(blob_ir.frames(), 2);
+
+        // Same Arc republished (e.g. bypass toggle) → SAME generation, so the
+        // APO doesn't re-prepare the kernel.
+        chain.convolution.set_enabled(false);
+        w.publish(&chain);
+        let snap2 = r.read().unwrap();
+        assert_eq!(snap2.convolution_generation, snap1.convolution_generation);
+        assert_eq!(snap2.convolution_enabled, 0);
+
+        // A NEW IR bumps the generation.
+        chain.convolution.load_ir(test_ir(vec![0.25])).unwrap();
+        w.publish(&chain);
+        let snap3 = r.read().unwrap();
+        assert_ne!(snap3.convolution_generation, snap1.convolution_generation);
+        let (g3, ir3) = read_ir_blob(&blob).unwrap();
+        assert_eq!(g3, snap3.convolution_generation);
+        assert_eq!(ir3.frames(), 1);
+
+        // Clearing goes back to generation 0.
+        chain.convolution.clear();
+        w.publish(&chain);
+        assert_eq!(r.read().unwrap().convolution_generation, 0);
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&blob).ok();
+    }
+
+    #[test]
+    fn apply_to_handles_convolution_presence_and_bypass() {
+        let mut chain = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48_000.0)
+            .build();
+        let mut snap = ChainSnapshot::from_chain(&chain);
+
+        // Presence mismatch (snapshot has an IR, chain doesn't) → rebuild.
+        snap.convolution_generation = 5;
+        snap.convolution_enabled = 1;
+        assert!(
+            !snap.apply_to(&mut chain, 48_000.0),
+            "IR appearing must force a rebuild"
+        );
+
+        // With the IR loaded, the bypass flag toggles in place.
+        chain.convolution.load_ir(test_ir(vec![1.0])).unwrap();
+        assert!(snap.apply_to(&mut chain, 48_000.0));
+        assert!(chain.convolution.enabled());
+        snap.convolution_enabled = 0;
+        assert!(snap.apply_to(&mut chain, 48_000.0));
+        assert!(!chain.convolution.enabled(), "bypass applied in place");
+
+        // IR disappearing from the snapshot → rebuild.
+        snap.convolution_generation = 0;
+        assert!(
+            !snap.apply_to(&mut chain, 48_000.0),
+            "IR removal must force a rebuild"
+        );
     }
 
     #[test]

@@ -281,6 +281,8 @@ pub fn parse_fac(content: &str) -> Result<Preset, FacError> {
         eq_enabled,
         bands,
         effects,
+        // FxSound .fac files have no impulse-response concept.
+        convolution: None,
     })
 }
 

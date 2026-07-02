@@ -19,7 +19,6 @@
 //!
 //! Off (the default) and with no IR loaded the stage is a bit-exact passthrough.
 
-use crate::resample::StreamResampler;
 use rustfft::num_complex::Complex;
 use rustfft::{Fft, FftPlanner};
 use std::collections::VecDeque;
@@ -460,35 +459,63 @@ impl ConvolutionEngine {
     }
 }
 
-/// Offline-resample one IR channel from `from_hz` to `to_hz`, compensating the
-/// resampler's group delay so the IR's time origin is preserved.
+/// Offline-resample one IR channel from `from_hz` to `to_hz` with a direct
+/// windowed-sinc evaluation (Blackman window, ±[`SINC_HALF_TAPS`] input taps).
 ///
-/// The taps are scaled by `from/to`: the resampler preserves the *waveform's*
+/// Deliberately self-contained rather than reusing the streaming `rubato`
+/// resampler: IR preparation also runs inside `audiodg.exe` (the Windows APO),
+/// where the streaming path was observed to produce a corrupted kernel while
+/// the identical code passed everywhere else (see issue #45). A closed-form
+/// per-sample evaluation has no internal state to corrupt and is deterministic
+/// in any host process; IRs are short enough that the O(len × taps) cost is
+/// milliseconds.
+///
+/// The taps are scaled by `from/to`: resampling preserves the *waveform's*
 /// amplitude, but a convolution kernel must preserve the *filter's* frequency
 /// response, and a filter's gain is the rate-weighted sum of its taps (e.g. an
 /// upsampled delta would otherwise gain `to/from` at DC).
+// float_cmp: the exact rate match gates the copy-through fast path.
+#[allow(clippy::float_cmp)]
 fn resample_ir(samples: &[f64], from_hz: f64, to_hz: f64) -> Vec<f64> {
-    let mut rs = StreamResampler::<f64>::new(from_hz, to_hz, 1);
-    if rs.is_bypass() {
+    const SINC_HALF_TAPS: isize = 48;
+    if !(from_hz > 0.0 && to_hz > 0.0) || from_hz == to_hz || samples.is_empty() {
         return samples.to_vec();
     }
-    let expected = ((samples.len() as f64) * to_hz / from_hz).ceil() as usize;
-    let delay = rs.output_delay_frames();
-    let mut out = Vec::with_capacity(expected + delay + 1024);
-    // Feed in bounded chunks (the resampler pre-sizes for ≤8192-frame calls),
-    // then flush with zeros until the delayed tail has fully emerged.
-    for chunk in samples.chunks(4096) {
-        out.extend_from_slice(rs.process(chunk));
-    }
-    let zeros = [0.0f64; 1024];
-    while out.len() < expected + delay {
-        out.extend_from_slice(rs.process(&zeros));
-    }
-    out.drain(..delay.min(out.len()));
-    out.truncate(expected);
-    let gain = from_hz / to_hz;
-    for s in &mut out {
-        *s *= gain;
+    let ratio = to_hz / from_hz;
+    let expected = ((samples.len() as f64) * ratio).ceil() as usize;
+    // Downsampling must anti-alias at the OUTPUT Nyquist: cutoff (as a fraction
+    // of the input Nyquist) = ratio. Upsampling keeps the full input band.
+    let cutoff = ratio.min(1.0);
+    let filter_gain = from_hz / to_hz;
+    // The window spans ±half_width input samples around the output position;
+    // widen it when downsampling so the (narrower) sinc keeps enough lobes.
+    let half_width = (SINC_HALF_TAPS as f64 / cutoff).ceil() as isize;
+
+    let sinc = |u: f64| {
+        if u.abs() < 1e-12 {
+            1.0
+        } else {
+            (std::f64::consts::PI * u).sin() / (std::f64::consts::PI * u)
+        }
+    };
+    let mut out = Vec::with_capacity(expected);
+    for j in 0..expected {
+        // Position of output sample j on the input's time axis.
+        let t = j as f64 / ratio;
+        let centre = t.round() as isize;
+        let mut acc = 0.0;
+        for i in (centre - half_width)..=(centre + half_width) {
+            if i < 0 || i as usize >= samples.len() {
+                continue;
+            }
+            let d = t - i as f64;
+            let x = d / half_width as f64; // in [-1, 1] inside the support
+            let window = 0.42
+                + 0.5 * (std::f64::consts::PI * x).cos()
+                + 0.08 * (2.0 * std::f64::consts::PI * x).cos();
+            acc += samples[i as usize] * cutoff * sinc(cutoff * d) * window;
+        }
+        out.push(acc * filter_gain);
     }
     out
 }
@@ -804,5 +831,61 @@ mod tests {
         assert_eq!(up.len(), 2000);
         let down = resample_ir(&x, 96_000.0, 48_000.0);
         assert_eq!(down.len(), 500);
+    }
+}
+
+#[cfg(test)]
+mod downsample_repro {
+    use super::*;
+
+    #[test]
+    fn resample_ir_downsampling_preserves_a_short_delta() {
+        // A centred delta in a short IR at 96 kHz, downsampled to 48 kHz, must
+        // still be a ~unit-DC-gain kernel with its energy inside the window.
+        let mut delta = vec![0.0; 64];
+        delta[32] = 1.0;
+        let out = resample_ir(&delta, 96_000.0, 48_000.0);
+        assert_eq!(out.len(), 32);
+        let dc: f64 = out.iter().sum();
+        let peak = out.iter().copied().fold(0.0f64, |a, b| a.max(b.abs()));
+        assert!(
+            (dc - 1.0).abs() < 0.05,
+            "DC gain should stay ~1.0 after 96k→48k, got {dc:.4} (peak {peak:.4})"
+        );
+    }
+}
+
+#[cfg(test)]
+mod engine_downsample_repro {
+    use super::*;
+
+    #[test]
+    fn engine_with_96k_delta_ir_at_48k_is_near_transparent() {
+        let ir = std::sync::Arc::new(IrData {
+            name: "d".into(),
+            path: "/d.wav".into(),
+            sample_rate: 96_000.0,
+            channels: vec![{
+                let mut v = vec![0.0; 64];
+                v[32] = 1.0;
+                v
+            }],
+        });
+        let mut e = ConvolutionEngine::new(2, 48_000.0);
+        e.load_ir(ir).unwrap();
+        // Steady 1 kHz tone: output RMS must be ≈ input RMS (unit DC-ish gain).
+        let n = 8192usize;
+        let tone: Vec<f64> = (0..n)
+            .map(|i| (2.0 * std::f64::consts::PI * 1000.0 / 48_000.0 * i as f64).sin() * 0.25)
+            .collect();
+        let mut buf: Vec<f64> = tone.iter().flat_map(|&s| [s, s]).collect();
+        e.process(&mut buf, 2);
+        let rms = |v: &[f64]| (v.iter().map(|x| x * x).sum::<f64>() / v.len() as f64).sqrt();
+        let (a, b) = (rms(&tone[2048..]), rms(&buf[4096..]));
+        let gain_db = 20.0 * (b / a).log10();
+        assert!(
+            gain_db.abs() < 1.0,
+            "96k delta IR at 48k engine should be ~0 dB, got {gain_db:.2} dB"
+        );
     }
 }

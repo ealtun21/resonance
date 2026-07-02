@@ -112,7 +112,12 @@ impl Profile {
             },
             bands,
             dither_bits: None,
-            convolution: None,
+            // APO presets can carry a `Convolution:` impulse response; it
+            // arrives resolved to an absolute path (see `parse_preset_file`).
+            convolution: p.convolution.as_ref().map(|path| ConvolutionProfile {
+                path: path.clone(),
+                enabled: true,
+            }),
         }
     }
 
@@ -405,6 +410,7 @@ mod tests {
                 },
                 ..Default::default()
             },
+            convolution: Some("/irs/room.wav".into()),
         };
 
         let p = Profile::from_preset(&preset);
@@ -413,6 +419,9 @@ mod tests {
         assert!((p.bands[0].freq - 10_000.0).abs() < 1e-9);
         assert!((p.preamp_db + 4.5).abs() < 1e-9);
         assert!(p.enabled, "imported chain should start enabled");
+        let conv = p.convolution.as_ref().expect("APO Convolution: carried");
+        assert_eq!(conv.path, "/irs/room.wav");
+        assert!(conv.enabled, "imported IR starts enabled");
         assert!(p.effects.fidelity_enabled);
         assert!((p.effects.fidelity_intensity - 0.5).abs() < 1e-9);
         assert!((p.effects.bass_intensity - 0.25).abs() < 1e-9);
