@@ -5,7 +5,9 @@ use anyhow::{Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use resonance_ipc::{BandScope, ChannelMask, Command, FxEffectId, Response, transport::SyncClient};
+use resonance_preset::metadata::PresetMeta;
 use std::io::{self, IsTerminal};
+use std::path::Path;
 
 #[derive(Parser)]
 #[command(name = "resonance", about = "Control the Resonance EQ daemon", version)]
@@ -27,6 +29,23 @@ enum Sub {
     List {
         /// Directory to scan (optional)
         dir: Option<String>,
+    },
+    /// Show or edit a preset's metadata sidecar (`<file>.toml`; no daemon needed)
+    Meta {
+        /// Path to preset file (.fac or APO .txt)
+        preset: String,
+        /// Set the author
+        #[arg(long)]
+        author: Option<String>,
+        /// Set the description
+        #[arg(long)]
+        desc: Option<String>,
+        /// Set a tag (repeatable; together they replace the stored list)
+        #[arg(long)]
+        tag: Vec<String>,
+        /// Remove the sidecar file entirely
+        #[arg(long, conflicts_with_all = ["author", "desc", "tag"])]
+        clear: bool,
     },
     /// Set an `FxSound` effect intensity (0–100)
     Set {
@@ -308,6 +327,33 @@ fn main() -> Result<()> {
         return run_daemon(action);
     }
 
+    // `meta` reads/writes the preset's metadata sidecar client-side; it never
+    // touches the socket (works with no daemon running).
+    if let Sub::Meta {
+        preset,
+        author,
+        desc,
+        tag,
+        clear,
+    } = sub
+    {
+        return run_meta(Path::new(&absolutize(preset)), author, desc, tag, clear);
+    }
+
+    // `list` asks the daemon for preset paths, then enriches each line with
+    // sidecar metadata read client-side (the daemon stays metadata-agnostic).
+    if let Sub::List { dir } = sub {
+        let resp = send(Command::ListPresets {
+            dir: dir.map(absolutize),
+        })?;
+        if let Response::PresetList(list) = resp {
+            print_preset_list(&Paint::auto(), &list);
+        } else {
+            print_response(resp);
+        }
+        return Ok(());
+    }
+
     // `devices` reuses GetState but renders a sink list instead of full status.
     if let Sub::Devices = sub {
         let resp = send(Command::GetState)?;
@@ -383,9 +429,6 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
         Sub::Status => Ok(Command::GetState),
         Sub::Load { path } => Ok(Command::LoadPreset {
             path: absolutize(path),
-        }),
-        Sub::List { dir } => Ok(Command::ListPresets {
-            dir: dir.map(absolutize),
         }),
         Sub::Autoeq { .. } => unreachable!(),
         Sub::Power { state } => Ok(Command::SetPower {
@@ -490,6 +533,8 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
         | Sub::Sinks
         | Sub::Sink { .. }
         | Sub::Completions { .. }
+        | Sub::List { .. }
+        | Sub::Meta { .. }
         | Sub::Verify { .. } => {
             unreachable!()
         }
@@ -693,6 +738,109 @@ fn run_daemon(action: &DaemonAction) -> Result<()> {
         yn(s.installed, "installed", "not installed"),
     );
     Ok(())
+}
+
+/// `resonance meta`: show or edit a preset's metadata sidecar. With no flags it
+/// prints the stored metadata; edit flags update their field and re-save;
+/// `--clear` removes the sidecar file.
+fn run_meta(
+    preset: &Path,
+    author: Option<String>,
+    desc: Option<String>,
+    tags: Vec<String>,
+    clear: bool,
+) -> Result<()> {
+    let p = Paint::auto();
+
+    if clear {
+        let sidecar = PresetMeta::sidecar_path(preset);
+        match std::fs::remove_file(&sidecar) {
+            Ok(()) => println!("{} {}", p.dim("removed"), sidecar.display()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                println!("{}", p.dim("(no metadata)"));
+            }
+            Err(e) => bail!("cannot remove {}: {e}", sidecar.display()),
+        }
+        return Ok(());
+    }
+
+    let editing = author.is_some() || desc.is_some() || !tags.is_empty();
+    let meta = merge_meta(
+        PresetMeta::load_for(preset).unwrap_or_default(),
+        author,
+        desc,
+        tags,
+    );
+    if editing {
+        // Require the preset itself so a typo can't strand an orphan sidecar.
+        if !preset.is_file() {
+            bail!("no such preset: {}", preset.display());
+        }
+        meta.save_for(preset).map_err(|e| {
+            anyhow::anyhow!(
+                "cannot write {}: {e}",
+                PresetMeta::sidecar_path(preset).display()
+            )
+        })?;
+    }
+
+    if meta.is_empty() {
+        println!("{}", p.dim("(no metadata)"));
+        return Ok(());
+    }
+    let label = |k: &str| p.dim(&format!("{k:<12}"));
+    if let Some(author) = &meta.author {
+        println!("{}{author}", label("author"));
+    }
+    if let Some(desc) = &meta.description {
+        println!("{}{desc}", label("description"));
+    }
+    if !meta.tags.is_empty() {
+        println!("{}{}", label("tags"), meta.tags.join(", "));
+    }
+    Ok(())
+}
+
+/// Apply `meta` edit flags over the stored sidecar: each given flag replaces
+/// its field, absent flags keep the stored value (tags replace as a whole list).
+fn merge_meta(
+    mut meta: PresetMeta,
+    author: Option<String>,
+    desc: Option<String>,
+    tags: Vec<String>,
+) -> PresetMeta {
+    if author.is_some() {
+        meta.author = author;
+    }
+    if desc.is_some() {
+        meta.description = desc;
+    }
+    if !tags.is_empty() {
+        meta.tags = tags;
+    }
+    meta
+}
+
+/// `resonance list`: one line per preset path, with `author — description`
+/// appended (dimmed) when a metadata sidecar carries either field.
+fn print_preset_list(p: &Paint, list: &[String]) {
+    if list.is_empty() {
+        println!("{}", p.dim("(none)"));
+    }
+    for name in list {
+        match meta_tail(Path::new(name)) {
+            Some(tail) => println!("{name}  {}", p.dim(&tail)),
+            None => println!("{name}"),
+        }
+    }
+}
+
+/// The `author — description` tail for a `list` line; `None` when there is no
+/// sidecar or it carries neither field (tags alone don't fit on a list line).
+fn meta_tail(preset: &Path) -> Option<String> {
+    let meta = PresetMeta::load_for(preset)?;
+    let parts: Vec<String> = meta.author.into_iter().chain(meta.description).collect();
+    (!parts.is_empty()).then(|| parts.join(" — "))
 }
 
 fn send(cmd: Command) -> Result<Response> {
@@ -1168,5 +1316,95 @@ fn parse_effect(s: &str) -> Result<FxEffectId> {
         _ => bail!(
             "unknown effect '{s}': use fidelity/ambience/surround/dynamic_boost/bass/loudness/crossfeed"
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use resonance_preset::metadata::PresetMeta;
+    use std::path::PathBuf;
+
+    /// Fresh scratch dir per test so parallel tests never share sidecars.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("resonance-cli-meta-test-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn merge_meta_overrides_only_given_flags() {
+        let existing = PresetMeta {
+            author: Some("old".into()),
+            description: Some("kept".into()),
+            tags: vec!["kept".into()],
+        };
+        let merged = merge_meta(existing, Some("new".into()), None, Vec::new());
+        assert_eq!(merged.author.as_deref(), Some("new"));
+        assert_eq!(merged.description.as_deref(), Some("kept"));
+        assert_eq!(merged.tags, vec!["kept".to_string()]);
+    }
+
+    #[test]
+    fn merge_meta_replaces_tag_list_wholesale() {
+        let existing = PresetMeta {
+            tags: vec!["a".into(), "b".into()],
+            ..PresetMeta::default()
+        };
+        let merged = merge_meta(existing, None, None, vec!["c".into()]);
+        assert_eq!(merged.tags, vec!["c".to_string()]);
+    }
+
+    #[test]
+    fn meta_write_then_list_tail_reads_back() {
+        // Integration through the public API: a `meta`-style write must show up
+        // in the `list`-style read-back for the same preset path.
+        let dir = scratch("write-read");
+        let preset = dir.join("Rock.fac");
+        std::fs::write(&preset, "dummy").unwrap();
+        merge_meta(
+            PresetMeta::load_for(&preset).unwrap_or_default(),
+            Some("Jane".into()),
+            Some("V-shaped".into()),
+            vec!["rock".into()],
+        )
+        .save_for(&preset)
+        .unwrap();
+        assert_eq!(meta_tail(&preset).as_deref(), Some("Jane — V-shaped"));
+    }
+
+    #[test]
+    fn meta_tail_absent_without_sidecar() {
+        let dir = scratch("no-sidecar");
+        assert_eq!(meta_tail(&dir.join("plain.txt")), None);
+    }
+
+    #[test]
+    fn meta_tail_skips_tags_only_sidecars() {
+        // `list` appends author/description only; a tags-only sidecar must not
+        // leave a dangling separator on the line.
+        let dir = scratch("tags-only");
+        let preset = dir.join("t.fac");
+        PresetMeta {
+            tags: vec!["edm".into()],
+            ..PresetMeta::default()
+        }
+        .save_for(&preset)
+        .unwrap();
+        assert_eq!(meta_tail(&preset), None);
+    }
+
+    #[test]
+    fn meta_tail_uses_single_field_alone() {
+        let dir = scratch("desc-only");
+        let preset = dir.join("d.txt");
+        PresetMeta {
+            description: Some("flat studio".into()),
+            ..PresetMeta::default()
+        }
+        .save_for(&preset)
+        .unwrap();
+        assert_eq!(meta_tail(&preset).as_deref(), Some("flat studio"));
     }
 }
