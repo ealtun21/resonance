@@ -196,6 +196,7 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
         Command::SetConvolutionEnabled { enabled } => {
             handle_set_convolution_enabled(state, enabled)
         }
+        Command::CaptureOutput { frames } => handle_capture_output(state, frames),
         // The actual cleanup + exit happens in `handle_client` after this Ok is
         // flushed to the client (see the `is_shutdown` branch there).
         Command::Shutdown => Response::Ok,
@@ -357,6 +358,23 @@ fn handle_set_convolution_enabled(state: &SharedState, enabled: bool) -> Respons
         chain.convolution.set_enabled(enabled);
     });
     Response::Ok
+}
+
+/// Return the freshest `frames` post-DSP mono samples (the spectrum feed) with
+/// the live DSP rate, for the `resonance verify` harness. Shorter than asked
+/// while the rolling buffer is still filling; empty where the daemon owns no
+/// audio path (Windows — the APO does the DSP in audiodg).
+fn handle_capture_output(state: &SharedState, frames: u32) -> Response {
+    let inner = state.0.lock().unwrap();
+    let want = (frames as usize).min(crate::state::CAPTURE_BUF);
+    let have = inner.capture.len();
+    let take = have.min(want);
+    let samples: Vec<f32> = inner.capture.iter().skip(have - take).copied().collect();
+    let rate = inner
+        .meters
+        .sample_rate()
+        .unwrap_or(inner.chain.sample_rate);
+    Response::Capture { rate, samples }
 }
 
 /// Enable or bypass a single effect.
@@ -1301,6 +1319,37 @@ mod tests {
             other => panic!("expected Error, got {other:?}"),
         }
         assert!(state.snapshot().convolution.is_none());
+    }
+
+    #[tokio::test]
+    async fn capture_output_returns_freshest_samples_and_rate() {
+        let (state, _rx) = test_state();
+        // Empty buffer → empty (but well-formed) reply.
+        match dispatch(Command::CaptureOutput { frames: 128 }, &state).await {
+            Response::Capture { samples, rate } => {
+                assert!(samples.is_empty());
+                assert!(rate > 0.0);
+            }
+            other => panic!("expected Capture, got {other:?}"),
+        }
+        // Fill the rolling buffer; asking for fewer frames returns the TAIL
+        // (the freshest audio), not the head.
+        {
+            let mut inner = state.0.lock().unwrap();
+            inner.capture.extend((0..1000).map(|i| i as f32));
+        }
+        match dispatch(Command::CaptureOutput { frames: 10 }, &state).await {
+            Response::Capture { samples, .. } => {
+                let want: Vec<f32> = (990..1000).map(|i| f32::from(i as u16)).collect();
+                assert_eq!(samples, want, "must return the newest samples");
+            }
+            other => panic!("expected Capture, got {other:?}"),
+        }
+        // Asking for more than buffered returns everything available.
+        match dispatch(Command::CaptureOutput { frames: 1_000_000 }, &state).await {
+            Response::Capture { samples, .. } => assert_eq!(samples.len(), 1000),
+            other => panic!("expected Capture, got {other:?}"),
+        }
     }
 
     #[test]

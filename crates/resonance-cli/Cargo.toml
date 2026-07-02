@@ -17,6 +17,12 @@ clap = { workspace = true }
 clap_complete = { workspace = true }
 anyhow = { workspace = true }
 ureq = { workspace = true }
+# `verify` harness: tone generation (hound), FFT analysis (rustfft), baseline
+# JSON (serde/serde_json). All pure Rust — keeps the musl static build working.
+hound = { workspace = true }
+rustfft = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

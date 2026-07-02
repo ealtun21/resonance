@@ -10,6 +10,10 @@ use std::sync::{Arc, Mutex};
 
 pub const SPECTRUM_BINS: usize = 64;
 
+/// Rolling post-DSP capture depth in mono samples (~5.5 s at 48 kHz, 1 MiB).
+/// Serves `Command::CaptureOutput` for the `resonance verify` harness.
+pub const CAPTURE_BUF: usize = 1 << 18;
+
 /// Commands sent from the IPC/tokio thread to the RT audio thread.
 #[derive(Debug)]
 pub enum AudioCommand {
@@ -113,6 +117,11 @@ pub struct Inner {
     pub needs_resync: bool,
     /// Latest spectrum — updated by the spectrum task, read by IPC handler.
     pub spectrum: [f32; SPECTRUM_BINS],
+    /// Rolling buffer of the freshest post-DSP mono samples (fed by the
+    /// spectrum task from the RT sample ring, capped at [`CAPTURE_BUF`]).
+    /// Read by `CaptureOutput` so `resonance verify` can measure the live
+    /// output without a soundcard loopback.
+    pub capture: std::collections::VecDeque<f32>,
     /// Available `PipeWire` Audio/Sink names (updated by `pw_node`).
     pub available_sinks: Vec<String>,
     /// Friendly `node.description` per sink as `(node_name, description)` (updated by `pw_node`).
@@ -167,6 +176,7 @@ impl SharedState {
             audio_tx,
             needs_resync: false,
             spectrum: [0.0; SPECTRUM_BINS],
+            capture: std::collections::VecDeque::with_capacity(CAPTURE_BUF),
             available_sinks: Vec::new(),
             sink_descriptions: Vec::new(),
             preferred_output: None,

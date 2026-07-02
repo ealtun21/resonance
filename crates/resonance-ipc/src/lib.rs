@@ -288,6 +288,10 @@ pub enum Command {
     ClearConvolutionIr,
     /// Bypass or re-arm the convolution stage without dropping the loaded IR.
     SetConvolutionEnabled { enabled: bool },
+    /// Return the freshest post-DSP output samples the daemon has buffered
+    /// (mono, channel-averaged — the spectrum feed). Powers the `resonance
+    /// verify` live audio-path harness.
+    CaptureOutput { frames: u32 },
 }
 
 /// One of the two in-memory comparison slots for quick A/B auditioning.
@@ -563,6 +567,15 @@ pub enum Response {
     /// List of output→profile mappings (output node.name, profile name)
     Mappings(Vec<(String, String)>),
     Error(String),
+    /// Raw post-DSP capture (reply to `CaptureOutput`): the DSP rate the
+    /// samples were produced at, plus the freshest mono samples oldest-first.
+    /// May be shorter than requested while the buffer is still filling; empty
+    /// on platforms where the daemon owns no audio path (Windows/APO).
+    /// Appended LAST — postcard encodes variants by ordinal (see `Command`).
+    Capture {
+        rate: f64,
+        samples: Vec<f32>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -903,6 +916,7 @@ mod tests {
         });
         command_round_trip(&Command::ClearConvolutionIr);
         command_round_trip(&Command::SetConvolutionEnabled { enabled: false });
+        command_round_trip(&Command::CaptureOutput { frames: 48_000 });
         command_round_trip(&Command::SetBandChannels {
             index: 1,
             channels: ChannelMask::from_indices([0, 2, 4]),
@@ -1225,6 +1239,10 @@ mod tests {
             Response::Imported("rock".into()),
             Response::Mappings(vec![("dev".into(), "prof".into())]),
             Response::Error("boom".into()),
+            Response::Capture {
+                rate: 48_000.0,
+                samples: vec![0.0, 0.5, -0.5],
+            },
         ] {
             let bytes = to_stdvec(&r).expect("encode");
             let _: Response = from_bytes(&bytes).expect("decode");

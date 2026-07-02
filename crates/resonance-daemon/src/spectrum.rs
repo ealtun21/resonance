@@ -126,6 +126,7 @@ pub async fn run(mut rx: rtrb::Consumer<f32>, state: SharedState) {
 
     // Reused across iterations so the 40 Hz loop never allocates.
     let mut fft_buf: Vec<Complex<f32>> = vec![Complex::new(0.0, 0.0); FFT_SIZE];
+    let mut drained: Vec<f32> = Vec::with_capacity(8192);
 
     let mut interval = tokio::time::interval(Duration::from_millis(25)); // ~40 fps
 
@@ -134,13 +135,28 @@ pub async fn run(mut rx: rtrb::Consumer<f32>, state: SharedState) {
 
         // Always drain the ring so it can't back up, even while idle.
         let available = rx.slots();
+        drained.clear();
         for _ in 0..available {
             if let Ok(s) = rx.pop() {
                 buf[write_pos % FFT_SIZE] = s;
                 write_pos += 1;
+                drained.push(s);
             }
         }
         env.note_feed(available > 0);
+
+        // Mirror the fresh samples into the rolling capture buffer that backs
+        // `CaptureOutput` (the `resonance verify` harness). One lock per tick.
+        if !drained.is_empty() {
+            let mut inner = state.0.lock().unwrap();
+            let cap = &mut inner.capture;
+            for &s in &drained {
+                if cap.len() == crate::state::CAPTURE_BUF {
+                    cap.pop_front();
+                }
+                cap.push_back(s);
+            }
+        }
 
         if write_pos < FFT_SIZE {
             continue;
