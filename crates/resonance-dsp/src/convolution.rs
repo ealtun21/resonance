@@ -847,7 +847,7 @@ mod downsample_repro {
         let out = resample_ir(&delta, 96_000.0, 48_000.0);
         assert_eq!(out.len(), 32);
         let dc: f64 = out.iter().sum();
-        let peak = out.iter().cloned().fold(0.0f64, |a, b| a.max(b.abs()));
+        let peak = out.iter().copied().fold(0.0f64, |a, b| a.max(b.abs()));
         assert!(
             (dc - 1.0).abs() < 0.05,
             "DC gain should stay ~1.0 after 96k→48k, got {dc:.4} (peak {peak:.4})"
