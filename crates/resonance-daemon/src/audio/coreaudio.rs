@@ -73,7 +73,7 @@ fn spawn_app_enumeration(
                 if apps_tx.send(apps).is_err() {
                     break;
                 }
-                thread::sleep(Duration::from_millis(1000));
+                thread::sleep(Duration::from_secs(1));
             }
         })
         .ok();

@@ -112,20 +112,17 @@ fn load_ir_blob(
     if snap.convolution_generation == 0 {
         return None;
     }
-    match state::read_ir_blob(&state::default_ir_path()) {
-        Some((generation, ir)) => {
-            log::line(&format!(
-                "IR blob loaded: gen {generation}, {} ch, {} frames @ {} Hz",
-                ir.channels.len(),
-                ir.frames(),
-                ir.sample_rate
-            ));
-            Some(std::sync::Arc::new(ir))
-        }
-        None => {
-            log::line("IR blob referenced by snapshot but unreadable — convolution off");
-            None
-        }
+    if let Some((generation, ir)) = state::read_ir_blob(&state::default_ir_path()) {
+        log::line(&format!(
+            "IR blob loaded: gen {generation}, {} ch, {} frames @ {} Hz",
+            ir.channels.len(),
+            ir.frames(),
+            ir.sample_rate
+        ));
+        Some(std::sync::Arc::new(ir))
+    } else {
+        log::line("IR blob referenced by snapshot but unreadable — convolution off");
+        None
     }
 }
 
