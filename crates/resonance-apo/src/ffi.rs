@@ -744,7 +744,7 @@ mod hires_harness {
                     .build(),
             );
         }
-        let _ = std::fs::remove_file(state::default_ir_path());
+        let _ = std::fs::remove_file(crate::state::default_ir_path());
     }
 
     // These share `default_state_path()` and global engine state with the rate
