@@ -3,7 +3,7 @@ use crate::state::{AppControl, AudioCommand, SharedState, SinkCtl};
 use anyhow::Result;
 use resonance_dsp::chain::ProcessorChain;
 use resonance_dsp::channel::{ChannelMask as DspMask, ChannelMatrix};
-use resonance_dsp::convolution::{ConvolutionEngine, MAX_IR_SECONDS};
+use resonance_dsp::convolution::{ConvolutionEngine, IrData, MAX_IR_SECONDS};
 use resonance_dsp::filter::{ApoFilter, FilterError, FilterType};
 use resonance_ipc::{
     AbSlot, BandScope, BandState, BandType, ChannelMask, Command, EffectsState, FxEffectId,
@@ -323,6 +323,10 @@ async fn handle_set_convolution_ir(state: &SharedState, path: String) -> Respons
     .await;
     match prepared {
         Ok(Ok(engine)) => {
+            info!(
+                "impulse response loaded: {}",
+                engine.info().map_or_else(String::new, |i| i.path)
+            );
             state.send(
                 AudioCommand::SetConvolution(Box::new(engine.clone())),
                 move |chain| {
@@ -345,6 +349,7 @@ fn handle_clear_convolution(state: &SharedState) -> Response {
     state.send(AudioCommand::ClearConvolution, |chain| {
         chain.convolution.clear();
     });
+    info!("impulse response cleared");
     Response::Ok
 }
 
@@ -401,6 +406,9 @@ async fn handle_load_preset(state: &SharedState, path: String) -> Response {
     match tokio::task::spawn_blocking(move || parse_preset_file(&p)).await {
         Ok(Ok(preset)) => {
             apply_preset(&preset, state);
+            // Chain-replacing commands are logged (issue #43): a surprising
+            // chain state must be explainable from the daemon log alone.
+            info!("preset loaded: {path}");
             state.0.lock().unwrap().current_preset = Some(path);
             Response::Ok
         }
@@ -429,6 +437,7 @@ fn handle_save_profile(state: &SharedState, name: &str) -> Response {
 fn handle_load_profile(state: &SharedState, name: String) -> Response {
     match load_profile(&name, state) {
         Ok(()) => {
+            info!("profile loaded: {name}");
             state.0.lock().unwrap().current_preset = Some(name);
             Response::Ok
         }
@@ -810,6 +819,7 @@ fn handle_apply_state(
         }),
     };
     apply_profile_chain(&profile, state);
+    info!("bulk state applied (ApplyState: undo/redo or bulk edit)");
     Response::Ok
 }
 
@@ -817,6 +827,7 @@ fn handle_apply_state(
 /// current-preset marker.
 fn handle_reset(state: &SharedState) -> Response {
     state.rebuild_chain(flat_chain);
+    info!("chain reset to defaults");
     state.0.lock().unwrap().current_preset = None;
     Response::Ok
 }
@@ -850,6 +861,7 @@ fn handle_recall_slot(state: &SharedState, slot: AbSlot) -> Response {
     match stored {
         Some(profile) => {
             apply_profile_chain(&profile, state);
+            info!("A/B slot recalled");
             Response::Ok
         }
         None => Response::Error("slot is empty — store it first".to_string()),
@@ -913,7 +925,8 @@ fn slot_index(slot: AbSlot) -> usize {
     }
 }
 
-/// Render the daemon's current preamp + bands as `EqualizerAPO` `.txt` text.
+/// Render the daemon's current preamp + bands as `EqualizerAPO` `.txt` text,
+/// including a `Convolution:` directive when an IR is loaded (issue #40).
 fn export_apo_text(snap: &resonance_ipc::DaemonState) -> String {
     let bands: Vec<EqBand> = snap
         .bands
@@ -927,7 +940,8 @@ fn export_apo_text(snap: &resonance_ipc::DaemonState) -> String {
             channels: b.channels.0,
         })
         .collect();
-    write_apo(snap.preamp_db, &bands)
+    let ir = snap.convolution.as_ref().map(|c| c.path.as_str());
+    write_apo(snap.preamp_db, &bands, ir)
 }
 
 fn band_type_to_apo(t: BandType) -> ApoFilterType {
@@ -944,16 +958,29 @@ fn band_type_to_apo(t: BandType) -> ApoFilterType {
 }
 
 /// Read + parse a preset file, dispatching on extension (`.fac` vs APO `.txt`).
+///
+/// A relative `Convolution:` impulse-response path is resolved against the
+/// preset file's own directory (`EqualizerAPO` semantics), so the stored path is
+/// always loadable no matter the daemon's working directory.
 fn parse_preset_file(path: &str) -> Result<resonance_preset::model::Preset, String> {
     let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let is_fac = std::path::Path::new(path)
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("fac"));
-    if is_fac {
-        parse_fac(&content).map_err(|e| e.to_string())
+    let mut preset = if is_fac {
+        parse_fac(&content).map_err(|e| e.to_string())?
     } else {
-        parse_apo(&content).map_err(|e| e.to_string())
+        parse_apo(&content).map_err(|e| e.to_string())?
+    };
+    if let Some(ir) = preset.convolution.as_mut() {
+        let p = std::path::Path::new(ir.as_str());
+        if p.is_relative() {
+            if let Some(dir) = std::path::Path::new(path).parent() {
+                *ir = dir.join(p).to_string_lossy().into_owned();
+            }
+        }
     }
+    Ok(preset)
 }
 
 /// Default profile name for an imported file: its stem (e.g. `Rock.fac` → `Rock`).
@@ -994,9 +1021,44 @@ fn import_preset(path: &str, name: Option<String>) -> Response {
     }
 }
 
-/// Build the DSP chain from an already-parsed preset and swap it in.
+/// Build the DSP chain from an already-parsed preset and swap it in, loading
+/// the preset's `Convolution:` impulse response when it carries one.
 fn apply_preset(preset: &resonance_preset::model::Preset, state: &SharedState) {
-    state.rebuild_chain(|ch, sr| preset.clone().into_chain(ch, sr));
+    let ir = preset
+        .convolution
+        .as_deref()
+        .and_then(|path| load_ir_reusing_live(state, path));
+    state.rebuild_chain(|ch, sr| {
+        let mut chain = preset.clone().into_chain(ch, sr);
+        if let Some(ir) = ir.clone() {
+            if let Err(e) = chain.convolution.load_ir(ir) {
+                warn!("preset convolution IR not loaded: {e}");
+            }
+        }
+        chain
+    });
+}
+
+/// Decode an IR for a chain rebuild, reusing the live chain's already-decoded
+/// samples when the path matches (undo/redo and preset re-loads skip the disk).
+/// A missing/corrupt file degrades to a warning, never a failed apply.
+fn load_ir_reusing_live(state: &SharedState, path: &str) -> Option<std::sync::Arc<IrData>> {
+    let live = {
+        let inner = state.0.lock().unwrap();
+        inner
+            .chain
+            .convolution
+            .source()
+            .filter(|s| s.path == path)
+            .cloned()
+    };
+    live.or_else(|| match crate::ir::load_wav_ir(path) {
+        Ok(data) => Some(std::sync::Arc::new(data)),
+        Err(e) => {
+            warn!("convolution IR not loaded: {e}");
+            None
+        }
+    })
 }
 
 /// Load a named profile from the config dir and apply it to the chain.
@@ -1013,24 +1075,10 @@ fn load_profile(name: &str, state: &SharedState) -> Result<(), String> {
 /// A/B recall never re-hit the disk). A missing or corrupt IR file drops the
 /// stage with a warning instead of failing the whole profile apply.
 pub(crate) fn apply_profile_chain(profile: &Profile, state: &SharedState) {
-    let ir = profile.convolution.as_ref().and_then(|conv| {
-        let live = {
-            let inner = state.0.lock().unwrap();
-            inner
-                .chain
-                .convolution
-                .source()
-                .filter(|s| s.path == conv.path)
-                .cloned()
-        };
-        live.or_else(|| match crate::ir::load_wav_ir(&conv.path) {
-            Ok(data) => Some(std::sync::Arc::new(data)),
-            Err(e) => {
-                warn!("convolution IR not restored: {e}");
-                None
-            }
-        })
-    });
+    let ir = profile
+        .convolution
+        .as_ref()
+        .and_then(|conv| load_ir_reusing_live(state, &conv.path));
     let conv_enabled = profile.convolution.as_ref().is_some_and(|c| c.enabled);
     state.rebuild_chain(|ch, sr| {
         let mut chain = profile.clone().into_chain(ch, sr);

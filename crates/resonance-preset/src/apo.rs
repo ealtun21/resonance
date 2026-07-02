@@ -10,7 +10,9 @@ pub enum ApoError {
 
 /// Parse an `EqualizerAPO` .txt config file.
 /// Supported directives: Preamp, Filter (ON/OFF PK/LS/HS/LP/HP/BP/NO/AP),
-/// `GraphicEQ`, Channel (per-channel targeting); Include is ignored.
+/// `GraphicEQ`, Channel (per-channel targeting), Convolution (impulse-response
+/// path, kept verbatim — the loader resolves relative paths); Include is
+/// ignored.
 ///
 /// # Errors
 ///
@@ -19,6 +21,7 @@ pub enum ApoError {
 pub fn parse_apo(content: &str) -> Result<Preset, ApoError> {
     let mut bands = Vec::new();
     let mut preamp_db = 0.0f64;
+    let mut convolution: Option<String> = None;
     // A `Channel:` directive scopes every following Filter/GraphicEQ to a subset
     // of channels until the next `Channel:` line. Default: all channels.
     let mut current_channels = u64::MAX;
@@ -38,6 +41,16 @@ pub fn parse_apo(content: &str) -> Result<Preset, ApoError> {
 
         if let Some(rest) = line.strip_prefix("Channel:") {
             current_channels = parse_channel_line(rest);
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix("Convolution:") {
+            let path = rest.trim();
+            if !path.is_empty() {
+                // Last directive wins, mirroring EqualizerAPO (a later
+                // Convolution line replaces the active IR).
+                convolution = Some(path.to_string());
+            }
             continue;
         }
 
@@ -69,6 +82,7 @@ pub fn parse_apo(content: &str) -> Result<Preset, ApoError> {
         eq_enabled: !bands.is_empty(),
         bands,
         effects: crate::model::FxEffects::default(),
+        convolution,
     })
 }
 
@@ -240,11 +254,15 @@ fn channel_bits_to_names(bits: u64) -> Vec<String> {
 ///
 /// Inverse of [`parse_apo`] for the subset we model (per-band `Filter` lines;
 /// the `GraphicEQ` shorthand is not re-emitted — every band becomes an explicit
-/// `Filter` line so the type/Q survive the round-trip).
+/// `Filter` line so the type/Q survive the round-trip). `convolution` emits an
+/// `EqualizerAPO` `Convolution:` directive referencing the impulse response.
 #[must_use]
-pub fn write_apo(preamp_db: f64, bands: &[EqBand]) -> String {
+pub fn write_apo(preamp_db: f64, bands: &[EqBand], convolution: Option<&str>) -> String {
     let mut out = String::new();
     writeln!(out, "Preamp: {preamp_db:.1} dB").unwrap();
+    if let Some(ir) = convolution {
+        writeln!(out, "Convolution: {ir}").unwrap();
+    }
     // APO scopes filters to the most recent `Channel:` directive (default: all).
     // Emit one only when a band's target differs from what's currently in scope,
     // so all-global band sets round-trip with no `Channel:` lines at all.
@@ -429,6 +447,34 @@ mod tests {
     }
 
     #[test]
+    fn convolution_directive_parses_and_round_trips() {
+        // Parse: last directive wins; empty value ignored; path kept verbatim
+        // (resolution against the config dir is the loader's job).
+        let p = parse_apo(
+            "Preamp: -3 dB\nConvolution: old.wav\nConvolution:\nConvolution: irs/room.wav\n\
+             Filter 1: ON PK Fc 1000 Hz Gain 3 dB Q 1.0\n",
+        )
+        .unwrap();
+        assert_eq!(p.convolution.as_deref(), Some("irs/room.wav"));
+        assert_eq!(p.bands.len(), 1);
+
+        // Write: directive emitted with the IR, absent without.
+        let text = write_apo(p.preamp_db, &p.bands, p.convolution.as_deref());
+        assert!(text.contains("Convolution: irs/room.wav"), "{text}");
+        let back = parse_apo(&text).unwrap();
+        assert_eq!(back.convolution.as_deref(), Some("irs/room.wav"));
+
+        let no_ir = write_apo(0.0, &p.bands, None);
+        assert!(!no_ir.contains("Convolution"), "{no_ir}");
+        assert!(
+            parse_apo("Filter 1: ON PK Fc 100 Hz Gain 1 dB Q 1\n")
+                .unwrap()
+                .convolution
+                .is_none()
+        );
+    }
+
+    #[test]
     fn write_apo_round_trips_through_parser() {
         let bands = vec![
             EqBand {
@@ -456,7 +502,7 @@ mod tests {
                 channels: u64::MAX,
             },
         ];
-        let text = write_apo(-6.0, &bands);
+        let text = write_apo(-6.0, &bands, None);
         let re = parse_apo(&text).unwrap();
         assert!((re.preamp_db - (-6.0)).abs() < 1e-9);
         assert_eq!(re.bands.len(), 3);
@@ -520,7 +566,7 @@ mod tests {
                 channels: u64::MAX, // all
             },
         ];
-        let text = write_apo(0.0, &bands);
+        let text = write_apo(0.0, &bands, None);
         assert!(
             text.contains("Channel: L\n"),
             "missing L directive:\n{text}"
@@ -565,7 +611,7 @@ mod tests {
             enabled: true,
             channels: 1u64 << 8,
         }];
-        let text = write_apo(0.0, &bands);
+        let text = write_apo(0.0, &bands, None);
         assert!(
             text.contains("Channel: 9"),
             "expected numeric token:\n{text}"
@@ -585,7 +631,7 @@ mod tests {
             enabled: true,
             channels: u64::MAX,
         }];
-        let text = write_apo(0.0, &bands);
+        let text = write_apo(0.0, &bands, None);
         assert!(!text.contains("Channel:"), "unexpected directive:\n{text}");
     }
 
@@ -601,7 +647,7 @@ mod tests {
             enabled: true,
             channels: 0,
         }];
-        let text = write_apo(0.0, &bands);
+        let text = write_apo(0.0, &bands, None);
         assert!(
             !text.contains("Channel:"),
             "empty mask must not emit a Channel directive:\n{text}"
@@ -712,7 +758,7 @@ mod tests {
                 enabled: true,
                 channels: u64::MAX,
             };
-            let text = write_apo(0.0, &[band]);
+            let text = write_apo(0.0, &[band], None);
             let re = parse_apo(&text).unwrap();
             assert_eq!(re.bands[0].filter_type, t, "keyword round-trip for {t:?}");
         }
