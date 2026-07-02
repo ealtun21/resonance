@@ -41,6 +41,91 @@ pub enum BandScope {
     Side,
 }
 
+/// Per-band dynamic EQ parameters: the band's gain morphs from `gain_db`
+/// toward `gain_db + range_db` as the in-band level rises past `threshold_db`
+/// (feed-forward sidechain, zero added latency). See `ApoFilter::set_dynamics`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DynParams {
+    /// Detector level (dBFS) where the morph starts.
+    pub threshold_db: f64,
+    /// Signed max gain offset: negative = cut when loud (de-ess), positive =
+    /// boost when loud.
+    pub range_db: f64,
+    /// Detector attack time constant (ms).
+    pub attack_ms: f64,
+    /// Detector release time constant (ms).
+    pub release_ms: f64,
+}
+
+impl DynParams {
+    pub const DEFAULT: Self = Self {
+        threshold_db: -30.0,
+        range_db: -6.0,
+        attack_ms: 5.0,
+        release_ms: 150.0,
+    };
+
+    /// Clamp every field into its supported range; non-finite values (hostile
+    /// IPC/profile input) fall back to that field's default — same posture as
+    /// the Q/gain coercion in `ApoFilter::update`.
+    #[must_use]
+    pub fn clamped(self) -> Self {
+        let sane = |v: f64, lo: f64, hi: f64, default: f64| {
+            if v.is_finite() {
+                v.clamp(lo, hi)
+            } else {
+                default
+            }
+        };
+        Self {
+            threshold_db: sane(self.threshold_db, -80.0, 0.0, Self::DEFAULT.threshold_db),
+            range_db: sane(self.range_db, -24.0, 24.0, Self::DEFAULT.range_db),
+            attack_ms: sane(self.attack_ms, 0.1, 500.0, Self::DEFAULT.attack_ms),
+            release_ms: sane(self.release_ms, 1.0, 5000.0, Self::DEFAULT.release_ms),
+        }
+    }
+}
+
+/// Runtime state of a band's dynamics: linked band-pass sidechain → one-pole
+/// peak envelope → gain-offset morph of the head peaking biquad.
+#[derive(Debug, Clone)]
+struct DynState {
+    params: DynParams,
+    /// Band-pass at the band's Fc/Q — only in-band energy triggers the morph.
+    sc_coeffs: BiquadCoeffs,
+    /// ONE detector state (linked): every channel gets the same offset so the
+    /// stereo image never wobbles.
+    sc_state: BiquadState,
+    /// Linear peak envelope of the rectified sidechain.
+    env: f64,
+    /// One-pole smoothing coefficients derived from attack/release + rate.
+    att: f64,
+    rel: f64,
+    /// Cached trig of the head peaking biquad — its ω-terms don't depend on
+    /// gain, so a morph only recomputes the gain factor.
+    cos_w0: f64,
+    alpha: f64,
+    /// Currently applied gain offset (dB).
+    offset_db: f64,
+}
+
+fn make_dyn_state(params: DynParams, freq: f64, q: f64, sr: f64) -> Result<DynState, FilterError> {
+    let params = params.clamped();
+    let sc_coeffs = BiquadCoeffs::band_pass(freq, q, sr)?;
+    let w0 = 2.0 * PI * freq / sr;
+    Ok(DynState {
+        params,
+        sc_coeffs,
+        sc_state: BiquadState::default(),
+        env: 0.0,
+        att: 1.0 - (-1000.0 / (params.attack_ms * sr)).exp(),
+        rel: 1.0 - (-1000.0 / (params.release_ms * sr)).exp(),
+        cos_w0: w0.cos(),
+        alpha: w0.sin() / (2.0 * q),
+        offset_db: 0.0,
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct BiquadCoeffs {
     pub b0: f64,
@@ -335,6 +420,10 @@ pub struct ApoFilter {
     /// Extra cascaded sections for steeper slopes (empty at 12 dB/oct, so the
     /// common path is byte-identical to a single biquad).
     extra: Vec<BiquadFilter>,
+    /// Dynamic EQ state (level-driven gain morph). Invariant: only ever
+    /// `Some` on a `Peaking` band — the single-biquad type whose gain-only
+    /// coefficient morph is cheap from cached trig.
+    dyn_state: Option<DynState>,
 }
 
 impl ApoFilter {
@@ -357,6 +446,7 @@ pub struct ApoFilterBuilder {
     sample_rate: Option<f64>,
     // `ChannelMask::default()` is `ALL`, so an unset mask targets every channel.
     channel_mask: ChannelMask,
+    dynamics: Option<DynParams>,
 }
 
 impl ApoFilterBuilder {
@@ -425,6 +515,15 @@ impl ApoFilterBuilder {
         self
     }
 
+    /// Attach dynamic EQ parameters (level-driven gain morph). Only honoured
+    /// on `Peaking` bands — silently ignored elsewhere (front-ends gate the
+    /// control on [`super::filter::FilterType::Peaking`]).
+    #[must_use]
+    pub fn dynamics(mut self, params: Option<DynParams>) -> Self {
+        self.dynamics = params;
+        self
+    }
+
     /// # Errors
     /// Returns [`FilterError`] if the resolved `freq`/`sample_rate` are non-finite
     /// or out of range (`freq` must be in `(0, sample_rate/2)`, `sample_rate > 0`).
@@ -455,6 +554,10 @@ impl ApoFilterBuilder {
             .into_iter()
             .map(|c| BiquadFilter::new(c, channels))
             .collect();
+        let dyn_state = match self.dynamics {
+            Some(p) if filter_type == FilterType::Peaking => Some(make_dyn_state(p, freq, q, sr)?),
+            _ => None,
+        };
 
         Ok(ApoFilter {
             filter_type,
@@ -468,6 +571,7 @@ impl ApoFilterBuilder {
             realizable: true,
             biquad: BiquadFilter::new(head, channels),
             extra,
+            dyn_state,
         })
     }
 }
@@ -638,7 +742,105 @@ impl ApoFilter {
                 .map(|c| BiquadFilter::new(*c, channels))
                 .collect();
         }
+        // Re-derive the dynamics detector at the new freq/q/rate. The head was
+        // just set to the static response, so the applied offset restarts at 0
+        // (the envelope carries over — a live param edit shouldn't retrigger
+        // the attack). Dynamics are dropped if the type left Peaking.
+        if let Some(d) = self.dyn_state.take() {
+            if filter_type == FilterType::Peaking {
+                let mut fresh = make_dyn_state(d.params, freq, q, sr)?;
+                fresh.env = d.env;
+                fresh.sc_state = d.sc_state;
+                self.dyn_state = Some(fresh);
+            }
+        }
         Ok(())
+    }
+
+    /// Set (or clear) the band's dynamic EQ. `Some` is only honoured on
+    /// `Peaking` bands — other types clear silently (front-ends gate the
+    /// control). The head coefficients are restored to the static response;
+    /// the morph re-engages from the incoming signal.
+    ///
+    /// # Errors
+    /// Returns [`FilterError`] if the current parameters are not realisable at
+    /// `sr` (same conditions as [`Self::update`]).
+    pub fn set_dynamics(&mut self, params: Option<DynParams>, sr: f64) -> Result<(), FilterError> {
+        self.dyn_state = match params {
+            Some(p) if self.filter_type == FilterType::Peaking => {
+                Some(make_dyn_state(p, self.freq, self.q, sr)?)
+            }
+            _ => None,
+        };
+        // Restore the static head coefficients (a previous morph may be live).
+        self.update(self.filter_type, self.freq, self.gain_db, self.q, sr)
+    }
+
+    /// The band's dynamic EQ parameters (clamped), when set.
+    #[must_use]
+    pub fn dynamics(&self) -> Option<DynParams> {
+        self.dyn_state.as_ref().map(|d| d.params)
+    }
+
+    /// Whether the dynamics morph is currently running (set + band active).
+    /// The chain uses this to pick the frame-major detection path.
+    #[must_use]
+    pub fn dynamics_active(&self) -> bool {
+        self.enabled && self.realizable && self.dyn_state.is_some()
+    }
+
+    /// Per-frame dynamics hook: feed one detector sample (the band's input —
+    /// masked-channel mean, or the Mid/Side value), update the envelope and
+    /// morph the head gain when the offset moved. Call **before** processing
+    /// the frame's channels. No-op without active dynamics.
+    #[inline]
+    pub fn dyn_detect(&mut self, det: f64) {
+        if !self.enabled || !self.realizable {
+            return;
+        }
+        let Some(d) = &mut self.dyn_state else {
+            return;
+        };
+        let sc = d.sc_state.process(det, &d.sc_coeffs).abs();
+        let coef = if sc > d.env { d.att } else { d.rel };
+        d.env += coef * (sc - d.env);
+        let over = 20.0 * d.env.max(1e-8).log10() - d.params.threshold_db;
+        let target = if over <= 0.0 {
+            0.0
+        } else {
+            over.min(d.params.range_db.abs()) * d.params.range_db.signum()
+        };
+        if (target - d.offset_db).abs() > 0.01 {
+            self.dyn_apply_offset(target);
+        }
+    }
+
+    /// Detector + filter in one call, for paths where the detector sample is
+    /// the processed sample itself (the Mid/Side branch). Identical to
+    /// `process_channel` when the band has no active dynamics.
+    #[inline]
+    pub fn dyn_process(&mut self, sample: f64, channel: usize) -> f64 {
+        self.dyn_detect(sample);
+        self.process_channel(sample, channel)
+    }
+
+    /// Recompute the head peaking coefficients for `gain_db + offset` from the
+    /// cached trig — the gain-only morph (mirrors [`BiquadCoeffs::peaking`],
+    /// including its `1 + α/A` normalisation).
+    fn dyn_apply_offset(&mut self, offset_db: f64) {
+        let Some(d) = &mut self.dyn_state else {
+            return;
+        };
+        d.offset_db = offset_db;
+        let a = 10f64.powf((self.gain_db + offset_db) / 40.0);
+        let a0 = 1.0 + d.alpha / a;
+        self.biquad.coeffs = BiquadCoeffs {
+            b0: (1.0 + d.alpha * a) / a0,
+            b1: (-2.0 * d.cos_w0) / a0,
+            b2: (1.0 - d.alpha * a) / a0,
+            a1: (-2.0 * d.cos_w0) / a0,
+            a2: (1.0 - d.alpha / a) / a0,
+        };
     }
 
     /// Change the slope (12/24/48 dB/oct) and rebuild the section cascade at `sr`.
@@ -655,6 +857,13 @@ impl ApoFilter {
     pub fn reset(&mut self) {
         self.biquad.reset();
         self.extra.iter_mut().for_each(BiquadFilter::reset);
+        // Clear the detector AND restore the static head — a stale morphed
+        // coefficient set surviving a reset would misreport the band's gain.
+        if let Some(d) = &mut self.dyn_state {
+            d.sc_state.reset();
+            d.env = 0.0;
+            self.dyn_apply_offset(0.0);
+        }
     }
 
     /// Resize per-channel filter state to `channels` (device renegotiation). The
@@ -1074,5 +1283,252 @@ mod tests {
             (g - 6.0).abs() < 0.5,
             "peaking +6 dB unaffected by slope: {g:.2}"
         );
+    }
+
+    // ── Dynamic EQ (per-band level-driven gain morph) ───────────────────────
+
+    /// Shared test params: −25 dBFS threshold leaves a wide margin above the
+    /// −6 dBFS loud probe and below the out-of-band detector leakage.
+    const DP: DynParams = DynParams {
+        threshold_db: -25.0,
+        range_db: -6.0,
+        attack_ms: 5.0,
+        release_ms: 150.0,
+    };
+
+    fn dyn_build(freq: f64, gain_db: f64, q: f64, p: Option<DynParams>, sr: f64) -> ApoFilter {
+        ApoFilter::builder()
+            .filter_type(FilterType::Peaking)
+            .freq(freq)
+            .gain_db(gain_db)
+            .q(q)
+            .dynamics(p)
+            .enabled(true)
+            .channels(1)
+            .sample_rate(sr)
+            .build()
+            .unwrap()
+    }
+
+    /// Drive a mono sine through detector + filter; RMS gain in dB over
+    /// `window` (sample indices) relative to the steady sine input RMS.
+    fn dyn_windowed_gain_db(
+        f: &mut ApoFilter,
+        freq: f64,
+        amp: f64,
+        total: usize,
+        window: std::ops::Range<usize>,
+        sr: f64,
+    ) -> f64 {
+        let mut sq = 0.0;
+        for i in 0..total {
+            let x = amp * (2.0 * PI * freq * i as f64 / sr).sin();
+            f.dyn_detect(x);
+            let y = f.process_channel(x, 0);
+            if window.contains(&i) {
+                sq += y * y;
+            }
+        }
+        let orms = (sq / window.len() as f64).sqrt();
+        20.0 * (orms / (amp / std::f64::consts::SQRT_2)).log10()
+    }
+
+    /// Settled gain: RMS over the last quarter of a 16384-sample drive.
+    fn dyn_settled_gain_db(f: &mut ApoFilter, freq: f64, amp: f64, sr: f64) -> f64 {
+        let total = 16384;
+        dyn_windowed_gain_db(f, freq, amp, total, total * 3 / 4..total, sr)
+    }
+
+    #[test]
+    fn dyn_below_threshold_matches_static_band() {
+        // −40 dBFS probe vs −30 threshold: the morph never engages, so the
+        // dynamic band must be bit-identical to its static twin.
+        let p = DynParams {
+            threshold_db: -30.0,
+            ..DP
+        };
+        let mut dynamic = dyn_build(1000.0, 6.0, 1.0, Some(p), SR);
+        let mut fixed = dyn_build(1000.0, 6.0, 1.0, None, SR);
+        for i in 0..4096 {
+            let x = 0.01 * (2.0 * PI * 1000.0 * f64::from(i) / SR).sin();
+            dynamic.dyn_detect(x);
+            fixed.dyn_detect(x);
+            let a = dynamic.process_channel(x, 0);
+            let b = fixed.process_channel(x, 0);
+            assert_eq!(a.to_bits(), b.to_bits(), "diverged at sample {i}");
+        }
+    }
+
+    #[test]
+    fn dyn_full_morph_reaches_range() {
+        // −6 dBFS probe overshoots the −25 threshold by 19 dB ≫ |range| = 6,
+        // so the settled gain hits the full range cut.
+        let mut f = dyn_build(1000.0, 0.0, 1.0, Some(DP), SR);
+        let g = dyn_settled_gain_db(&mut f, 1000.0, 0.5, SR);
+        assert!((g - (-6.0)).abs() < 0.5, "full morph: got {g:.2} dB");
+    }
+
+    #[test]
+    fn dyn_partial_morph_tracks_overshoot() {
+        // Probe at −27 dBFS over a −30 threshold = 3 dB overshoot → −3 dB
+        // offset (1:1 growth below the range cap).
+        let p = DynParams {
+            threshold_db: -30.0,
+            ..DP
+        };
+        let mut f = dyn_build(1000.0, 0.0, 1.0, Some(p), SR);
+        let amp = 10f64.powf(-27.0 / 20.0);
+        let g = dyn_settled_gain_db(&mut f, 1000.0, amp, SR);
+        assert!((g - (-3.0)).abs() < 0.7, "partial morph: got {g:.2} dB");
+    }
+
+    #[test]
+    fn dyn_positive_range_boosts_when_loud() {
+        let p = DynParams {
+            range_db: 6.0,
+            ..DP
+        };
+        let mut f = dyn_build(1000.0, 0.0, 1.0, Some(p), SR);
+        let g = dyn_settled_gain_db(&mut f, 1000.0, 0.5, SR);
+        assert!((g - 6.0).abs() < 0.5, "positive range: got {g:.2} dB");
+    }
+
+    #[test]
+    fn dyn_attack_setting_controls_engage_speed() {
+        // 10–20 ms after a loud onset, a 2 ms attack has mostly morphed while
+        // a 200 ms attack has barely moved.
+        let fast = DynParams {
+            attack_ms: 2.0,
+            ..DP
+        };
+        let slow = DynParams {
+            attack_ms: 200.0,
+            ..DP
+        };
+        let win = 480..960; // 10–20 ms at 48 kHz
+        let mut ff = dyn_build(1000.0, 0.0, 1.0, Some(fast), SR);
+        let gf = dyn_windowed_gain_db(&mut ff, 1000.0, 0.5, 960, win.clone(), SR);
+        let mut fs = dyn_build(1000.0, 0.0, 1.0, Some(slow), SR);
+        let gs = dyn_windowed_gain_db(&mut fs, 1000.0, 0.5, 960, win, SR);
+        assert!(
+            gf < -4.0,
+            "fast attack should be mostly engaged: {gf:.2} dB"
+        );
+        assert!(gs > -2.0, "slow attack should barely move: {gs:.2} dB");
+    }
+
+    #[test]
+    fn dyn_release_setting_controls_recovery_speed() {
+        // Loud phase, then a −60 dBFS probe phase: 30–40 ms in, a 10 ms
+        // release has recovered while a 2000 ms release still holds the cut.
+        let drive = |release_ms: f64| {
+            let p = DynParams {
+                attack_ms: 2.0,
+                release_ms,
+                ..DP
+            };
+            let mut f = dyn_build(1000.0, 0.0, 1.0, Some(p), SR);
+            // loud phase — fully engage
+            dyn_settled_gain_db(&mut f, 1000.0, 0.5, SR);
+            // quiet phase — measure 30–40 ms in
+            dyn_windowed_gain_db(&mut f, 1000.0, 0.001, 1920, 1440..1920, SR)
+        };
+        let recovered = drive(10.0);
+        let held = drive(2000.0);
+        assert!(recovered > -1.0, "fast release: got {recovered:.2} dB");
+        assert!(held < -4.0, "slow release: got {held:.2} dB");
+    }
+
+    #[test]
+    fn dyn_out_of_band_signal_does_not_trigger() {
+        // A loud 8 kHz tone is 4 octaves above a 500 Hz / Q 2 band — the BP
+        // sidechain rejects it, so the coefficients are never touched and the
+        // output matches the static twin bit-for-bit.
+        let mut dynamic = dyn_build(500.0, 0.0, 2.0, Some(DP), SR);
+        let mut fixed = dyn_build(500.0, 0.0, 2.0, None, SR);
+        for i in 0..8192 {
+            let x = 0.5 * (2.0 * PI * 8000.0 * f64::from(i) / SR).sin();
+            dynamic.dyn_detect(x);
+            fixed.dyn_detect(x);
+            let a = dynamic.process_channel(x, 0);
+            let b = fixed.process_channel(x, 0);
+            assert_eq!(a.to_bits(), b.to_bits(), "out-of-band morph at {i}");
+        }
+    }
+
+    #[test]
+    fn dyn_params_clamped_and_nonfinite_rejected() {
+        let hostile = DynParams {
+            threshold_db: -200.0,
+            range_db: 100.0,
+            attack_ms: -5.0,
+            release_ms: f64::NAN,
+        };
+        let f = dyn_build(1000.0, 0.0, 1.0, Some(hostile), SR);
+        let p = f.dynamics().expect("dynamics should be attached");
+        assert!((p.threshold_db - (-80.0)).abs() < 1e-12);
+        assert!((p.range_db - 24.0).abs() < 1e-12);
+        assert!((p.attack_ms - 0.1).abs() < 1e-12);
+        assert!(
+            (p.release_ms - DynParams::DEFAULT.release_ms).abs() < 1e-12,
+            "non-finite release falls back to the default"
+        );
+    }
+
+    #[test]
+    fn dyn_only_on_peaking() {
+        // Non-peaking types silently ignore dynamics (front-ends gate the UI).
+        let shelf = ApoFilter::builder()
+            .filter_type(FilterType::LowShelf)
+            .freq(1000.0)
+            .gain_db(6.0)
+            .q(0.707)
+            .dynamics(Some(DynParams::DEFAULT))
+            .enabled(true)
+            .channels(1)
+            .sample_rate(SR)
+            .build()
+            .unwrap();
+        assert!(shelf.dynamics().is_none());
+
+        let mut peak = dyn_build(1000.0, 0.0, 1.0, None, SR);
+        assert!(peak.dynamics().is_none());
+        peak.set_dynamics(Some(DynParams::DEFAULT), SR).unwrap();
+        assert!(peak.dynamics().is_some());
+        peak.set_dynamics(None, SR).unwrap();
+        assert!(peak.dynamics().is_none());
+    }
+
+    #[test]
+    fn dyn_survives_rebind() {
+        // Rebinding to a new rate re-derives the detector; the morph still
+        // lands and the output stays finite.
+        let mut f = dyn_build(1000.0, 0.0, 1.0, Some(DP), SR);
+        f.rebind(96_000.0);
+        let g = dyn_settled_gain_db(&mut f, 1000.0, 0.5, 96_000.0);
+        assert!(
+            (g - (-6.0)).abs() < 0.7,
+            "morph after rebind: got {g:.2} dB"
+        );
+        assert!(f.dynamics().is_some(), "dynamics survive the rebind");
+    }
+
+    #[test]
+    fn dyn_reset_restores_static_response() {
+        // After a full morph, reset() must clear the envelope AND restore the
+        // static coefficients — a stale morphed head after reset is a bug.
+        let mut f = dyn_build(1000.0, 0.0, 1.0, Some(DP), SR);
+        dyn_settled_gain_db(&mut f, 1000.0, 0.5, SR); // engage
+        f.reset();
+        let mut fixed = dyn_build(1000.0, 0.0, 1.0, None, SR);
+        // quiet probe below threshold: both must be bit-identical from rest
+        for i in 0..2048 {
+            let x = 0.01 * (2.0 * PI * 1000.0 * f64::from(i) / SR).sin();
+            f.dyn_detect(x);
+            fixed.dyn_detect(x);
+            let a = f.process_channel(x, 0);
+            let b = fixed.process_channel(x, 0);
+            assert_eq!(a.to_bits(), b.to_bits(), "reset left morphed state at {i}");
+        }
     }
 }

@@ -33,6 +33,8 @@ pub struct Prefs {
     #[serde(default = "default_false")]
     pub show_scope: bool,
     #[serde(default = "default_false")]
+    pub show_dynamics: bool,
+    #[serde(default = "default_false")]
     pub show_dither: bool,
     #[serde(default = "default_false")]
     pub show_ir: bool,
@@ -83,6 +85,7 @@ impl Default for Prefs {
             show_sinks: default_false(),
             show_slope: default_false(),
             show_scope: default_false(),
+            show_dynamics: default_false(),
             show_dither: default_false(),
             show_ir: default_false(),
             show_channels: default_false(),
@@ -139,6 +142,7 @@ mod tests {
         let p: Prefs = toml::from_str("").unwrap();
         assert!(!p.show_slope);
         assert!(!p.show_scope);
+        assert!(!p.show_dynamics);
         assert!(!p.show_dither);
         assert!(!p.show_channels);
     }
@@ -154,6 +158,7 @@ mod tests {
         let back: Prefs = toml::from_str(&s).unwrap();
         assert!(back.show_slope);
         assert!(!back.show_scope);
+        assert!(!back.show_dynamics);
         assert!(!back.show_dither);
         assert!(back.show_channels);
     }

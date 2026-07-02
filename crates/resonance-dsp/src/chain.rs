@@ -88,6 +88,29 @@ impl ProcessorChain {
         for filter in &mut self.filters {
             let frames = buf.len() / channels;
             match filter.scope {
+                BandScope::Stereo if filter.dynamics_active() => {
+                    // Dynamic band: frame-major so the linked detector (mean of
+                    // the masked channels) morphs the gain before the frame's
+                    // channels are filtered.
+                    for frame in 0..frames {
+                        let base = frame * channels;
+                        let (mut sum, mut n) = (0.0, 0u32);
+                        for ch in 0..channels {
+                            if filter.mask.contains(ch) {
+                                sum += buf[base + ch];
+                                n += 1;
+                            }
+                        }
+                        if n > 0 {
+                            filter.dyn_detect(sum / f64::from(n));
+                        }
+                        for ch in 0..channels {
+                            if filter.mask.contains(ch) {
+                                buf[base + ch] = filter.process_channel(buf[base + ch], ch);
+                            }
+                        }
+                    }
+                }
                 BandScope::Stereo => {
                     for frame in 0..frames {
                         for ch in 0..channels {
@@ -113,7 +136,7 @@ impl ProcessorChain {
                         if filter.scope == BandScope::Mid {
                             for frame in 0..frames {
                                 let idx = frame * channels;
-                                buf[idx] = filter.process_channel(buf[idx], 0);
+                                buf[idx] = filter.dyn_process(buf[idx], 0);
                             }
                         }
                         continue;
@@ -125,11 +148,13 @@ impl ProcessorChain {
                         let m = (l + r) * 0.5;
                         let s = (l - r) * 0.5;
                         // Mid uses biquad state slot 0, Side slot 1, so the two
-                        // scopes never share running history within a band.
+                        // scopes never share running history within a band. The
+                        // dynamics detector (if any) feeds off the same M/S
+                        // value the band filters.
                         let (m2, s2) = if filter.scope == BandScope::Mid {
-                            (filter.process_channel(m, 0), s)
+                            (filter.dyn_process(m, 0), s)
                         } else {
-                            (m, filter.process_channel(s, 1))
+                            (m, filter.dyn_process(s, 1))
                         };
                         buf[il] = m2 + s2;
                         buf[ir] = m2 - s2;
@@ -699,5 +724,159 @@ mod tests {
             l > before * 2.0 && (l - r).abs() < 1e-6,
             "stereo band should boost both channels equally: L {l:.3} R {r:.3}"
         );
+    }
+
+    // ── Dynamic EQ in the chain ─────────────────────────────────────────────
+
+    /// A 1 kHz Peaking band (gain 0) with a −6 dB dynamics cut engaging at
+    /// −25 dBFS, plus the given scope/mask.
+    fn dyn_chain(
+        scope: crate::filter::BandScope,
+        mask: crate::channel::ChannelMask,
+    ) -> ProcessorChain {
+        use crate::filter::{ApoFilter, DynParams, FilterType};
+        ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48_000.0)
+            .add_filter(
+                ApoFilter::builder()
+                    .filter_type(FilterType::Peaking)
+                    .freq(1_000.0)
+                    .gain_db(0.0)
+                    .q(1.0)
+                    .scope(scope)
+                    .channel_mask(mask)
+                    .dynamics(Some(DynParams {
+                        threshold_db: -25.0,
+                        range_db: -6.0,
+                        attack_ms: 2.0,
+                        release_ms: 150.0,
+                    }))
+                    .enabled(true)
+                    .channels(2)
+                    .sample_rate(48_000.0)
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+    }
+
+    /// RMS of one interleaved-stereo channel over the last quarter (settled).
+    fn settled_ch_rms(buf: &[f64], ch: usize) -> f64 {
+        let tail = &buf[buf.len() * 3 / 4..];
+        ch_rms(tail, ch)
+    }
+
+    #[test]
+    fn dyn_band_in_chain_cuts_when_loud() {
+        use crate::channel::ChannelMask;
+        use crate::filter::BandScope;
+        // A −6 dBFS mono 1 kHz tone through the dynamic band settles ~6 dB
+        // below the input level on both channels.
+        let mut chain = dyn_chain(BandScope::Stereo, ChannelMask::ALL);
+        let s = tone_1k(16384);
+        let mut buf: Vec<f64> = s.iter().flat_map(|&x| [x, x]).collect();
+        let before = settled_ch_rms(&buf, 0);
+        chain.process(&mut buf);
+        let after = settled_ch_rms(&buf, 0);
+        let g = 20.0 * (after / before).log10();
+        assert!((g - (-6.0)).abs() < 0.5, "chain dyn cut: got {g:.2} dB");
+        let r = settled_ch_rms(&buf, 1);
+        assert!(
+            (after - r).abs() < 1e-9,
+            "linked detector must cut both channels equally"
+        );
+    }
+
+    #[test]
+    fn dyn_side_scope_triggers_on_side_only() {
+        use crate::channel::ChannelMask;
+        use crate::filter::BandScope;
+        // Pure-side loud signal engages a Side-scoped dynamic band...
+        let mut chain = dyn_chain(BandScope::Side, ChannelMask::ALL);
+        let s = tone_1k(16384);
+        let mut buf: Vec<f64> = s.iter().flat_map(|&x| [x, -x]).collect();
+        let before = settled_ch_rms(&buf, 0);
+        chain.process(&mut buf);
+        let after = settled_ch_rms(&buf, 0);
+        let g = 20.0 * (after / before).log10();
+        assert!((g - (-6.0)).abs() < 0.5, "side dyn cut: got {g:.2} dB");
+
+        // ...while a loud mono signal (zero side content) leaves it untouched.
+        let mut chain = dyn_chain(BandScope::Side, ChannelMask::ALL);
+        let mut buf: Vec<f64> = s.iter().flat_map(|&x| [x, x]).collect();
+        let input = buf.clone();
+        chain.process(&mut buf);
+        for (a, b) in input.iter().zip(&buf) {
+            assert!((a - b).abs() < 1e-9, "side dyn band must not react to mono");
+        }
+    }
+
+    #[test]
+    fn dyn_masked_band_ignores_unmasked_channel() {
+        use crate::channel::ChannelMask;
+        use crate::filter::BandScope;
+        // Band masked to ch0; the loud tone lives only on ch1 → the linked
+        // detector (masked channels only) must never trigger, and ch0's quiet
+        // in-band tone passes at unity.
+        let mask = ChannelMask::from_bits(0b01);
+        let mut chain = dyn_chain(BandScope::Stereo, mask);
+        let s = tone_1k(16384);
+        // ch0 quiet (−52 dBFS), ch1 loud (−6 dBFS)
+        let mut buf: Vec<f64> = s.iter().flat_map(|&x| [x * 0.005, x]).collect();
+        let input = buf.clone();
+        chain.process(&mut buf);
+        let g0 = 20.0 * (settled_ch_rms(&buf, 0) / settled_ch_rms(&input, 0)).log10();
+        assert!(
+            g0.abs() < 0.1,
+            "masked dyn band must not trigger off an unmasked channel: {g0:.2} dB"
+        );
+        // ch1 is outside the mask — bit-untouched.
+        for (i, (a, b)) in input.iter().zip(&buf).enumerate() {
+            if i % 2 == 1 {
+                assert_eq!(a.to_bits(), b.to_bits(), "unmasked channel changed");
+            }
+        }
+    }
+
+    #[test]
+    fn static_bands_bit_exact_with_dynamics_feature_present() {
+        use crate::filter::{ApoFilter, FilterType};
+        // The static band-major path must stay byte-identical to the reference
+        // now that a dynamics branch exists in the loop.
+        let mk = || {
+            ProcessorChain::builder()
+                .channels(2)
+                .sample_rate(48_000.0)
+                .add_filter(
+                    ApoFilter::builder()
+                        .filter_type(FilterType::Peaking)
+                        .freq(1_000.0)
+                        .gain_db(-5.0)
+                        .q(2.0)
+                        .enabled(true)
+                        .channels(2)
+                        .sample_rate(48_000.0)
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+        };
+        let input: Vec<f64> = (0..2048)
+            .map(|i| (f64::from(i) * 0.017).sin() * 0.6)
+            .collect();
+        let mut reference = input.clone();
+        let mut rc = mk();
+        for frame in 0..(reference.len() / 2) {
+            for ch in 0..2 {
+                let idx = frame * 2 + ch;
+                reference[idx] = rc.filters[0].process_channel(reference[idx], ch);
+            }
+        }
+        let mut got = input.clone();
+        mk().process(&mut got);
+        for (a, b) in reference.iter().zip(&got) {
+            assert_eq!(a.to_bits(), b.to_bits(), "static path changed");
+        }
     }
 }

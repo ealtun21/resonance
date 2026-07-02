@@ -121,6 +121,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         InputMode::SelectOutput { .. } => handle_select_output(app, key),
         InputMode::Settings(_) => handle_settings(app, key),
         InputMode::SelectBandChannels { .. } => handle_band_channels(app, key),
+        InputMode::EditBandDynamics { .. } => handle_band_dynamics(app, key),
         InputMode::SquigBrowse { .. } => handle_squig_browse(app, key),
         // Any key dismisses the help overlay.
         InputMode::Help => app.cancel_input(),
@@ -183,6 +184,13 @@ fn handle_normal(app: &mut App, key: KeyEvent) {
         // Cycle the selected band's stereo scope Stereo→Mid→Side (all band types;
         // audible on ≥2ch). Uppercase, matching the `S` slope-cycle convention.
         KeyCode::Char('M') if band_focus && app.prefs.show_scope => app.cycle_band_scope(),
+        // Dynamic EQ on the selected band (peaking only; gated inside the call):
+        // lowercase toggles on/off with defaults, uppercase opens the parameter
+        // editor. Plain `y` is free — redo needs Ctrl.
+        KeyCode::Char('y') if band_focus && app.prefs.show_dynamics => app.toggle_band_dynamics(),
+        KeyCode::Char('Y') if band_focus && app.prefs.show_dynamics => {
+            app.begin_edit_band_dynamics();
+        }
         // Per-band channel targeting (channels visible only).
         KeyCode::Char('c') if band_focus && app.show_ch() => app.begin_select_band_channels(),
         // L/R channel swap (channels visible only; also reachable from settings).
@@ -224,6 +232,25 @@ fn handle_squig_browse(app: &mut App, key: KeyEvent) {
         KeyCode::Backspace => app.squig_backspace(),
         // Everything printable types into the search box (Alt-modified ignored).
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::ALT) => app.squig_query_char(c),
+        _ => {}
+    }
+}
+
+/// Per-band dynamics editor: ↑↓/jk pick a parameter, ←→ step it (Shift = ×5),
+/// Enter applies, Esc cancels.
+fn handle_band_dynamics(app: &mut App, key: KeyEvent) {
+    let steps = if key.modifiers.contains(KeyModifiers::SHIFT) {
+        5.0
+    } else {
+        1.0
+    };
+    match key.code {
+        KeyCode::Esc => app.cancel_input(),
+        KeyCode::Up | KeyCode::Char('k') => app.band_dynamics_move(-1),
+        KeyCode::Down | KeyCode::Char('j') => app.band_dynamics_move(1),
+        KeyCode::Left => app.band_dynamics_adjust(-steps),
+        KeyCode::Right => app.band_dynamics_adjust(steps),
+        KeyCode::Enter => app.band_dynamics_apply(),
         _ => {}
     }
 }

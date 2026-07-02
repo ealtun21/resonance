@@ -1,8 +1,8 @@
 use ratatui::layout::Rect;
 use resonance_autoeq::{BandKind, Smoothing};
 use resonance_ipc::{
-    BandState, BandType, ChannelMask, Command, DaemonState, EffectsState, FxEffectId, Response,
-    RoutingMatrix,
+    BandDynamics, BandState, BandType, ChannelMask, Command, DaemonState, EffectsState, FxEffectId,
+    Response, RoutingMatrix,
     transport::{SyncClient as IpcClient, TransportError},
 };
 use resonance_reference::download::{self, Catalog, DlCmd, DlEvent, ModelEntry, TargetEntry};
@@ -47,6 +47,7 @@ pub(crate) fn advanced_hint_label(
     ir: bool,
     slope: bool,
     scope: bool,
+    dynamics: bool,
     channels: bool,
 ) -> Option<String> {
     let parts: Vec<&str> = [
@@ -54,12 +55,29 @@ pub(crate) fn advanced_hint_label(
         ("ir", ir),
         ("slope", slope),
         ("scope", scope),
+        ("dyn", dynamics),
         ("channels", channels),
     ]
     .into_iter()
     .filter_map(|(name, on)| on.then_some(name))
     .collect();
     (!parts.is_empty()).then(|| format!("adv: {}", parts.join(" ")))
+}
+
+/// Rows of the per-band dynamics editor, in display order: threshold / range /
+/// attack / release.
+pub(crate) const DYN_FIELDS: usize = 4;
+
+/// Step one dynamics-editor field by `steps` (signed; Shift = ×5 upstream),
+/// clamped to the ranges the daemon accepts. Each field gets a step size that
+/// suits its scale — fine values are the CLI's job.
+pub(crate) fn dyn_field_adjust(d: &mut BandDynamics, field: usize, steps: f64) {
+    match field {
+        0 => d.threshold_db = (d.threshold_db + steps).clamp(-80.0, 0.0),
+        1 => d.range_db = (d.range_db + 0.5 * steps).clamp(-24.0, 24.0),
+        2 => d.attack_ms = (d.attack_ms + steps).clamp(0.1, 500.0),
+        _ => d.release_ms = (d.release_ms + 10.0 * steps).clamp(1.0, 5000.0),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +140,14 @@ pub enum InputMode {
     SelectBandChannels {
         index: usize,
         mask: ChannelMask,
+        cursor: usize,
+    },
+    /// Per-band dynamic-EQ editor (peaking bands only): tune the detector's
+    /// threshold / range / attack / release. `dynamics` is edited locally;
+    /// Enter applies (enabling dynamics if they were off), Esc cancels.
+    EditBandDynamics {
+        index: usize,
+        dynamics: BandDynamics,
         cursor: usize,
     },
     /// squig.link online browser: search + pick a measurement (or target) from
@@ -1005,6 +1031,35 @@ impl App {
         self.refresh_state();
     }
 
+    /// Toggle dynamic EQ on the selected band (`y` key): on enables with the
+    /// default parameters (tune them with `Y`), off reverts to a static band.
+    /// Peaking bands only; other types show a status hint instead of a no-op
+    /// edit.
+    pub fn toggle_band_dynamics(&mut self) {
+        if !matches!(self.focus, Panel::Bands | Panel::Graph) {
+            return;
+        }
+        let Some(state) = &self.state else { return };
+        let idx = self.band_cursor;
+        let Some(band) = state.bands.get(idx) else {
+            return;
+        };
+        if !band.band_type.uses_dynamics() {
+            self.set_status("dynamics applies to peaking bands only");
+            return;
+        }
+        let dynamics = match band.dynamics {
+            Some(_) => None,
+            None => Some(BandDynamics::DEFAULT),
+        };
+        self.push_undo();
+        self.send(Command::SetBandDynamics {
+            index: idx,
+            dynamics,
+        });
+        self.refresh_state();
+    }
+
     pub fn remove_band(&mut self) {
         let Some(state) = &self.state else { return };
         if state.bands.is_empty() {
@@ -1265,9 +1320,10 @@ impl App {
             && s.bands
                 .iter()
                 .any(|b| b.scope != resonance_ipc::BandScope::Stereo);
+        let dynamics = !self.prefs.show_dynamics && s.bands.iter().any(|b| b.dynamics.is_some());
         let channels = !channels_visible(self.prefs.show_channels, s.channels)
             && (s.routing.is_some() || s.bands.iter().any(|b| !b.channels.is_global(s.channels)));
-        advanced_hint_label(dither, ir, slope, scope, channels)
+        advanced_hint_label(dither, ir, slope, scope, dynamics, channels)
     }
 
     /// Open the per-band channel-target picker (`c`) for the selected band.
@@ -1354,6 +1410,64 @@ impl App {
         self.send(Command::SetBandChannels {
             index,
             channels: mask,
+        });
+        self.refresh_state();
+    }
+
+    // ── Dynamic EQ editor (peaking bands) ────────────────────────────────────
+
+    /// Open the per-band dynamics editor (`Y`) for the selected band. Starts
+    /// from the band's current parameters, or the defaults when dynamics are
+    /// off — Enter then enables them too. Peaking bands only, like the toggle.
+    pub fn begin_edit_band_dynamics(&mut self) {
+        if !matches!(self.focus, Panel::Bands | Panel::Graph) {
+            return;
+        }
+        let idx = self.band_cursor;
+        let Some(band) = self.state.as_ref().and_then(|s| s.bands.get(idx)) else {
+            return;
+        };
+        if !band.band_type.uses_dynamics() {
+            self.set_status("dynamics applies to peaking bands only");
+            return;
+        }
+        self.mode = InputMode::EditBandDynamics {
+            index: idx,
+            dynamics: band.dynamics.unwrap_or(BandDynamics::DEFAULT),
+            cursor: 0,
+        };
+    }
+
+    pub fn band_dynamics_move(&mut self, delta: i32) {
+        if let InputMode::EditBandDynamics { cursor, .. } = &mut self.mode {
+            let max = DYN_FIELDS as i32 - 1;
+            *cursor = (*cursor as i32 + delta).clamp(0, max) as usize;
+        }
+    }
+
+    /// Step the parameter under the cursor in the local edit copy.
+    pub fn band_dynamics_adjust(&mut self, steps: f64) {
+        if let InputMode::EditBandDynamics {
+            dynamics, cursor, ..
+        } = &mut self.mode
+        {
+            dyn_field_adjust(dynamics, *cursor, steps);
+        }
+    }
+
+    /// Apply the edited parameters to the band and close the editor (Enter).
+    pub fn band_dynamics_apply(&mut self) {
+        let (index, dynamics) = match &self.mode {
+            InputMode::EditBandDynamics {
+                index, dynamics, ..
+            } => (*index, *dynamics),
+            _ => return,
+        };
+        self.mode = InputMode::Normal;
+        self.push_undo();
+        self.send(Command::SetBandDynamics {
+            index,
+            dynamics: Some(dynamics),
         });
         self.refresh_state();
     }
@@ -1544,6 +1658,7 @@ impl App {
                             channels: ChannelMask::ALL,
                             slope_db_oct: resonance_ipc::default_slope_db_oct(),
                             scope: resonance_ipc::BandScope::Stereo,
+                            dynamics: None,
                         })
                         .collect();
                     AutoEqDone {
@@ -2202,20 +2317,24 @@ impl App {
                 self.prefs.save();
             }
             8 => {
-                self.prefs.show_dither = !self.prefs.show_dither;
+                self.prefs.show_dynamics = !self.prefs.show_dynamics;
                 self.prefs.save();
             }
             9 => {
-                self.prefs.show_ir = !self.prefs.show_ir;
+                self.prefs.show_dither = !self.prefs.show_dither;
                 self.prefs.save();
             }
             10 => {
+                self.prefs.show_ir = !self.prefs.show_ir;
+                self.prefs.save();
+            }
+            11 => {
                 self.prefs.show_channels = !self.prefs.show_channels;
                 self.prefs.save();
             }
             // Swap L/R lives here too (parity with the GUI's relocated channel
             // controls) so it's reachable even when the channels column is hidden.
-            11 => self.toggle_swap_lr(),
+            12 => self.toggle_swap_lr(),
             _ => {}
         }
     }
@@ -2445,16 +2564,44 @@ mod tests {
     #[test]
     fn advanced_hint_label_lists_active() {
         assert_eq!(
-            super::advanced_hint_label(false, false, false, false, false),
+            super::advanced_hint_label(false, false, false, false, false, false),
             None
         );
         assert_eq!(
-            super::advanced_hint_label(true, false, false, true, false).as_deref(),
+            super::advanced_hint_label(true, false, false, true, false, false).as_deref(),
             Some("adv: dither scope")
         );
         assert_eq!(
-            super::advanced_hint_label(true, true, true, true, true).as_deref(),
-            Some("adv: dither ir slope scope channels")
+            super::advanced_hint_label(false, false, false, false, true, false).as_deref(),
+            Some("adv: dyn")
         );
+        assert_eq!(
+            super::advanced_hint_label(true, true, true, true, true, true).as_deref(),
+            Some("adv: dither ir slope scope dyn channels")
+        );
+    }
+
+    #[test]
+    fn dyn_field_adjust_steps_and_clamps() {
+        use resonance_ipc::BandDynamics;
+        let mut d = BandDynamics::DEFAULT;
+        // Each row steps at its own scale…
+        super::dyn_field_adjust(&mut d, 0, -5.0);
+        assert!((d.threshold_db - -35.0).abs() < 1e-9);
+        super::dyn_field_adjust(&mut d, 1, 2.0);
+        assert!((d.range_db - -5.0).abs() < 1e-9);
+        super::dyn_field_adjust(&mut d, 2, 1.0);
+        assert!((d.attack_ms - 6.0).abs() < 1e-9);
+        super::dyn_field_adjust(&mut d, 3, 5.0);
+        assert!((d.release_ms - 200.0).abs() < 1e-9);
+        // …and clamps to the ranges the daemon accepts.
+        super::dyn_field_adjust(&mut d, 0, -1000.0);
+        assert!((d.threshold_db - -80.0).abs() < 1e-9);
+        super::dyn_field_adjust(&mut d, 1, 1000.0);
+        assert!((d.range_db - 24.0).abs() < 1e-9);
+        super::dyn_field_adjust(&mut d, 2, -1000.0);
+        assert!((d.attack_ms - 0.1).abs() < 1e-9);
+        super::dyn_field_adjust(&mut d, 3, 1000.0);
+        assert!((d.release_ms - 5000.0).abs() < 1e-9);
     }
 }

@@ -18,9 +18,6 @@ angle so it can be picked up directly.
 
 ## Medium value
 
-- **Dynamic EQ** — per-band gain driven by input level (de-essing,
-  compression-style). Backlog item 8. Sidechain envelope follower per biquad.
-
 - **Linear-phase EQ mode** — FIR path avoiding biquad phase rotation. Backlog
   item 8; can reuse the shipped partitioned-convolution engine
   (`resonance-dsp/src/convolution.rs`) by rendering the EQ curve to an FIR
@@ -44,7 +41,9 @@ effect emulation (Fidelity/Ambience/Surround/Dynamic Boost/Bass);
 **loudness compensation (ISO 226:2023 equal-loudness)** — the "loudness" button
 most consumer EQs have; **headphone crossfeed** (Bauer/Meier); **adjustable
 filter slopes** (12/24/48 dB/oct Butterworth on shelves + HP/LP); **mid/side
-EQ** (per-band `Stereo | Mid | Side`); **output dithering** (TPDF); and a
+EQ** (per-band `Stereo | Mid | Side`); **output dithering** (TPDF); a
 **convolution / impulse-response loader** (partitioned FFT, WAV IRs for room
-correction/HRTF, reported latency, persisted in profiles — shipped 2026-07-02).
-Most competitors do a subset of these on a single OS.
+correction/HRTF, reported latency, persisted in profiles — shipped 2026-07-02);
+and **dynamic EQ** (per-band level-driven gain morph — threshold/range/attack/
+release, band-passed sidechain, zero added latency; peaking bands, shipped
+2026-07-02). Most competitors do a subset of these on a single OS.

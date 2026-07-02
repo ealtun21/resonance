@@ -114,14 +114,18 @@ impl SettingsState {
         }
     }
 
+    // match_same_arms: the Preferences and Reference tabs have the same row
+    // count only by coincidence; merging their arms would couple unrelated tabs.
+    #[allow(clippy::match_same_arms)]
     pub fn max_cursor(&self) -> usize {
         match self.tab {
             0 => self.profiles.len().saturating_sub(1),
             1 => self.mappings.len().saturating_sub(1),
             2 => self.sinks.len().saturating_sub(1),
             // Preferences: fps / refresh / confirm / band-Q / band-type / spectrum
-            // + advanced toggles (slope / scope / dither / IR / channels) + swap L/R.
-            3 => 11,
+            // + advanced toggles (slope / scope / dynamics / dither / IR /
+            // channels) + swap L/R.
+            3 => 12,
             4 => 3, // Daemon: Start / Stop / Restart / Autostart
             // Reference: on / target / measurement / browse-online / autoeq /
             // show-meas / normalize / bounds / tilt / bass / ear / treble / reset.

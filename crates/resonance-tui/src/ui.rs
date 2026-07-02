@@ -63,6 +63,14 @@ pub fn render(app: &App, frame: &mut Frame) {
     {
         render_band_channels(*index, *mask, *cursor, app, frame, frame.area());
     }
+    if let InputMode::EditBandDynamics {
+        index,
+        dynamics,
+        cursor,
+    } = &app.mode
+    {
+        render_band_dynamics(*index, *dynamics, *cursor, frame, frame.area());
+    }
     if let InputMode::SquigBrowse { tab, query, cursor } = &app.mode {
         render_squig_browse(*tab, query, *cursor, app, frame, frame.area());
     }
@@ -143,6 +151,9 @@ fn render_help(app: &App, frame: &mut Frame, area: Rect) {
     if app.prefs.show_scope {
         adv.push(key("M", "cycle band scope stereo/mid/side (≥2ch)"));
     }
+    if app.prefs.show_dynamics {
+        adv.push(key("y / Y", "toggle / edit band dynamic EQ (peaking)"));
+    }
     if app.show_ch() {
         adv.push(key("c", "channel targeting (multichannel)"));
         adv.push(key("w", "swap L/R channels (≥2ch)"));
@@ -158,7 +169,7 @@ fn render_help(app: &App, frame: &mut Frame, area: Rect) {
     }
     if adv.is_empty() {
         adv.push(Line::from(Span::styled(
-            "  (enable slope / scope / dither / IR / channels in Settings → Preferences)",
+            "  (enable slope / scope / dynamics / dither / IR / channels in Settings → Preferences)",
             Style::default().fg(Color::DarkGray).italic(),
         )));
     }
@@ -202,6 +213,9 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
         }
         if app.prefs.show_scope {
             extra.push_str("  [M] scope");
+        }
+        if app.prefs.show_dynamics {
+            extra.push_str("  [y] dyn");
         }
         extra
     };
@@ -1444,6 +1458,13 @@ fn render_band_row(
     } else {
         type_name
     };
+    // Append a `dyn` tag when the band's dynamic EQ is engaged AND the dynamics
+    // toggle is on, mirroring the slope/scope tails.
+    let type_name = if app.prefs.show_dynamics && b.dynamics.is_some() {
+        format!("{type_name} dyn")
+    } else {
+        type_name
+    };
 
     put_cell(
         frame,
@@ -1808,6 +1829,57 @@ fn render_band_channels(
 
     let mut list_state = ListState::default();
     list_state.select(Some(cursor.min(channels - 1)));
+    let list = List::new(items)
+        .highlight_symbol("▶ ")
+        .highlight_style(Style::default().fg(Color::Yellow).bold());
+    frame.render_stateful_widget(list, inner, &mut list_state);
+}
+
+// ── Per-band dynamics editor ────────────────────────────────────────────────
+
+fn render_band_dynamics(
+    index: usize,
+    d: resonance_ipc::BandDynamics,
+    cursor: usize,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    // Fixed-size dialog: four parameter rows + borders, centred (the footer
+    // title truncates on narrow terminals, like any ratatui title).
+    let w = 58u16.min(area.width);
+    let h = 6u16.min(area.height);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let dialog = Rect::new(x, y, w, h);
+    frame.render_widget(Clear, dialog);
+
+    let block = Block::default()
+        .title(Line::from(format!(" Band {} dynamics ", index + 1)).fg(Color::Yellow))
+        .title_bottom(
+            Line::from(" ↑↓ move  ←→ adjust (Shift ×5)  Enter ok  Esc cancel ").fg(Color::DarkGray),
+        )
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(dialog);
+    frame.render_widget(block, dialog);
+
+    // One row per detector parameter, in `dyn_field_adjust` order.
+    let rows: [(&str, String); crate::app::DYN_FIELDS] = [
+        ("Threshold", format!("{:+.0} dBFS", d.threshold_db)),
+        ("Range", format!("{:+.1} dB", d.range_db)),
+        ("Attack", format!("{:.1} ms", d.attack_ms)),
+        ("Release", format!("{:.0} ms", d.release_ms)),
+    ];
+    let items: Vec<ListItem> = rows
+        .into_iter()
+        .map(|(label, value)| {
+            ListItem::new(format!("{label:<10} {value}")).style(Style::default().fg(Color::White))
+        })
+        .collect();
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(cursor.min(crate::app::DYN_FIELDS - 1)));
     let list = List::new(items)
         .highlight_symbol("▶ ")
         .highlight_style(Style::default().fg(Color::Yellow).bold());
@@ -2382,6 +2454,11 @@ fn render_tab_prefs(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect)
             "(advanced: per-band mid/side scope + [M] key)",
         ),
         (
+            "Show dynamics",
+            prefs.show_dynamics.to_string(),
+            "(advanced: per-band dynamic EQ + [y]/[Y] keys)",
+        ),
+        (
             "Show dither",
             prefs.show_dither.to_string(),
             "(advanced: output dither indicator + [D] key)",
@@ -2668,7 +2745,9 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
-    use resonance_ipc::{AppStream, BandState, BandType, DaemonState, EffectsState, Meters};
+    use resonance_ipc::{
+        AppStream, BandDynamics, BandState, BandType, DaemonState, EffectsState, Meters,
+    };
 
     fn app_stream(key: &str, name: &str, volume: f64, muted: bool) -> AppStream {
         AppStream {
@@ -2700,6 +2779,7 @@ mod tests {
             channels,
             slope_db_oct: 12,
             scope: resonance_ipc::BandScope::Stereo,
+            dynamics: None,
         }
     }
 
@@ -2911,6 +2991,56 @@ mod tests {
         assert!(
             text.contains("CH60"),
             "list did not scroll to cursor:\n{text}"
+        );
+    }
+
+    #[test]
+    fn dynamics_tag_and_hint_follow_pref() {
+        let mut app = App::new();
+        let mut st = fixture(2);
+        st.bands[0].dynamics = Some(BandDynamics::DEFAULT);
+        app.state = Some(st);
+        app.focus = Panel::Bands;
+        // Pref off: the band row hides the tag, but the status bar surfaces the
+        // hidden-but-active feature so nothing runs invisibly.
+        app.prefs.show_dynamics = false;
+        let text = render_to_text(&app, 120, 44);
+        assert!(
+            !text.contains("Peaking dyn") && !text.contains("PK dyn"),
+            "dyn tag shown with pref off:\n{text}"
+        );
+        assert!(text.contains("adv: dyn"), "missing adv hint:\n{text}");
+        // Pref on: the tag appears and the hint clears.
+        app.prefs.show_dynamics = true;
+        let text = render_to_text(&app, 120, 44);
+        assert!(
+            text.contains("Peaking dyn") || text.contains("PK dyn"),
+            "missing dyn tag:\n{text}"
+        );
+        assert!(!text.contains("adv: dyn"), "adv hint should clear:\n{text}");
+    }
+
+    #[test]
+    fn dynamics_editor_renders_parameters() {
+        let mut app = App::new();
+        app.state = Some(fixture(2));
+        app.focus = Panel::Bands;
+        app.mode = InputMode::EditBandDynamics {
+            index: 0,
+            dynamics: BandDynamics::DEFAULT,
+            cursor: 1,
+        };
+        let text = render_to_text(&app, 120, 44);
+        assert!(
+            text.contains("Band 1 dynamics"),
+            "missing editor title:\n{text}"
+        );
+        for needle in ["Threshold", "Range", "Attack", "Release"] {
+            assert!(text.contains(needle), "editor missing {needle}:\n{text}");
+        }
+        assert!(
+            text.contains("-30 dBFS"),
+            "missing default threshold:\n{text}"
         );
     }
 

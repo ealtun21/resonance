@@ -1188,6 +1188,7 @@ impl GuiApp {
                         channels: resonance_ipc::ChannelMask::ALL,
                         slope_db_oct: resonance_ipc::default_slope_db_oct(),
                         scope: resonance_ipc::BandScope::Stereo,
+                        dynamics: None,
                     })
                     .collect();
                 let _ = tx.send(crate::app::AutoEqOutcome {

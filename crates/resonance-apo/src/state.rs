@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use resonance_dsp::chain::{FxEffect, ProcessorChain};
 use resonance_dsp::channel::{ChannelMask, ChannelMatrix};
 use resonance_dsp::effects::Effect;
-use resonance_dsp::filter::{ApoFilter, BandScope, FilterType};
+use resonance_dsp::filter::{ApoFilter, BandScope, DynParams, FilterType};
 
 /// Maximum number of EQ bands carried in the shared block.
 pub const MAX_FILTERS: usize = 32;
@@ -38,7 +38,8 @@ pub const STATE_MAGIC: u32 = 0x4F50_4152;
 /// v4: + Loudness effect snapshot.
 /// v5: + convolution (enabled flag + IR-blob generation; samples live in the
 ///     sidecar blob file, see [`default_ir_path`]).
-pub const STATE_VERSION: u32 = 5;
+/// v6: + per-band dynamic EQ (enabled flag + threshold/range/attack/release).
+pub const STATE_VERSION: u32 = 6;
 
 /// `"RIRB"` little-endian — sanity tag for the IR-blob sidecar.
 pub const IR_BLOB_MAGIC: u32 = 0x4252_4952;
@@ -70,6 +71,14 @@ pub struct FilterSnapshot {
     /// `ChannelMask` bits — which channels this band applies to. `u64::MAX` (all
     /// bits) = global. Channel-count-independent, so it works on any APO format.
     pub channels: u64,
+    /// `1` = dynamic EQ active on this band (Peaking only); the four params
+    /// below are only meaningful when set.
+    pub dyn_enabled: u32,
+    _pad_dyn: u32,
+    pub dyn_threshold_db: f64,
+    pub dyn_range_db: f64,
+    pub dyn_attack_ms: f64,
+    pub dyn_release_ms: f64,
 }
 
 /// One FxSound-style effect.
@@ -245,6 +254,8 @@ impl ChainSnapshot {
         let mut filters = [FilterSnapshot::default(); MAX_FILTERS];
         let n = chain.filters.len().min(MAX_FILTERS);
         for (dst, f) in filters.iter_mut().zip(chain.filters.iter()).take(n) {
+            let dynamics = f.dynamics();
+            let dp = dynamics.unwrap_or(DynParams::DEFAULT);
             *dst = FilterSnapshot {
                 kind: filter_type_to_u32(f.filter_type),
                 enabled: u32::from(f.enabled),
@@ -254,6 +265,12 @@ impl ChainSnapshot {
                 gain_db: f.gain_db,
                 q: f.q,
                 channels: f.mask.bits(),
+                dyn_enabled: u32::from(dynamics.is_some()),
+                _pad_dyn: 0,
+                dyn_threshold_db: dp.threshold_db,
+                dyn_range_db: dp.range_db,
+                dyn_attack_ms: dp.attack_ms,
+                dyn_release_ms: dp.release_ms,
             };
         }
         let (route_channels, route_gains) = route_snapshot(chain);
@@ -301,6 +318,7 @@ impl ChainSnapshot {
                 .q(f.q)
                 .slope_db_oct(f.slope_db_oct as u8)
                 .scope(scope_from_u32(f.scope))
+                .dynamics(snapshot_dynamics(f))
                 .enabled(f.enabled != 0)
                 .channels(channels)
                 .sample_rate(sample_rate)
@@ -385,6 +403,7 @@ impl ChainSnapshot {
                 sample_rate,
             );
             let _ = slot.set_slope(f.slope_db_oct as u8, sample_rate);
+            let _ = slot.set_dynamics(snapshot_dynamics(f), sample_rate);
             slot.scope = scope_from_u32(f.scope);
             slot.enabled = f.enabled != 0;
             // Per-channel target is plain state (no coefficient/history impact).
@@ -392,6 +411,17 @@ impl ChainSnapshot {
         }
         true
     }
+}
+
+/// The dynamic-EQ params carried by a filter snapshot, `None` when unset.
+#[must_use]
+pub fn snapshot_dynamics(f: &FilterSnapshot) -> Option<DynParams> {
+    (f.dyn_enabled != 0).then_some(DynParams {
+        threshold_db: f.dyn_threshold_db,
+        range_db: f.dyn_range_db,
+        attack_ms: f.dyn_attack_ms,
+        release_ms: f.dyn_release_ms,
+    })
 }
 
 /// Stable `BandScope` → `u32` mapping for the shared block (must round-trip).
@@ -1105,6 +1135,86 @@ mod tests {
         assert!(r.read().is_some());
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn band_dynamics_round_trip_through_snapshot() {
+        use resonance_dsp::filter::DynParams;
+
+        let dp = DynParams {
+            threshold_db: -35.0,
+            range_db: -9.0,
+            attack_ms: 3.0,
+            release_ms: 200.0,
+        };
+        let band = ApoFilter::builder()
+            .filter_type(FilterType::Peaking)
+            .freq(6000.0)
+            .gain_db(0.0)
+            .q(3.0)
+            .dynamics(Some(dp))
+            .enabled(true)
+            .channels(2)
+            .sample_rate(48000.0)
+            .build()
+            .unwrap();
+        let chain = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48000.0)
+            .add_filter(band)
+            .build();
+
+        let snap = ChainSnapshot::from_chain(&chain);
+        assert_eq!(snap.filters[0].dyn_enabled, 1);
+        assert!((snap.filters[0].dyn_threshold_db - (-35.0)).abs() < 1e-9);
+
+        // Full rebuild carries the dynamics.
+        let rebuilt = snap.build_chain(2, 48000.0);
+        assert_eq!(rebuilt.filters[0].dynamics(), Some(dp));
+
+        // The in-place apply path attaches/updates them too.
+        let mut live = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48000.0)
+            .add_filter(
+                ApoFilter::builder()
+                    .filter_type(FilterType::Peaking)
+                    .freq(6000.0)
+                    .gain_db(0.0)
+                    .q(3.0)
+                    .enabled(true)
+                    .channels(2)
+                    .sample_rate(48000.0)
+                    .build()
+                    .unwrap(),
+            )
+            .build();
+        assert!(snap.apply_to(&mut live, 48000.0));
+        assert_eq!(live.filters[0].dynamics(), Some(dp));
+
+        // And a snapshot without dynamics clears them in place.
+        let snap_off = ChainSnapshot::from_chain(&live_chain_without_dynamics());
+        assert!(snap_off.apply_to(&mut live, 48000.0));
+        assert!(live.filters[0].dynamics().is_none());
+    }
+
+    fn live_chain_without_dynamics() -> ProcessorChain {
+        ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48000.0)
+            .add_filter(
+                ApoFilter::builder()
+                    .filter_type(FilterType::Peaking)
+                    .freq(6000.0)
+                    .gain_db(0.0)
+                    .q(3.0)
+                    .enabled(true)
+                    .channels(2)
+                    .sample_rate(48000.0)
+                    .build()
+                    .unwrap(),
+            )
+            .build()
     }
 
     #[test]

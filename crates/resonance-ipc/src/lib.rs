@@ -1,6 +1,6 @@
 use resonance_dsp::chain::FxEffect;
 use resonance_dsp::channel::{ChannelMask as DspMask, ChannelMatrix as DspMatrix};
-use resonance_dsp::filter::{BandScope as DspScope, FilterType};
+use resonance_dsp::filter::{BandScope as DspScope, DynParams, FilterType};
 use serde::{Deserialize, Serialize};
 
 pub mod curve;
@@ -292,6 +292,13 @@ pub enum Command {
     /// (mono, channel-averaged — the spectrum feed). Powers the `resonance
     /// verify` live audio-path harness.
     CaptureOutput { frames: u32 },
+    /// Set (or clear) an EQ band's dynamic EQ (level-driven gain morph).
+    /// Peaking bands only — the daemon rejects other types. `index` matches a
+    /// band's position in `DaemonState::bands`.
+    SetBandDynamics {
+        index: usize,
+        dynamics: Option<BandDynamics>,
+    },
 }
 
 /// One of the two in-memory comparison slots for quick A/B auditioning.
@@ -441,6 +448,15 @@ impl BandType {
             self,
             BandType::LowShelf | BandType::HighShelf | BandType::LowPass | BandType::HighPass
         )
+    }
+
+    /// Whether dynamic EQ ([`BandState::dynamics`]) is available for this type.
+    /// Peaking only (v1): its gain-only coefficient morph is cheap and it
+    /// covers the real use cases (de-essing, resonance taming). Front-ends
+    /// gate their dynamics control on this.
+    #[must_use]
+    pub fn uses_dynamics(self) -> bool {
+        matches!(self, BandType::Peaking)
     }
 }
 
@@ -721,6 +737,60 @@ pub struct BandState {
     /// profiles written before mid/side existed loading as `Stereo`.
     #[serde(default)]
     pub scope: BandScope,
+    /// Dynamic EQ (level-driven gain morph), `None` = static band. Peaking
+    /// bands only. `serde` default keeps profiles written before dynamics
+    /// existed loading as static bands (postcard wire stays version-locked —
+    /// see the `channels` note above).
+    #[serde(default)]
+    pub dynamics: Option<BandDynamics>,
+}
+
+/// Per-band dynamic EQ parameters — the wire/disk mirror of the DSP
+/// `resonance_dsp::filter::DynParams`. The band's gain morphs from `gain_db`
+/// toward `gain_db + range_db` as in-band level rises past `threshold_db`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BandDynamics {
+    /// Detector level (dBFS) where the morph starts.
+    pub threshold_db: f64,
+    /// Signed max gain offset: negative = cut when loud, positive = boost.
+    pub range_db: f64,
+    /// Detector attack time constant (ms).
+    pub attack_ms: f64,
+    /// Detector release time constant (ms).
+    pub release_ms: f64,
+}
+
+impl BandDynamics {
+    /// Front-end starting point when enabling dynamics on a band (mirrors
+    /// `DynParams::DEFAULT`).
+    pub const DEFAULT: Self = Self {
+        threshold_db: -30.0,
+        range_db: -6.0,
+        attack_ms: 5.0,
+        release_ms: 150.0,
+    };
+}
+
+impl From<BandDynamics> for DynParams {
+    fn from(d: BandDynamics) -> Self {
+        Self {
+            threshold_db: d.threshold_db,
+            range_db: d.range_db,
+            attack_ms: d.attack_ms,
+            release_ms: d.release_ms,
+        }
+    }
+}
+
+impl From<DynParams> for BandDynamics {
+    fn from(d: DynParams) -> Self {
+        Self {
+            threshold_db: d.threshold_db,
+            range_db: d.range_db,
+            attack_ms: d.attack_ms,
+            release_ms: d.release_ms,
+        }
+    }
 }
 
 /// Serde default for [`BandState::slope_db_oct`] — 12 dB/oct (single biquad),
@@ -891,6 +961,7 @@ mod tests {
                 channels: ChannelMask::single(0),
                 slope_db_oct: 24,
                 scope: BandScope::Mid,
+                dynamics: None,
             }],
             effects: EffectsState {
                 fidelity_intensity: 0.5,
@@ -995,6 +1066,76 @@ mod tests {
     }
 
     #[test]
+    fn band_dynamics_round_trips() {
+        // Wire (postcard) round-trip of a dynamic band + the appended command.
+        let b = BandState {
+            band_type: BandType::Peaking,
+            freq: 6000.0,
+            gain_db: 0.0,
+            q: 3.0,
+            enabled: true,
+            channels: ChannelMask::ALL,
+            slope_db_oct: 12,
+            scope: BandScope::Stereo,
+            dynamics: Some(BandDynamics {
+                threshold_db: -30.0,
+                range_db: -6.0,
+                attack_ms: 5.0,
+                release_ms: 150.0,
+            }),
+        };
+        let bytes = to_stdvec(&b).unwrap();
+        let back: BandState = from_bytes(&bytes).unwrap();
+        assert_eq!(back.dynamics, b.dynamics);
+
+        command_round_trip(&Command::SetBandDynamics {
+            index: 3,
+            dynamics: Some(BandDynamics::DEFAULT),
+        });
+        command_round_trip(&Command::SetBandDynamics {
+            index: 3,
+            dynamics: None,
+        });
+    }
+
+    #[test]
+    fn band_dynamics_defaults_to_none() {
+        // `BandState.dynamics` uses `#[serde(default)]` so pre-dynamics profile
+        // `.toml`s load as static bands (disk back-compat is round-tripped in
+        // the daemon's config tests, same split as the channel-mask note below).
+        assert_eq!(Option::<BandDynamics>::default(), None);
+        // The dsp mirror conversion round-trips.
+        let d = BandDynamics {
+            threshold_db: -40.0,
+            range_db: 3.0,
+            attack_ms: 1.0,
+            release_ms: 80.0,
+        };
+        let dsp: resonance_dsp::filter::DynParams = d.into();
+        assert_eq!(BandDynamics::from(dsp), d);
+    }
+
+    #[test]
+    fn only_peaking_uses_dynamics() {
+        for bt in [
+            BandType::Peaking,
+            BandType::LowShelf,
+            BandType::HighShelf,
+            BandType::LowPass,
+            BandType::HighPass,
+            BandType::BandPass,
+            BandType::Notch,
+            BandType::AllPass,
+        ] {
+            assert_eq!(
+                bt.uses_dynamics(),
+                bt == BandType::Peaking,
+                "uses_dynamics wrong for {bt:?}"
+            );
+        }
+    }
+
+    #[test]
     fn channel_mask_defaults_to_all() {
         // `BandState.channels` uses `#[serde(default)]`; the default must be the
         // global mask so pre-per-channel profiles load as global bands. (The
@@ -1048,6 +1189,7 @@ mod tests {
                 channels: ChannelMask::single(1),
                 slope_db_oct: 48,
                 scope: BandScope::Side,
+                dynamics: None,
             }],
             effects: EffectsState {
                 fidelity_intensity: 0.5,
