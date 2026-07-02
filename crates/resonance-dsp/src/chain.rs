@@ -7,6 +7,17 @@ use crate::effects::{
 };
 use crate::filter::{ApoFilter, BandScope};
 
+/// EQ phase behaviour: `Minimum` = the biquad bank (today's path, zero
+/// latency), `Linear` = the static stereo bands are rendered to a symmetric
+/// FIR (see [`crate::linphase`]) — no phase rotation, `BLOCK + N/2` samples of
+/// added latency. Mid/Side and dynamic bands stay on the IIR path either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PhaseMode {
+    #[default]
+    Minimum,
+    Linear,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FxEffect {
     Fidelity,
@@ -43,6 +54,15 @@ pub struct ProcessorChain {
     /// after the filter bank — the two linear stages sit together, ahead of the
     /// nonlinear effects. Off + empty by default (bit-exact passthrough).
     pub convolution: ConvolutionEngine,
+    /// EQ phase behaviour; `Minimum` (default) leaves this chain byte-identical
+    /// to the pre-linear-phase build.
+    pub phase_mode: PhaseMode,
+    /// The linear-phase FIR realisation of the static filter bank. Loaded by
+    /// the daemon/APO (never rendered on the RT thread); only consulted while
+    /// [`ProcessorChain::phase_mode`] is `Linear` AND a kernel is present —
+    /// otherwise the IIR bank keeps running, so a pending or failed render can
+    /// never leave a flat/silent gap.
+    pub eq_fir: ConvolutionEngine,
     pub fidelity: FidelityEffect,
     pub ambience: AmbienceEffect,
     pub surround: SurroundEffect,
@@ -80,12 +100,22 @@ impl ProcessorChain {
             }
         }
 
+        // Linear phase engages only with a loaded kernel (see `eq_fir` docs).
+        let fir_active = self.phase_mode == PhaseMode::Linear
+            && self.eq_fir.enabled()
+            && self.eq_fir.source().is_some();
+
         // Band-major cascade: each biquad makes one pass over the buffer. The
         // buffer is small enough to stay cache-resident across passes, so this
         // keeps a single filter's coefficients+state hot per pass — measurably
         // faster than a sample-major inner loop that cycles every band's state
         // on each sample once the band count grows.
         for filter in &mut self.filters {
+            // Bands realised by the FIR kernel skip the IIR pass; Mid/Side and
+            // dynamic bands are not linearizable and stay here (hybrid mode).
+            if fir_active && crate::linphase::is_linearizable(filter) {
+                continue;
+            }
             let frames = buf.len() / channels;
             match filter.scope {
                 BandScope::Stereo if filter.dynamics_active() => {
@@ -163,6 +193,9 @@ impl ProcessorChain {
             }
         }
 
+        if fir_active {
+            self.eq_fir.process(buf, channels);
+        }
         self.convolution.process(buf, channels);
         self.fidelity.process(buf, channels);
         self.ambience.process(buf, channels);
@@ -180,6 +213,29 @@ impl ProcessorChain {
     /// Set (or clear) the output dither target bit depth. `None` = off.
     pub fn set_dither(&mut self, bits: Option<u32>) {
         self.dither.set_bits(bits);
+    }
+
+    /// Switch the EQ phase behaviour. Leaving `Linear` drops the FIR kernel —
+    /// the IIR bank resumes immediately; re-entering requires a fresh render
+    /// (the daemon/APO owns that).
+    pub fn set_phase_mode(&mut self, mode: PhaseMode) {
+        if mode == PhaseMode::Minimum && self.phase_mode == PhaseMode::Linear {
+            self.eq_fir.clear();
+        }
+        self.phase_mode = mode;
+    }
+
+    /// Added latency of the linear-phase realisation in frames: the engine's
+    /// fixed `BLOCK` plus the kernel's `N/2` group delay. Zero when the mode
+    /// is off or no kernel is loaded.
+    #[must_use]
+    pub fn eq_fir_latency_frames(&self) -> usize {
+        if self.phase_mode != PhaseMode::Linear {
+            return 0;
+        }
+        self.eq_fir.source().map_or(0, |ir| {
+            self.eq_fir.latency_frames() + ir.channels.first().map_or(0, |h| h.len() / 2)
+        })
     }
 
     pub fn set_effect_intensity(&mut self, effect: FxEffect, value: f64) {
@@ -229,6 +285,7 @@ impl ProcessorChain {
             .iter_mut()
             .for_each(super::filter::ApoFilter::reset);
         self.convolution.reset();
+        self.eq_fir.reset();
         self.fidelity.reset();
         self.ambience.reset();
         self.surround.reset();
@@ -264,6 +321,9 @@ impl ProcessorChain {
         // Re-prepare the convolution kernel from its retained source IR at the
         // new rate (no-op when nothing is loaded).
         self.convolution.rebind_sample_rate(sample_rate);
+        // The FIR grid is rate-derived; re-prepare from the retained kernel so
+        // audio stays correct until the daemon re-renders at the new grid.
+        self.eq_fir.rebind_sample_rate(sample_rate);
         let ch = self.channels;
         self.fidelity = carry_settings(&self.fidelity, FidelityEffect::new(ch, sample_rate));
         self.ambience = carry_settings(&self.ambience, AmbienceEffect::new(ch, sample_rate));
@@ -292,6 +352,7 @@ impl ProcessorChain {
             f.set_channels(channels);
         }
         self.convolution.set_channels(channels);
+        self.eq_fir.set_channels(channels);
         let sr = self.sample_rate;
         self.fidelity = carry_settings(&self.fidelity, FidelityEffect::new(channels, sr));
         self.ambience = carry_settings(&self.ambience, AmbienceEffect::new(channels, sr));
@@ -393,6 +454,8 @@ impl ProcessorChainBuilder {
             preamp_db: self.preamp_db,
             filters: self.filters,
             convolution: ConvolutionEngine::new(channels, sr),
+            phase_mode: PhaseMode::default(),
+            eq_fir: ConvolutionEngine::new(channels, sr),
             fidelity: FidelityEffect::new(channels, sr),
             ambience: AmbienceEffect::new(channels, sr),
             surround: SurroundEffect::new(sr),
@@ -878,5 +941,168 @@ mod tests {
         for (a, b) in reference.iter().zip(&got) {
             assert_eq!(a.to_bits(), b.to_bits(), "static path changed");
         }
+    }
+
+    // ── Linear-phase mode ───────────────────────────────────────────────────
+
+    /// Build a stereo chain with the given bands, render + load the FIR and
+    /// switch to Linear.
+    fn linear_chain(bands: Vec<crate::filter::ApoFilter>) -> ProcessorChain {
+        let mut b = ProcessorChain::builder().channels(2).sample_rate(48_000.0);
+        for f in bands {
+            b = b.add_filter(f);
+        }
+        let mut chain = b.build();
+        let ir = crate::linphase::render(&chain.filters, 2, 48_000.0).expect("kernel");
+        chain.eq_fir.load_ir(std::sync::Arc::new(ir)).expect("load");
+        chain.set_phase_mode(PhaseMode::Linear);
+        chain
+    }
+
+    fn peak_band(freq: f64, gain_db: f64, q: f64) -> crate::filter::ApoFilter {
+        crate::filter::ApoFilter::builder()
+            .filter_type(crate::filter::FilterType::Peaking)
+            .freq(freq)
+            .gain_db(gain_db)
+            .q(q)
+            .enabled(true)
+            .channels(2)
+            .sample_rate(48_000.0)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn linear_mode_delay_is_frequency_independent() {
+        // An impulse through the FIR bank peaks exactly at BLOCK + N/2 no
+        // matter where the band sits — constant group delay = linear phase.
+        for band_freq in [200.0, 8_000.0] {
+            let mut chain = linear_chain(vec![peak_band(band_freq, 6.0, 1.0)]);
+            let n = crate::linphase::grid_len(48_000.0);
+            let frames = n + 1024;
+            let mut buf = vec![0.0f64; frames * 2];
+            buf[0] = 1.0;
+            buf[1] = 1.0;
+            chain.process(&mut buf);
+            let argmax = (0..frames)
+                .max_by(|&a, &b| buf[a * 2].abs().total_cmp(&buf[b * 2].abs()))
+                .unwrap();
+            let expected = crate::convolution::BLOCK + n / 2;
+            assert_eq!(
+                argmax, expected,
+                "peak for the {band_freq} Hz band must sit at BLOCK + N/2"
+            );
+        }
+    }
+
+    #[test]
+    fn linear_mode_without_kernel_falls_back_to_iir() {
+        // Mode set but no kernel loaded (render pending/failed): the IIR path
+        // must keep running — never a silent/flat gap.
+        let mut chain = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48_000.0)
+            .add_filter(peak_band(1_000.0, 12.0, 1.0))
+            .build();
+        chain.set_phase_mode(PhaseMode::Linear);
+        let s = tone_1k(4096);
+        let mut buf: Vec<f64> = s.iter().flat_map(|&x| [x, x]).collect();
+        let before = ch_rms(&buf, 0);
+        chain.process(&mut buf);
+        assert!(
+            ch_rms(&buf, 0) > before * 2.0,
+            "iir band must still apply while no kernel is loaded"
+        );
+    }
+
+    #[test]
+    fn linear_mode_keeps_dynamic_bands_on_iir() {
+        use crate::filter::DynParams;
+        // Hybrid: the static band is linearised, the dynamic band still morphs.
+        let mut dynamic = peak_band(1_000.0, 0.0, 1.0);
+        dynamic
+            .set_dynamics(
+                Some(DynParams {
+                    threshold_db: -25.0,
+                    range_db: -6.0,
+                    attack_ms: 2.0,
+                    release_ms: 150.0,
+                }),
+                48_000.0,
+            )
+            .unwrap();
+        let mut chain = linear_chain(vec![peak_band(150.0, 6.0, 1.0), dynamic]);
+        let n = crate::linphase::grid_len(48_000.0);
+        let s = tone_1k(16_384 + n);
+        let mut buf: Vec<f64> = s.iter().flat_map(|&x| [x, x]).collect();
+        chain.process(&mut buf);
+        // Measure well past the FIR latency: the loud 1 kHz tone must still be
+        // cut ~6 dB by the dynamic band (which the kernel must NOT contain).
+        let tail = &buf[buf.len() * 3 / 4..];
+        let g = 20.0 * (ch_rms(tail, 0) / (0.5 / std::f64::consts::SQRT_2)).log10();
+        assert!(
+            (g - (-6.0)).abs() < 0.7,
+            "dynamic band must keep morphing in linear mode: {g:.2} dB"
+        );
+    }
+
+    #[test]
+    fn leaving_linear_mode_returns_bit_exact_minimum_path() {
+        let mk = || {
+            ProcessorChain::builder()
+                .channels(2)
+                .sample_rate(48_000.0)
+                .add_filter(peak_band(1_000.0, 6.0, 1.0))
+                .build()
+        };
+        let input: Vec<f64> = (0..4096)
+            .map(|i| (f64::from(i) * 0.013).sin() * 0.5)
+            .collect();
+
+        let mut reference = mk();
+        let mut a = input.clone();
+        reference.process(&mut a);
+
+        let mut toggled = mk();
+        let ir = crate::linphase::render(&toggled.filters, 2, 48_000.0).unwrap();
+        toggled.eq_fir.load_ir(std::sync::Arc::new(ir)).unwrap();
+        toggled.set_phase_mode(PhaseMode::Linear);
+        let mut warm = input.clone();
+        toggled.process(&mut warm);
+        toggled.set_phase_mode(PhaseMode::Minimum);
+        toggled.reset();
+        reference.reset();
+
+        let mut b = input.clone();
+        toggled.process(&mut b);
+        let mut a2 = input.clone();
+        reference.process(&mut a2);
+        for (x, y) in a2.iter().zip(&b) {
+            assert_eq!(
+                x.to_bits(),
+                y.to_bits(),
+                "minimum path changed after toggle"
+            );
+        }
+    }
+
+    #[test]
+    fn eq_fir_latency_reported_only_when_active() {
+        let mut chain = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48_000.0)
+            .add_filter(peak_band(1_000.0, 6.0, 1.0))
+            .build();
+        assert_eq!(chain.eq_fir_latency_frames(), 0);
+        let ir = crate::linphase::render(&chain.filters, 2, 48_000.0).unwrap();
+        chain.eq_fir.load_ir(std::sync::Arc::new(ir)).unwrap();
+        chain.set_phase_mode(PhaseMode::Linear);
+        let n = crate::linphase::grid_len(48_000.0);
+        assert_eq!(
+            chain.eq_fir_latency_frames(),
+            crate::convolution::BLOCK + n / 2
+        );
+        chain.set_phase_mode(PhaseMode::Minimum);
+        assert_eq!(chain.eq_fir_latency_frames(), 0);
     }
 }

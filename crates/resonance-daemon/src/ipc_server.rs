@@ -112,6 +112,34 @@ where
 /// reply construction. Only the two parse-heavy commands run async (they offload
 /// to a blocking thread); everything else is synchronous.
 async fn dispatch(cmd: Command, state: &SharedState) -> Response {
+    // Any command that can change the band table (or replace the chain) must
+    // refresh the linear-phase kernel afterwards — checked up front because
+    // the match consumes `cmd`.
+    let band_mutating = matches!(
+        &cmd,
+        Command::SetBand { .. }
+            | Command::SetBandEnabled { .. }
+            | Command::AddBand { .. }
+            | Command::RemoveBand { .. }
+            | Command::SetBandType { .. }
+            | Command::SetBandSlope { .. }
+            | Command::SetBandScope { .. }
+            | Command::SetBandDynamics { .. }
+            | Command::SetBandChannels { .. }
+            | Command::ApplyState { .. }
+            | Command::Reset
+            | Command::LoadPreset { .. }
+            | Command::LoadProfile { .. }
+            | Command::RecallSlot { .. }
+    );
+    let response = dispatch_inner(cmd, state).await;
+    if band_mutating && !matches!(response, Response::Error(_)) {
+        re_render_eq_fir(state);
+    }
+    response
+}
+
+async fn dispatch_inner(cmd: Command, state: &SharedState) -> Response {
     match cmd {
         Command::GetState => {
             state.mark_polled();
@@ -170,6 +198,7 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
         Command::SetBandDynamics { index, dynamics } => {
             handle_set_band_dynamics(state, index, dynamics)
         }
+        Command::SetPhaseMode { linear } => handle_set_phase_mode(state, linear),
         Command::SetBandChannels { index, channels } => {
             handle_set_band_channels(state, index, channels)
         }
@@ -693,6 +722,63 @@ fn handle_set_band_scope(state: &SharedState, index: usize, scope: BandScope) ->
     Response::Ok
 }
 
+/// Switch the EQ between minimum and linear phase. Entering linear renders
+/// the FIR kernel immediately; leaving clears it (the chain drops back to the
+/// IIR bank).
+fn handle_set_phase_mode(state: &SharedState, linear: bool) -> Response {
+    use resonance_dsp::chain::PhaseMode;
+    let mode = if linear {
+        PhaseMode::Linear
+    } else {
+        PhaseMode::Minimum
+    };
+    state.send(AudioCommand::SetPhaseMode(mode), move |chain| {
+        chain.set_phase_mode(mode);
+    });
+    if linear {
+        re_render_eq_fir(state);
+    }
+    info!(
+        "eq phase mode set: {}",
+        if linear { "linear" } else { "minimum" }
+    );
+    Response::Ok
+}
+
+/// Re-render the linear-phase FIR from the shadow band table and swap it in
+/// (shadow + RT). No-op unless the mode is on. Rendered at the LIVE rate the
+/// meters report — the shadow chain's own rate is construction-frozen (#53).
+fn re_render_eq_fir(state: &SharedState) {
+    use resonance_dsp::chain::PhaseMode;
+    let engine = {
+        let inner = state.0.lock().unwrap();
+        if inner.chain.phase_mode != PhaseMode::Linear {
+            return;
+        }
+        let sr = inner
+            .meters
+            .sample_rate()
+            .unwrap_or(inner.chain.sample_rate);
+        let ch = inner.meters.channels().unwrap_or(inner.chain.channels);
+        let mut engine = ConvolutionEngine::new(ch, sr);
+        if let Some(ir) = resonance_dsp::linphase::render(&inner.chain.filters, ch, sr) {
+            // A render of a non-empty band set can only fail on a degenerate
+            // format; the chain falls back to the IIR path in that case.
+            if let Err(e) = engine.load_ir(std::sync::Arc::new(ir)) {
+                warn!("linear-phase kernel render failed: {e}");
+            }
+        }
+        engine
+    };
+    state.send(
+        AudioCommand::SetEqFir(Box::new(engine.clone())),
+        move |chain| {
+            // Keep the engine at the live format it was prepared at (#53).
+            chain.eq_fir = engine;
+        },
+    );
+}
+
 /// Set (or clear) a band's dynamic EQ (level-driven gain morph).
 ///
 /// Validated up front (the RT closure can't reply): the index must exist and
@@ -871,6 +957,7 @@ fn handle_apply_state(
             path: c.path,
             enabled: c.enabled,
         }),
+        phase_mode: snap.phase_mode_linear,
     };
     apply_profile_chain(&profile, state);
     info!("bulk state applied (ApplyState: undo/redo or bulk edit)");
@@ -1376,6 +1463,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn phase_mode_renders_and_rerenders_the_fir_kernel() {
+        // Entering linear mode with a static band renders a kernel (latency
+        // reported); a band edit re-renders it; leaving clears it.
+        let (state, mut rx) = test_state();
+        let resp = dispatch(
+            Command::AddBand {
+                band_type: BandType::Peaking,
+                freq: 1_000.0,
+                gain_db: 6.0,
+                q: 1.0,
+            },
+            &state,
+        )
+        .await;
+        assert!(matches!(resp, Response::Ok));
+
+        let resp = dispatch(Command::SetPhaseMode { linear: true }, &state).await;
+        assert!(matches!(resp, Response::Ok));
+        let snap = state.snapshot();
+        assert!(snap.phase_mode_linear);
+        let n = resonance_dsp::linphase::grid_len(48_000.0);
+        assert_eq!(
+            snap.eq_fir_latency_frames,
+            resonance_dsp::convolution::BLOCK + n / 2
+        );
+
+        // A band edit while linear must swap in a fresh kernel on the RT ring.
+        let resp = dispatch(
+            Command::SetBand {
+                index: 0,
+                freq: 2_000.0,
+                gain_db: 3.0,
+                q: 2.0,
+            },
+            &state,
+        )
+        .await;
+        assert!(matches!(resp, Response::Ok));
+        let mut rt_chain = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48_000.0)
+            .build();
+        while let Ok(cmd) = rx.pop() {
+            crate::audio::apply_command(&mut rt_chain, cmd);
+        }
+        assert_eq!(rt_chain.phase_mode, resonance_dsp::chain::PhaseMode::Linear);
+        assert!(
+            rt_chain.eq_fir.source().is_some(),
+            "rt side must hold the rendered kernel"
+        );
+
+        // Leaving linear clears the kernel + latency.
+        let resp = dispatch(Command::SetPhaseMode { linear: false }, &state).await;
+        assert!(matches!(resp, Response::Ok));
+        let snap = state.snapshot();
+        assert!(!snap.phase_mode_linear);
+        assert_eq!(snap.eq_fir_latency_frames, 0);
+    }
+
+    #[tokio::test]
     async fn convolution_snapshot_reports_live_rate_taps() {
         // Issue #53: with the graph live at 96 kHz (meters) and the shadow
         // chain frozen at its 48 kHz construction rate, a loaded IR must be
@@ -1552,6 +1699,7 @@ mod tests {
             effects: EffectsState::default(),
             bands: vec![],
             dither_bits: None,
+            phase_mode: false,
             convolution: Some(ConvolutionProfile {
                 path: path.to_string_lossy().into_owned(),
                 enabled: true,

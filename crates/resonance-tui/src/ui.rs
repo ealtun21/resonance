@@ -6,7 +6,7 @@ use crate::{
     curve,
     settings::{ConfirmAction, SettingsState, TABS},
 };
-use resonance_ipc::{AppStream, ChannelMask, RoutingMatrix, SinkVolume};
+use resonance_ipc::{AppStream, ChannelMask, DaemonState, RoutingMatrix, SinkVolume};
 use resonance_reference::reference::SeriesRole;
 
 use ratatui::{
@@ -318,6 +318,13 @@ fn channel_summary(
     Some(t)
 }
 
+/// Added latency of the linear-phase FIR in milliseconds, or `None` while no
+/// kernel is loaded (mode armed but no static bands — minimum-phase fallback).
+fn linear_phase_latency_ms(s: &DaemonState) -> Option<f64> {
+    (s.eq_fir_latency_frames > 0 && s.sample_rate > 0.0)
+        .then(|| s.eq_fir_latency_frames as f64 / s.sample_rate * 1000.0)
+}
+
 fn render_status(app: &App, frame: &mut Frame, area: Rect) {
     let power_span = if app.state.as_ref().is_some_and(|s| s.enabled) {
         Span::styled("● ON ", Style::default().fg(Color::Green).bold())
@@ -412,6 +419,16 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
             Some(c) => (format!("ir {} (byp)", c.name), Color::DarkGray),
         };
         spans.push(Span::styled(ir, Style::default().fg(ir_color)));
+        spans.push(sep());
+    }
+    // Linear-phase badge — chain-level like power, so never hidden behind a
+    // pref. Shows the added FIR latency; omitted while no kernel is loaded.
+    if let Some(s) = app.state.as_ref().filter(|s| s.phase_mode_linear) {
+        let lin = match linear_phase_latency_ms(s) {
+            Some(ms) => format!("lin +{ms:.0}ms"),
+            None => "lin".to_string(),
+        };
+        spans.push(Span::styled(lin, Style::default().fg(Color::Cyan)));
         spans.push(sep());
     }
     // Compact hint when a hidden advanced feature holds a non-default value.
@@ -2416,6 +2433,14 @@ fn render_tab_prefs(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect)
     } else {
         "—"
     };
+    // Chain-level phase mode, read from daemon state (like Swap L/R above it).
+    let phase_state = match app.state.as_ref() {
+        Some(st) if st.phase_mode_linear => match linear_phase_latency_ms(st) {
+            Some(ms) => format!("linear (+{ms:.0} ms)"),
+            None => "linear".to_string(),
+        },
+        _ => "minimum".to_string(),
+    };
     let items: Vec<(&str, String, &str)> = vec![
         ("FPS", prefs.fps.to_string(), "(applied next launch)"),
         (
@@ -2477,6 +2502,11 @@ fn render_tab_prefs(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect)
             "Swap L / R",
             swap_state.to_string(),
             "(Space/Enter swaps front L/R; needs ≥2ch)",
+        ),
+        (
+            "Linear phase",
+            phase_state,
+            "(EQ as FIR: no phase rotation, adds latency)",
         ),
     ];
 
@@ -2801,6 +2831,8 @@ mod tests {
             channel_layout: default_channel_layout(channels),
             routing: None,
             spectrum: vec![0.0; 16],
+            phase_mode_linear: false,
+            eq_fir_latency_frames: 0,
             active_output: None,
             mapped_profile: None,
             available_sinks: vec![],
@@ -3041,6 +3073,47 @@ mod tests {
         assert!(
             text.contains("-30 dBFS"),
             "missing default threshold:\n{text}"
+        );
+    }
+
+    #[test]
+    fn linear_phase_badge_follows_state() {
+        let mut app = App::new();
+        // Kernel loaded: badge carries the added latency (8192 / 48000 ≈ 171 ms).
+        let mut st = fixture(2);
+        st.phase_mode_linear = true;
+        st.eq_fir_latency_frames = 8192;
+        app.state = Some(st);
+        let text = render_to_text(&app, 120, 44);
+        assert!(text.contains("lin +171ms"), "missing lin badge:\n{text}");
+        // Mode armed but no kernel (no static bands): the ms part is omitted.
+        let mut st = fixture(2);
+        st.phase_mode_linear = true;
+        app.state = Some(st);
+        let text = render_to_text(&app, 120, 44);
+        assert!(text.contains("lin"), "missing latency-free badge:\n{text}");
+        assert!(!text.contains("lin +"), "stray latency in badge:\n{text}");
+        // Minimum phase (the default): no badge at all.
+        app.state = Some(fixture(2));
+        let text = render_to_text(&app, 120, 44);
+        assert!(!text.contains("lin"), "badge shown with mode off:\n{text}");
+    }
+
+    #[test]
+    fn prefs_tab_lists_linear_phase_row() {
+        let mut app = App::new();
+        let mut st = fixture(2);
+        st.phase_mode_linear = true;
+        st.eq_fir_latency_frames = 8192;
+        app.state = Some(st);
+        let mut ss = crate::settings::SettingsState::new(vec![], vec![], vec![]);
+        ss.tab = 3; // Preferences
+        app.mode = InputMode::Settings(ss);
+        let text = render_to_text(&app, 120, 44);
+        assert!(text.contains("Linear phase"), "missing row:\n{text}");
+        assert!(
+            text.contains("linear (+171 ms)"),
+            "row should read daemon state:\n{text}"
         );
     }
 

@@ -72,6 +72,11 @@ pub enum AudioCommand {
         index: usize,
         dynamics: Option<BandDynamics>,
     },
+    /// Switch the EQ phase behaviour (minimum ↔ linear).
+    SetPhaseMode(resonance_dsp::chain::PhaseMode),
+    /// Swap in a freshly rendered linear-phase FIR kernel (prepared on the
+    /// IPC thread at the live rate — the RT thread only installs it).
+    SetEqFir(Box<resonance_dsp::convolution::ConvolutionEngine>),
     /// Retarget an existing band to a channel subset (per-channel EQ).
     SetBandChannels {
         index: usize,
@@ -341,6 +346,8 @@ impl SharedState {
             channel_layout: default_channel_layout(live_channels),
             routing: chain.routing.as_ref().map(RoutingMatrix::from_dsp),
             spectrum: inner.spectrum.to_vec(),
+            phase_mode_linear: chain.phase_mode == resonance_dsp::chain::PhaseMode::Linear,
+            eq_fir_latency_frames: chain.eq_fir_latency_frames(),
             active_output: inner.active_output.clone(),
             mapped_profile: inner.mapped_profile.clone(),
             available_sinks: inner.available_sinks.clone(),

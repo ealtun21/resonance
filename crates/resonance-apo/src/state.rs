@@ -39,7 +39,8 @@ pub const STATE_MAGIC: u32 = 0x4F50_4152;
 /// v5: + convolution (enabled flag + IR-blob generation; samples live in the
 ///     sidecar blob file, see [`default_ir_path`]).
 /// v6: + per-band dynamic EQ (enabled flag + threshold/range/attack/release).
-pub const STATE_VERSION: u32 = 6;
+/// v7: + linear-phase EQ mode flag.
+pub const STATE_VERSION: u32 = 7;
 
 /// `"RIRB"` little-endian — sanity tag for the IR-blob sidecar.
 pub const IR_BLOB_MAGIC: u32 = 0x4252_4952;
@@ -112,6 +113,10 @@ pub struct ChainSnapshot {
     pub convolution_generation: u32,
     /// `1` = convolve, `0` = loaded-but-bypassed (or none).
     pub convolution_enabled: u32,
+    /// `1` = linear-phase EQ (static bands rendered to a FIR by the APO's
+    /// worker thread), `0` = minimum phase (biquads).
+    pub phase_mode: u32,
+    _pad_phase: u32,
     pub filters: [FilterSnapshot; MAX_FILTERS],
     /// Square output routing matrix dimension: `0` = none/identity (passthrough);
     /// else `N` means an `N×N` remap stored row-major in the first `N*N` entries
@@ -138,6 +143,8 @@ impl Default for ChainSnapshot {
             dither_bits: 0,
             convolution_generation: 0,
             convolution_enabled: 0,
+            phase_mode: 0,
+            _pad_phase: 0,
             filters: [FilterSnapshot::default(); MAX_FILTERS],
             route_channels: 0,
             _pad_route: 0,
@@ -290,6 +297,8 @@ impl ChainSnapshot {
             // when the sidecar was written); `publish` stamps it after this.
             convolution_generation: 0,
             convolution_enabled: u32::from(chain.convolution.enabled()),
+            phase_mode: u32::from(chain.phase_mode == resonance_dsp::chain::PhaseMode::Linear),
+            _pad_phase: 0,
             filters,
             route_channels,
             _pad_route: 0,
@@ -332,6 +341,11 @@ impl ChainSnapshot {
         let mut chain = builder.build();
         chain.routing = route_matrix(self.route_channels, &self.route_gains, channels);
         chain.enabled = self.enabled != 0;
+        if self.phase_mode != 0 {
+            // Arm the mode only — the FIR kernel is rendered off-RT by the
+            // caller (worker / format lock), never here.
+            chain.set_phase_mode(resonance_dsp::chain::PhaseMode::Linear);
+        }
         chain.set_effect_intensity(FxEffect::Fidelity, self.fidelity.intensity);
         chain.set_effect_enabled(FxEffect::Fidelity, self.fidelity.enabled != 0);
         chain.set_effect_intensity(FxEffect::Ambience, self.ambience.intensity);
@@ -355,6 +369,12 @@ impl ChainSnapshot {
     /// history → clicks. Returns `false` if the band structure changed (count
     /// differs) and the caller should rebuild instead.
     pub fn apply_to(&self, chain: &mut ProcessorChain, sample_rate: f64) -> bool {
+        // Linear phase (either side of the change) always takes the rebuild
+        // path: the FIR kernel must be re-rendered off-RT by the worker, and
+        // that render needs the fresh band table a full rebuild provides.
+        if self.phase_mode != 0 || chain.phase_mode == resonance_dsp::chain::PhaseMode::Linear {
+            return false;
+        }
         chain.enabled = self.enabled != 0;
         chain.preamp_db = self.preamp_db;
         chain.set_effect_intensity(FxEffect::Fidelity, self.fidelity.intensity);
@@ -1135,6 +1155,45 @@ mod tests {
         assert!(r.read().is_some());
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn phase_mode_round_trips_and_forces_rebuild() {
+        use resonance_dsp::chain::PhaseMode;
+        let mut chain = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48000.0)
+            .add_filter(
+                ApoFilter::builder()
+                    .filter_type(FilterType::Peaking)
+                    .freq(1000.0)
+                    .gain_db(6.0)
+                    .q(1.0)
+                    .enabled(true)
+                    .channels(2)
+                    .sample_rate(48000.0)
+                    .build()
+                    .unwrap(),
+            )
+            .build();
+        chain.set_phase_mode(PhaseMode::Linear);
+
+        let snap = ChainSnapshot::from_chain(&chain);
+        assert_eq!(snap.phase_mode, 1);
+        let rebuilt = snap.build_chain(2, 48000.0);
+        assert_eq!(rebuilt.phase_mode, PhaseMode::Linear);
+
+        // While linear, every publish takes the rebuild path so the worker
+        // re-renders the kernel off-RT — apply_to must decline.
+        let mut live = rebuilt;
+        assert!(!snap.apply_to(&mut live, 48000.0));
+
+        // Minimum-phase snapshots keep the click-free in-place path.
+        chain.set_phase_mode(PhaseMode::Minimum);
+        let snap_min = ChainSnapshot::from_chain(&chain);
+        assert_eq!(snap_min.phase_mode, 0);
+        let mut live_min = snap_min.build_chain(2, 48000.0);
+        assert!(snap_min.apply_to(&mut live_min, 48000.0));
     }
 
     #[test]

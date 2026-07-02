@@ -299,6 +299,10 @@ pub enum Command {
         index: usize,
         dynamics: Option<BandDynamics>,
     },
+    /// Switch the EQ between minimum phase (biquads, zero latency — the
+    /// default) and linear phase (static stereo bands rendered to a symmetric
+    /// FIR; adds `eq_fir_latency_frames` of delay, no phase rotation).
+    SetPhaseMode { linear: bool },
 }
 
 /// One of the two in-memory comparison slots for quick A/B auditioning.
@@ -624,6 +628,14 @@ pub struct DaemonState {
     pub routing: Option<RoutingMatrix>,
     /// 16 spectrum bins (20 Hz–20 kHz, log-spaced), values 0.0–1.0 peak-normalised
     pub spectrum: Vec<f32>,
+    /// EQ phase behaviour: true = linear phase (FIR bank), false = minimum
+    /// phase (biquads, the default).
+    #[serde(default)]
+    pub phase_mode_linear: bool,
+    /// Added latency of the linear-phase realisation, in frames at
+    /// `sample_rate` (0 when the mode is off / no kernel loaded).
+    #[serde(default)]
+    pub eq_fir_latency_frames: usize,
     /// Node name of the output device Resonance is currently feeding (if known)
     pub active_output: Option<String>,
     /// Profile mapped to the active output (auto-loaded), if any
@@ -1136,6 +1148,12 @@ mod tests {
     }
 
     #[test]
+    fn phase_mode_command_round_trips() {
+        command_round_trip(&Command::SetPhaseMode { linear: true });
+        command_round_trip(&Command::SetPhaseMode { linear: false });
+    }
+
+    #[test]
     fn channel_mask_defaults_to_all() {
         // `BandState.channels` uses `#[serde(default)]`; the default must be the
         // global mask so pre-per-channel profiles load as global bands. (The
@@ -1215,6 +1233,8 @@ mod tests {
             channel_layout: default_channel_layout(2),
             routing: Some(RoutingMatrix::swap(2, 0, 1)),
             spectrum: vec![0.1, 0.2, 0.3],
+            phase_mode_linear: true,
+            eq_fir_latency_frames: 8448,
             active_output: Some("alsa_output.pci".into()),
             mapped_profile: None,
             available_sinks: vec!["alsa_output.pci".into()],

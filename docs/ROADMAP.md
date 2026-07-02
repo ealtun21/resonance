@@ -18,11 +18,6 @@ angle so it can be picked up directly.
 
 ## Medium value
 
-- **Linear-phase EQ mode** — FIR path avoiding biquad phase rotation. Backlog
-  item 8; can reuse the shipped partitioned-convolution engine
-  (`resonance-dsp/src/convolution.rs`) by rendering the EQ curve to an FIR
-  kernel. Significant latency.
-
 - **Input-device / source selection** — eqMac lets you pick the capture source;
   we only follow the output device. Expose an input picker.
 
@@ -44,6 +39,10 @@ filter slopes** (12/24/48 dB/oct Butterworth on shelves + HP/LP); **mid/side
 EQ** (per-band `Stereo | Mid | Side`); **output dithering** (TPDF); a
 **convolution / impulse-response loader** (partitioned FFT, WAV IRs for room
 correction/HRTF, reported latency, persisted in profiles — shipped 2026-07-02);
-and **dynamic EQ** (per-band level-driven gain morph — threshold/range/attack/
+**dynamic EQ** (per-band level-driven gain morph — threshold/range/attack/
 release, band-passed sidechain, zero added latency; peaking bands, shipped
-2026-07-02). Most competitors do a subset of these on a single OS.
+2026-07-02); and a **linear-phase EQ mode** (static bands rendered to a
+symmetric FIR through the partitioned engine — no phase rotation, ~171 ms
+added latency at 48 kHz, hybrid with M/S + dynamic bands staying IIR; shipped
+2026-07-03 — closes backlog item 8 entirely). Most competitors do a subset of
+these on a single OS.
