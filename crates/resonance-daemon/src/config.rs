@@ -31,6 +31,10 @@ pub struct Profile {
     /// `serde` default so profiles written before convolution existed still load.
     #[serde(default)]
     pub convolution: Option<ConvolutionProfile>,
+    /// Linear-phase EQ mode (see `Command::SetPhaseMode`). `serde` default so
+    /// profiles written before the mode existed load as minimum phase.
+    #[serde(default)]
+    pub phase_mode: bool,
 }
 
 /// The persisted slice of the convolution stage: enough to restore it from disk.
@@ -55,6 +59,7 @@ impl Profile {
                 path: c.path.clone(),
                 enabled: c.enabled,
             }),
+            phase_mode: s.phase_mode_linear,
         }
     }
 
@@ -120,6 +125,8 @@ impl Profile {
                 path: path.clone(),
                 enabled: true,
             }),
+            // No preset format carries a phase-mode concept.
+            phase_mode: false,
         }
     }
 
@@ -154,6 +161,11 @@ impl Profile {
 
         let mut chain = builder.build();
         chain.enabled = self.enabled;
+        if self.phase_mode {
+            // Arm the mode only — the FIR kernel is rendered by the caller
+            // (daemon re-render hook / APO worker), never on this path.
+            chain.set_phase_mode(resonance_dsp::chain::PhaseMode::Linear);
+        }
 
         for id in FxEffectId::ALL {
             let (intensity, enabled) = self.effects.get(id);
@@ -471,6 +483,7 @@ mod tests {
             effects: EffectsState::default(),
             dither_bits: None,
             convolution: None,
+            phase_mode: false,
             bands: vec![
                 BandState {
                     band_type: BandType::Peaking,
@@ -512,6 +525,7 @@ mod tests {
             effects: EffectsState::default(),
             dither_bits: None,
             convolution: None,
+            phase_mode: false,
             bands: vec![BandState {
                 band_type: BandType::Peaking,
                 freq: 6000.0,
@@ -552,6 +566,38 @@ mod tests {
     }
 
     #[test]
+    fn profile_phase_mode_round_trips_toml_and_defaults_off() {
+        let profile = Profile {
+            preamp_db: 0.0,
+            enabled: true,
+            effects: EffectsState::default(),
+            bands: vec![],
+            dither_bits: None,
+            convolution: None,
+            phase_mode: true,
+        };
+        let text = toml::to_string_pretty(&profile).unwrap();
+        let back: Profile = toml::from_str(&text).unwrap();
+        assert!(back.phase_mode);
+
+        // Pre-linear-phase profiles load with the mode off.
+        let legacy = "preamp_db = 0.0\nenabled = true\n\n[effects]\n\
+             fidelity_intensity = 0.0\nfidelity_enabled = false\n\
+             ambience_intensity = 0.0\nambience_enabled = false\n\
+             surround_intensity = 0.0\nsurround_enabled = false\n\
+             dynamic_boost_intensity = 0.0\ndynamic_boost_enabled = false\n\
+             bass_intensity = 0.0\nbass_enabled = false\n\n\
+             [[bands]]\nband_type = \"Peaking\"\nfreq = 1000.0\n\
+             gain_db = 3.0\nq = 1.0\nenabled = true\n";
+        let legacy_profile: Profile = toml::from_str(legacy).unwrap();
+        assert!(!legacy_profile.phase_mode);
+
+        // into_chain arms the mode (kernel render is the caller's job).
+        let chain = profile.into_chain(2, 48_000.0);
+        assert_eq!(chain.phase_mode, resonance_dsp::chain::PhaseMode::Linear);
+    }
+
+    #[test]
     fn profile_convolution_round_trips_toml_and_defaults_to_none() {
         let profile = Profile {
             preamp_db: 0.0,
@@ -563,6 +609,7 @@ mod tests {
                 path: "/irs/room.wav".into(),
                 enabled: true,
             }),
+            phase_mode: false,
         };
         let text = toml::to_string_pretty(&profile).unwrap();
         let back: Profile = toml::from_str(&text).unwrap();

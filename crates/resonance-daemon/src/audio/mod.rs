@@ -248,6 +248,14 @@ pub fn apply_command(chain: &mut ProcessorChain, cmd: AudioCommand) {
         }
         AudioCommand::SetConvolutionEnabled(on) => chain.convolution.set_enabled(on),
         AudioCommand::ClearConvolution => chain.convolution.clear(),
+        AudioCommand::SetPhaseMode(mode) => chain.set_phase_mode(mode),
+        AudioCommand::SetEqFir(engine) => {
+            chain.eq_fir = *engine;
+            // Prepared at the rate/width the IPC thread believed was live;
+            // force-match the RT chain's actual format (usually a no-op).
+            chain.eq_fir.rebind_sample_rate(chain.sample_rate);
+            chain.eq_fir.set_channels(chain.channels);
+        }
     }
 }
 
