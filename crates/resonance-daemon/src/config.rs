@@ -83,6 +83,8 @@ impl Profile {
                     slope_db_oct: resonance_ipc::default_slope_db_oct(),
                     // Presets have no mid/side concept — default to full-stereo.
                     scope: resonance_ipc::BandScope::Stereo,
+                    // No preset format carries dynamic EQ — static bands.
+                    dynamics: None,
                 }
             })
             .collect();
@@ -139,6 +141,7 @@ impl Profile {
                 .q(b.q)
                 .slope_db_oct(b.slope_db_oct)
                 .scope(b.scope.into())
+                .dynamics(b.dynamics.map(Into::into))
                 .enabled(b.enabled)
                 .channels(channels)
                 .sample_rate(sample_rate)
@@ -478,6 +481,7 @@ mod tests {
                     channels: ChannelMask::ALL,
                     slope_db_oct: 12,
                     scope: resonance_ipc::BandScope::Stereo,
+                    dynamics: None,
                 },
                 BandState {
                     band_type: BandType::Peaking,
@@ -488,6 +492,7 @@ mod tests {
                     channels: ChannelMask::single(0),
                     slope_db_oct: 24,
                     scope: resonance_ipc::BandScope::Side,
+                    dynamics: None,
                 },
             ],
         };
@@ -496,6 +501,54 @@ mod tests {
         let back: Profile = toml::from_str(&text).unwrap();
         assert_eq!(back.bands[0].channels, ChannelMask::ALL);
         assert_eq!(back.bands[1].channels, ChannelMask::single(0));
+    }
+
+    #[test]
+    fn profile_band_dynamics_round_trips_toml_and_defaults_to_none() {
+        use resonance_ipc::BandDynamics;
+        let profile = Profile {
+            preamp_db: 0.0,
+            enabled: true,
+            effects: EffectsState::default(),
+            dither_bits: None,
+            convolution: None,
+            bands: vec![BandState {
+                band_type: BandType::Peaking,
+                freq: 6000.0,
+                gain_db: 0.0,
+                q: 3.0,
+                enabled: true,
+                channels: ChannelMask::ALL,
+                slope_db_oct: 12,
+                scope: resonance_ipc::BandScope::Stereo,
+                dynamics: Some(BandDynamics {
+                    threshold_db: -32.0,
+                    range_db: -8.0,
+                    attack_ms: 3.0,
+                    release_ms: 120.0,
+                }),
+            }],
+        };
+        let text = toml::to_string_pretty(&profile).unwrap();
+        let back: Profile = toml::from_str(&text).unwrap();
+        assert_eq!(back.bands[0].dynamics, profile.bands[0].dynamics);
+
+        // A band written before dynamics existed loads as a static band, and
+        // the chain builds it with no dynamics attached.
+        let legacy = "preamp_db = 0.0\nenabled = true\n\n[effects]\n\
+             fidelity_intensity = 0.0\nfidelity_enabled = false\n\
+             ambience_intensity = 0.0\nambience_enabled = false\n\
+             surround_intensity = 0.0\nsurround_enabled = false\n\
+             dynamic_boost_intensity = 0.0\ndynamic_boost_enabled = false\n\
+             bass_intensity = 0.0\nbass_enabled = false\n\n\
+             [[bands]]\nband_type = \"Peaking\"\nfreq = 1000.0\n\
+             gain_db = 3.0\nq = 1.0\nenabled = true\n";
+        let p: Profile = toml::from_str(legacy).unwrap();
+        assert!(p.bands[0].dynamics.is_none());
+
+        // into_chain carries the dynamics onto the built filter.
+        let chain = profile.into_chain(2, 48_000.0);
+        assert!(chain.filters[0].dynamics().is_some());
     }
 
     #[test]

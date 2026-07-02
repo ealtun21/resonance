@@ -224,6 +224,12 @@ pub fn apply_command(chain: &mut ProcessorChain, cmd: AudioCommand) {
                 f.scope = scope.into();
             }
         }
+        AudioCommand::SetBandDynamics { index, dynamics } => {
+            let sr = chain.sample_rate;
+            if let Some(f) = chain.filters.get_mut(index) {
+                let _ = f.set_dynamics(dynamics.map(Into::into), sr);
+            }
+        }
         AudioCommand::SetBandChannels { index, mask } => {
             if let Some(f) = chain.filters.get_mut(index) {
                 f.mask = mask;

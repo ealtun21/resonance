@@ -167,6 +167,9 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
             slope_db_oct,
         } => handle_set_band_slope(state, index, slope_db_oct),
         Command::SetBandScope { index, scope } => handle_set_band_scope(state, index, scope),
+        Command::SetBandDynamics { index, dynamics } => {
+            handle_set_band_dynamics(state, index, dynamics)
+        }
         Command::SetBandChannels { index, channels } => {
             handle_set_band_channels(state, index, channels)
         }
@@ -576,11 +579,13 @@ fn handle_set_band(state: &SharedState, index: usize, freq: f64, gain_db: f64, q
             q,
         },
         move |chain| {
-            if let Some(f) = chain.filters.get(index) {
-                let (ft, en, mask) = (f.filter_type, f.enabled, f.mask);
-                if let Ok(new_f) = build_band(chain, ft, freq, gain_db, q, en, mask) {
-                    chain.filters[index] = new_f;
-                }
+            // In-place update, exactly like the RT thread's `apply_command`
+            // arm: preserves slope/scope/dynamics and the running filter
+            // history. Rebuilding from a fresh filter here silently reset
+            // slope + scope on every live edit and diverged from the RT chain.
+            let sr = chain.sample_rate;
+            if let Some(f) = chain.filters.get_mut(index) {
+                let _ = f.update(f.filter_type, freq, gain_db, q, sr);
             }
         },
     );
@@ -648,11 +653,11 @@ fn handle_set_band_type(state: &SharedState, index: usize, band_type: BandType) 
     state.send(
         AudioCommand::SetBandType { index, band_type },
         move |chain| {
-            if let Some(f) = chain.filters.get(index) {
-                let (freq, gain_db, q, en, mask) = (f.freq, f.gain_db, f.q, f.enabled, f.mask);
-                if let Ok(nf) = build_band(chain, band_type.into(), freq, gain_db, q, en, mask) {
-                    chain.filters[index] = nf;
-                }
+            // In-place update (RT parity): keeps slope/scope/mask; dynamics
+            // are dropped by `update` itself when the type leaves Peaking.
+            let sr = chain.sample_rate;
+            if let Some(f) = chain.filters.get_mut(index) {
+                let _ = f.update(band_type.into(), f.freq, f.gain_db, f.q, sr);
             }
         },
     );
@@ -683,6 +688,53 @@ fn handle_set_band_scope(state: &SharedState, index: usize, scope: BandScope) ->
             f.scope = scope.into();
         }
     });
+    Response::Ok
+}
+
+/// Set (or clear) a band's dynamic EQ (level-driven gain morph).
+///
+/// Validated up front (the RT closure can't reply): the index must exist and
+/// `Some(..)` is only accepted on Peaking bands (`BandType::uses_dynamics`).
+fn handle_set_band_dynamics(
+    state: &SharedState,
+    index: usize,
+    dynamics: Option<resonance_ipc::BandDynamics>,
+) -> Response {
+    {
+        let inner = state.0.lock().unwrap();
+        let Some(f) = inner.chain.filters.get(index) else {
+            let nbands = inner.chain.filters.len();
+            return Response::Error(format!("no band at index {index} (have {nbands})"));
+        };
+        if dynamics.is_some() && !BandType::from(f.filter_type).uses_dynamics() {
+            return Response::Error(format!(
+                "dynamic eq applies to peaking bands only (band {} is {})",
+                index + 1,
+                BandType::from(f.filter_type).full()
+            ));
+        }
+    }
+    state.send(
+        AudioCommand::SetBandDynamics { index, dynamics },
+        move |chain| {
+            let sr = chain.sample_rate;
+            if let Some(f) = chain.filters.get_mut(index) {
+                let _ = f.set_dynamics(dynamics.map(Into::into), sr);
+            }
+        },
+    );
+    if let Some(d) = dynamics {
+        info!(
+            "band {} dynamics set: thr {:.1} dBFS range {:+.1} dB atk {:.1} ms rel {:.1} ms",
+            index + 1,
+            d.threshold_db,
+            d.range_db,
+            d.attack_ms,
+            d.release_ms
+        );
+    } else {
+        info!("band {} dynamics cleared", index + 1);
+    }
     Response::Ok
 }
 
