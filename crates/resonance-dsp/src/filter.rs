@@ -811,6 +811,15 @@ impl ApoFilter {
         }
     }
 
+    /// Detector + filter in one call, for paths where the detector sample is
+    /// the processed sample itself (the Mid/Side branch). Identical to
+    /// `process_channel` when the band has no active dynamics.
+    #[inline]
+    pub fn dyn_process(&mut self, sample: f64, channel: usize) -> f64 {
+        self.dyn_detect(sample);
+        self.process_channel(sample, channel)
+    }
+
     /// Recompute the head peaking coefficients for `gain_db + offset` from the
     /// cached trig — the gain-only morph (mirrors [`BiquadCoeffs::peaking`],
     /// including its `1 + α/A` normalisation).
