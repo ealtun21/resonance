@@ -49,7 +49,8 @@ impl GuiApp {
         // Build the list of present groups, then draw them joined by exactly
         // one separator between consecutive groups (never leading, trailing or
         // doubled — the structural fix for the adjacent-separator bug). Power
-        // and Preamp are always present; Overflow always closes the row.
+        // and Preamp are always present; ⚙/?/☰ live in a right-aligned cluster
+        // drawn separately below.
         #[derive(Clone, Copy)]
         enum Grp {
             Power,
@@ -57,9 +58,6 @@ impl GuiApp {
             Output,
             History,
             Daemon,
-            Settings,
-            Help,
-            Overflow,
         }
         let state = self.state.clone();
         // macOS reserves the far-left of the toolbar for the traffic-light buttons
@@ -97,7 +95,14 @@ impl GuiApp {
 
         // Cumulative widths required, in widen order: output → preamp-full →
         // daemon → history. Power, the compact preamp, ? and ☰ are always present.
-        let base = w_power + w_pre_min + w_settings + w_help + w_overflow + 5.0 * unit;
+        // The ⚙/?/☰ cluster is anchored to the right edge, so a tier that merely
+        // *fits* can leave zero daylight between the clusters (the estimates
+        // above under-measure the painter-drawn controls by a few px, which used
+        // to spill harmlessly past the trailing margin when the icons were
+        // left-packed). `min_flex` demands that daylight on top of the summed
+        // widths, so every tier collapses while the clusters are still apart.
+        let min_flex = 2.0 * unit;
+        let base = w_power + w_pre_min + w_settings + w_help + w_overflow + 5.0 * unit + min_flex;
         let req_output = base + w_output + unit;
         let req_preamp_full = req_output + (w_pre_full - w_pre_min);
         let req_daemon = req_preamp_full + w_daemon + unit;
@@ -138,9 +143,6 @@ impl GuiApp {
             if daemon_inline {
                 groups.push(Grp::Daemon);
             }
-            groups.push(Grp::Settings);
-            groups.push(Grp::Help);
-            groups.push(Grp::Overflow);
 
             for (i, g) in groups.iter().enumerate() {
                 if i > 0 {
@@ -152,20 +154,29 @@ impl GuiApp {
                     Grp::Output => self.tb_output(ui, state.as_ref()),
                     Grp::History => self.tb_history(ui),
                     Grp::Daemon => self.daemon_menu(ui),
-                    Grp::Settings => self.tb_settings(ui),
-                    Grp::Help => self.tb_help(ui),
-                    Grp::Overflow => self.overflow_menu(
-                        ui,
-                        state.as_ref(),
-                        Overflow {
-                            preamp: false,
-                            output: !out_inline,
-                            history: !history_inline,
-                            daemon: !daemon_inline && service::manager_available(),
-                        },
-                    ),
                 }
             }
+
+            // ⚙ / ? / ☰ anchor to the right edge, separated from the left
+            // cluster by the flexible gap. Right-to-left layout, so they're
+            // drawn outermost-first: ☰ hugs the edge, then ?, then ⚙.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(kit::SP_XS);
+                self.overflow_menu(
+                    ui,
+                    state.as_ref(),
+                    Overflow {
+                        preamp: false,
+                        output: !out_inline,
+                        history: !history_inline,
+                        daemon: !daemon_inline && service::manager_available(),
+                    },
+                );
+                Self::tb_sep(ui);
+                self.tb_help(ui);
+                Self::tb_sep(ui);
+                self.tb_settings(ui);
+            });
         });
         // Bottom hairline so the toolbar reads as a distinct header band over the
         // body (mockup `.toolbar` border-bottom), instead of bleeding into the

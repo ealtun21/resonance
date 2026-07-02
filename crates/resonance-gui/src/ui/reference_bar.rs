@@ -158,6 +158,13 @@ impl GuiApp {
         let leading = 42.0 + kit::text_width(ui, kit::T_VALUE, "Reference") + gap;
         let sep_unit = 1.0 + 2.0 * gap;
         let overflow_w = 28.0 + gap;
+        // Same right-anchor daylight rule as the toolbar's `min_flex`: the ☰ is
+        // pinned to the right edge, so an inline set that merely *fits* can
+        // leave zero gap between the last pill and the ☰ (the widths above are
+        // estimates that under-measure the painter-drawn pills by a few px).
+        // Whenever the ☰ is present, demand visible daylight on top of the
+        // summed widths so the next control drops while they're still apart.
+        let min_flex = 2.0 * sep_unit;
         let avail = ui.available_width();
         let mut inline: Vec<RefCtl> = present.iter().map(|&(c, ..)| c).collect();
         loop {
@@ -176,7 +183,11 @@ impl GuiApp {
                 .sum::<f32>()
                 + leading
                 + n_sections.saturating_sub(1) as f32 * sep_unit
-                + if collapsed_any { overflow_w } else { 0.0 };
+                + if collapsed_any {
+                    overflow_w + min_flex
+                } else {
+                    0.0
+                };
             if used <= avail {
                 break;
             }
@@ -223,12 +234,23 @@ impl GuiApp {
                 drawn = true;
             }
 
-            // ☰ overflow — only when something collapsed.
+            // ☰ overflow — only when something collapsed. Anchored to the right
+            // edge like the toolbar's ⚙/?/☰ cluster; the flexible gap (not a
+            // hairline) separates it from the inline pills.
             if !collapsed.is_empty() {
-                if drawn {
-                    Self::tb_sep(ui);
+                // Right-anchoring assumes the inline pills left it room; when
+                // even the never-collapsing core pills overfill the row, the
+                // anchor would draw the ☰ *on top of* them — fall back to the
+                // plain inline spot (clipping at the edge like any overfull
+                // row) instead.
+                if ui.available_width() >= overflow_w + kit::SP_XS + min_flex {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(kit::SP_XS);
+                        self.ref_overflow(ui, &collapsed, can_auto, busy);
+                    });
+                } else {
+                    self.ref_overflow(ui, &collapsed, can_auto, busy);
                 }
-                self.ref_overflow(ui, &collapsed, can_auto, busy);
             }
         });
     }
