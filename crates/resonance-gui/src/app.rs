@@ -335,12 +335,13 @@ pub struct GuiApp {
     /// disclosure). Lets stereo users do per-channel (L/R) EQ. Persisted.
     pub(crate) per_channel_eq: bool,
     /// Advanced-feature visibility toggles (persisted; default off for a clean
-    /// UI). `show_slope`/`show_scope` gate the bands-table Slope/Scope columns;
-    /// `show_dither` gates the Output section. Channels controls are relocated
-    /// into the Settings dialog; the per-band `Ch` column stays gated by
-    /// `per_channel_eq` (auto-on for >2ch).
+    /// UI). `show_slope`/`show_scope`/`show_dynamics` gate the bands-table
+    /// Slope/Scope/Dyn columns; `show_dither` gates the Output section.
+    /// Channels controls are relocated into the Settings dialog; the per-band
+    /// `Ch` column stays gated by `per_channel_eq` (auto-on for >2ch).
     pub(crate) show_slope: bool,
     pub(crate) show_scope: bool,
+    pub(crate) show_dynamics: bool,
     pub(crate) show_dither: bool,
     /// Gates the Convolution (impulse response) section under Effects.
     pub(crate) show_ir: bool,
@@ -695,6 +696,10 @@ impl GuiApp {
             show_scope: cc
                 .storage
                 .and_then(|s| s.get_string("show_scope"))
+                .is_some_and(|v| v == "true"),
+            show_dynamics: cc
+                .storage
+                .and_then(|s| s.get_string("show_dynamics"))
                 .is_some_and(|v| v == "true"),
             show_dither: cc
                 .storage
@@ -1082,6 +1087,7 @@ fn demo_state() -> DaemonState {
         channels,
         slope_db_oct: 12,
         scope: resonance_ipc::BandScope::Stereo,
+        dynamics: None,
     };
     DaemonState {
         enabled: true,
@@ -1242,6 +1248,7 @@ impl eframe::App for GuiApp {
         storage.set_string("per_channel_eq", self.per_channel_eq.to_string());
         storage.set_string("show_slope", self.show_slope.to_string());
         storage.set_string("show_scope", self.show_scope.to_string());
+        storage.set_string("show_dynamics", self.show_dynamics.to_string());
         storage.set_string("show_dither", self.show_dither.to_string());
         storage.set_string("show_ir", self.show_ir.to_string());
         if let Ok(j) = serde_json::to_string(&self.layout) {
@@ -1586,8 +1593,9 @@ impl GuiApp {
             && s.bands
                 .iter()
                 .any(|b| b.scope != resonance_ipc::BandScope::Stereo);
+        let dynamics = !self.show_dynamics && s.bands.iter().any(|b| b.dynamics.is_some());
         let channels = !ch_visible && s.bands.iter().any(|b| !b.channels.is_global(s.channels));
-        advanced_hint_label(dither, ir, slope, scope, channels)
+        advanced_hint_label(dither, ir, slope, scope, dynamics, channels)
     }
 }
 
@@ -1600,6 +1608,7 @@ pub(crate) fn advanced_hint_label(
     ir: bool,
     slope: bool,
     scope: bool,
+    dynamics: bool,
     channels: bool,
 ) -> Option<String> {
     let parts: Vec<&str> = [
@@ -1607,6 +1616,7 @@ pub(crate) fn advanced_hint_label(
         ("ir", ir),
         ("slope", slope),
         ("scope", scope),
+        ("dyn", dynamics),
         ("channels", channels),
     ]
     .into_iter()
@@ -1621,14 +1631,21 @@ mod tests {
 
     #[test]
     fn advanced_hint_label_lists_active_features() {
-        assert_eq!(advanced_hint_label(false, false, false, false, false), None);
         assert_eq!(
-            advanced_hint_label(true, false, false, true, false).as_deref(),
+            advanced_hint_label(false, false, false, false, false, false),
+            None
+        );
+        assert_eq!(
+            advanced_hint_label(true, false, false, true, false, false).as_deref(),
             Some("adv: dither scope")
         );
         assert_eq!(
-            advanced_hint_label(true, true, true, true, true).as_deref(),
-            Some("adv: dither ir slope scope channels")
+            advanced_hint_label(false, false, false, false, true, false).as_deref(),
+            Some("adv: dyn")
+        );
+        assert_eq!(
+            advanced_hint_label(true, true, true, true, true, true).as_deref(),
+            Some("adv: dither ir slope scope dyn channels")
         );
     }
 

@@ -136,6 +136,10 @@ impl GuiApp {
                         "Filter slope column (12/24/48 dB/oct)",
                     );
                     ui.checkbox(&mut self.show_scope, "Stereo scope column (Mid/Side)");
+                    ui.checkbox(
+                        &mut self.show_dynamics,
+                        "Dynamic EQ column (level-driven bands)",
+                    );
                     ui.checkbox(&mut self.show_dither, "Output dither section");
                     ui.checkbox(
                         &mut self.show_ir,

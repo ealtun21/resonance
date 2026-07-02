@@ -1402,6 +1402,7 @@ mod tests {
             channels: ChannelMask::ALL,
             slope_db_oct: 12,
             scope: resonance_ipc::BandScope::Stereo,
+            dynamics: None,
         }
     }
 

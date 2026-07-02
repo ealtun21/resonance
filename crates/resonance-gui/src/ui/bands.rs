@@ -10,7 +10,7 @@ use crate::ui::icons::Icon;
 use crate::ui::kit;
 use crate::ui::widgets::{freq_color, gain_bar, gain_color};
 use eframe::egui;
-use resonance_ipc::{BandScope, BandType, ChannelMask, Command, DaemonState};
+use resonance_ipc::{BandDynamics, BandScope, BandType, ChannelMask, Command, DaemonState};
 
 const IDX_W: f32 = 26.0;
 const ON_W: f32 = 36.0;
@@ -32,6 +32,9 @@ const SLOPES: [u8; 3] = [12, 24, 48];
 const SCOPE_W: f32 = 44.0;
 /// The stereo scopes offered by the per-band scope selector, in menu order.
 const SCOPES: [BandScope; 3] = [BandScope::Stereo, BandScope::Mid, BandScope::Side];
+/// Width of the dynamic-EQ chip ("Dyn"). Peaking bands only; other band types
+/// show a dim placeholder to keep alignment.
+const DYN_W: f32 = 44.0;
 /// Cells get an 8px gutter of their own (mockup table `td` padding) while the
 /// row tint/rule still span the full card width.
 const GUTTER: f32 = 8.0;
@@ -52,6 +55,8 @@ struct BandColumns {
     show_slope: bool,
     /// Stereo-scope selector column (St/M/S, applies to every band).
     show_scope: bool,
+    /// Dynamic-EQ chip column (peaking bands only).
+    show_dyn: bool,
     /// Inter-column spacing.
     gap: f32,
     /// Width of the flexible Graph column (only meaningful when `show_graph`).
@@ -70,11 +75,14 @@ impl BandColumns {
         show_ch: bool,
         show_slope_pref: bool,
         show_scope_pref: bool,
+        show_dyn_pref: bool,
     ) -> Self {
         // Collapse columns as the table narrows: drop the gain graph first, then
-        // the Slope selector, then the Scope selector, then the Type combo. Slope
-        // and Scope are additionally gated behind their advanced-visibility prefs.
+        // the Dyn chip, then the Slope selector, then the Scope selector, then
+        // the Type combo. Slope, Scope and Dyn are additionally gated behind
+        // their advanced-visibility prefs.
         let show_graph = avail >= 560.0;
+        let show_dyn = show_dyn_pref && avail >= 508.0;
         let show_slope = show_slope_pref && avail >= 464.0;
         let show_scope = show_scope_pref && avail >= 410.0;
         let show_type = avail >= 360.0;
@@ -82,6 +90,7 @@ impl BandColumns {
             + usize::from(show_type)
             + usize::from(show_slope)
             + usize::from(show_scope)
+            + usize::from(show_dyn)
             + usize::from(show_graph)
             + usize::from(show_ch);
         let fixed = IDX_W
@@ -89,6 +98,7 @@ impl BandColumns {
             + if show_type { TYPE_W } else { 0.0 }
             + if show_slope { SLOPE_W } else { 0.0 }
             + if show_scope { SCOPE_W } else { 0.0 }
+            + if show_dyn { DYN_W } else { 0.0 }
             + FREQ_W
             + GAIN_W
             + Q_W
@@ -101,6 +111,7 @@ impl BandColumns {
             show_type,
             show_slope,
             show_scope,
+            show_dyn,
             gap,
             graph_w,
         }
@@ -209,8 +220,14 @@ impl GuiApp {
         // opts in via the Channels section's "Per-channel EQ" toggle (lets a
         // stereo user do L/R-specific EQ).
         let show_ch = state.channels > 2 || (self.per_channel_eq && state.channels >= 2);
-        let cols =
-            BandColumns::resolve(avail, kit::SP_S, show_ch, self.show_slope, self.show_scope);
+        let cols = BandColumns::resolve(
+            avail,
+            kit::SP_S,
+            show_ch,
+            self.show_slope,
+            self.show_scope,
+            self.show_dynamics,
+        );
 
         bands_header(ui, &cols);
 
@@ -340,6 +357,10 @@ impl GuiApp {
             self.band_scope_cell(ui, b, i, &t);
         }
 
+        if cols.show_dyn {
+            self.band_dyn_cell(ui, b, i, &t);
+        }
+
         let mut freq = b.freq;
         let mut gain = b.gain_db;
         let mut q = b.q;
@@ -467,6 +488,99 @@ impl GuiApp {
                 index: i,
                 scope: SCOPES[sel],
             });
+        }
+    }
+
+    /// The dynamic-EQ cell for band `i`: a "Dyn" chip (accent when armed) whose
+    /// popup holds an on/off toggle plus the four detector parameters. The
+    /// band's gain morphs toward gain + range once in-band level exceeds the
+    /// threshold (de-essing, resonance taming). Peaking bands only; other band
+    /// types are static, so they show a dim placeholder that keeps the column
+    /// aligned and explains itself on hover. The new value is collected out of
+    /// the popup closure so it never borrows `self`, then a single edit is
+    /// queued (mirrors [`Self::band_channel_chip`]).
+    fn band_dyn_cell(
+        &mut self,
+        ui: &mut egui::Ui,
+        b: &resonance_ipc::BandState,
+        i: usize,
+        t: &kit::Tokens,
+    ) {
+        if !b.band_type.uses_dynamics() {
+            // Static-only type: no dynamics. Dim placeholder keeps alignment.
+            let (r, rr) = ui.allocate_exact_size(egui::vec2(DYN_W, 22.0), egui::Sense::hover());
+            ui.painter().text(
+                r.center(),
+                egui::Align2::CENTER_CENTER,
+                "—",
+                egui::FontId::monospace(kit::T_VALUE),
+                t.faint,
+            );
+            rr.on_hover_text("Dynamic EQ is available on peaking bands only");
+            return;
+        }
+        let col = if b.dynamics.is_some() {
+            t.accent
+        } else {
+            t.dim
+        };
+        let resp = kit::tag_chip(ui, DYN_W, 22.0, "Dyn", col).on_hover_text(
+            "Dynamic EQ: the band's gain morphs toward gain + range while the \
+             in-band level exceeds the threshold (de-esser / resonance tamer)",
+        );
+        let mut new_dyn: Option<Option<BandDynamics>> = None;
+        egui::Popup::menu(&resp)
+            .id(egui::Id::new(("dyn", i)))
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                let mut on = b.dynamics.is_some();
+                if kit::checkbox(ui, &mut on, "Dynamic EQ") {
+                    new_dyn = Some(on.then_some(BandDynamics::DEFAULT));
+                }
+                if let Some(mut d) = b.dynamics {
+                    let th = dyn_param_row(
+                        ui,
+                        egui::Id::new(("dyn_th", i)),
+                        "Threshold dBFS",
+                        &mut d.threshold_db,
+                        -80.0..=0.0,
+                        1,
+                        0.5,
+                    );
+                    let rg = dyn_param_row(
+                        ui,
+                        egui::Id::new(("dyn_rg", i)),
+                        "Range dB",
+                        &mut d.range_db,
+                        -24.0..=24.0,
+                        1,
+                        0.1,
+                    );
+                    let at = dyn_param_row(
+                        ui,
+                        egui::Id::new(("dyn_at", i)),
+                        "Attack ms",
+                        &mut d.attack_ms,
+                        0.1..=500.0,
+                        1,
+                        1.0,
+                    );
+                    let rl = dyn_param_row(
+                        ui,
+                        egui::Id::new(("dyn_rl", i)),
+                        "Release ms",
+                        &mut d.release_ms,
+                        1.0..=5000.0,
+                        0,
+                        5.0,
+                    );
+                    if th || rg || at || rl {
+                        new_dyn = Some(Some(d));
+                    }
+                }
+            });
+        if let Some(dynamics) = new_dyn {
+            self.queue_edit(Command::SetBandDynamics { index: i, dynamics });
         }
     }
 
@@ -627,6 +741,9 @@ fn bands_header(ui: &mut egui::Ui, cols: &BandColumns) {
         if cols.show_scope {
             cap(ui, SCOPE_W, "Scope");
         }
+        if cols.show_dyn {
+            cap(ui, DYN_W, "Dyn");
+        }
         cap(ui, FREQ_W, "Freq");
         cap(ui, GAIN_W, "Gain");
         cap(ui, Q_W, "Q");
@@ -637,6 +754,33 @@ fn bands_header(ui: &mut egui::Ui, cols: &BandColumns) {
             cap(ui, cols.graph_w, "Graph");
         }
     });
+}
+
+/// One labelled parameter row inside the dynamics popup: a dim caption on the
+/// left, a drag-or-type number field on the right. Returns true when the value
+/// changed (same contract as [`kit::num_field`]).
+fn dyn_param_row(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    label: &str,
+    value: &mut f64,
+    range: std::ops::RangeInclusive<f64>,
+    decimals: usize,
+    speed: f64,
+) -> bool {
+    ui.horizontal(|ui| {
+        let dim = kit::tokens(ui).dim;
+        let (r, _) = ui.allocate_exact_size(egui::vec2(92.0, 22.0), egui::Sense::hover());
+        ui.painter().text(
+            egui::pos2(r.left(), r.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::FontId::proportional(kit::T_CAPTION),
+            dim,
+        );
+        kit::num_field(ui, 64.0, id, value, range, decimals, speed)
+    })
+    .inner
 }
 
 /// Adjust a band-index lock pin after the band at `removed` is deleted: drop the
@@ -656,19 +800,22 @@ mod tests {
     #[test]
     fn slope_scope_columns_require_prefs() {
         // Prefs off ⇒ columns hidden even on a very wide table.
-        let c = BandColumns::resolve(1000.0, 8.0, false, false, false);
+        let c = BandColumns::resolve(1000.0, 8.0, false, false, false, false);
         assert!(!c.show_slope);
         assert!(!c.show_scope);
+        assert!(!c.show_dyn);
 
-        // Prefs on + wide ⇒ both shown.
-        let c = BandColumns::resolve(1000.0, 8.0, false, true, true);
+        // Prefs on + wide ⇒ all three shown.
+        let c = BandColumns::resolve(1000.0, 8.0, false, true, true, true);
         assert!(c.show_slope);
         assert!(c.show_scope);
+        assert!(c.show_dyn);
 
-        // Prefs on but mid-narrow (>=410, <464): scope fits, slope doesn't.
-        let c = BandColumns::resolve(430.0, 8.0, false, true, true);
+        // Prefs on but mid-narrow (>=410, <464): scope fits, slope + dyn don't.
+        let c = BandColumns::resolve(430.0, 8.0, false, true, true, true);
         assert!(!c.show_slope);
         assert!(c.show_scope);
+        assert!(!c.show_dyn);
     }
 
     #[test]
@@ -710,20 +857,25 @@ mod tests {
     #[test]
     fn columns_collapse_as_width_shrinks() {
         let gap = 6.0;
-        // Wide: every optional column shows (slope/scope prefs on).
-        let wide = BandColumns::resolve(700.0, gap, true, true, true);
-        assert!(wide.show_graph && wide.show_slope && wide.show_scope && wide.show_type);
-        // The graph drops first below 560; slope + scope + type still show.
-        let mid = BandColumns::resolve(500.0, gap, true, true, true);
-        assert!(!mid.show_graph && mid.show_slope && mid.show_scope && mid.show_type);
+        // Wide: every optional column shows (slope/scope/dyn prefs on).
+        let wide = BandColumns::resolve(700.0, gap, true, true, true, true);
+        assert!(wide.show_graph && wide.show_dyn && wide.show_slope && wide.show_scope);
+        assert!(wide.show_type);
+        // The graph drops first below 560; dyn + slope + scope + type still show.
+        let mid = BandColumns::resolve(520.0, gap, true, true, true, true);
+        assert!(!mid.show_graph && mid.show_dyn && mid.show_slope && mid.show_scope);
+        assert!(mid.show_type);
+        // The Dyn chip drops below 508; slope + scope + type still show.
+        let snug = BandColumns::resolve(500.0, gap, true, true, true, true);
+        assert!(!snug.show_dyn && snug.show_slope && snug.show_scope && snug.show_type);
         // The slope selector drops below 464; scope + type still show.
-        let tight = BandColumns::resolve(440.0, gap, true, true, true);
+        let tight = BandColumns::resolve(440.0, gap, true, true, true, true);
         assert!(!tight.show_graph && !tight.show_slope && tight.show_scope && tight.show_type);
         // The scope selector drops below 410; type still shows.
-        let tighter = BandColumns::resolve(390.0, gap, true, true, true);
+        let tighter = BandColumns::resolve(390.0, gap, true, true, true, true);
         assert!(!tighter.show_slope && !tighter.show_scope && tighter.show_type);
         // The Type combo drops below 360.
-        let narrow = BandColumns::resolve(300.0, gap, true, true, true);
+        let narrow = BandColumns::resolve(300.0, gap, true, true, true, true);
         assert!(
             !narrow.show_graph && !narrow.show_slope && !narrow.show_scope && !narrow.show_type
         );
@@ -732,14 +884,14 @@ mod tests {
     #[test]
     fn graph_width_clamps_to_minimum() {
         // Even at an absurd width the flexible graph never collapses past 60px.
-        let cols = BandColumns::resolve(480.0, 6.0, true, true, true);
+        let cols = BandColumns::resolve(480.0, 6.0, true, true, true, true);
         assert!(cols.graph_w >= 60.0);
     }
 
     #[test]
     fn show_ch_passes_through_to_layout() {
-        assert!(!BandColumns::resolve(700.0, 6.0, false, true, true).show_ch);
-        assert!(BandColumns::resolve(700.0, 6.0, true, true, true).show_ch);
+        assert!(!BandColumns::resolve(700.0, 6.0, false, true, true, true).show_ch);
+        assert!(BandColumns::resolve(700.0, 6.0, true, true, true, true).show_ch);
     }
 
     #[test]
