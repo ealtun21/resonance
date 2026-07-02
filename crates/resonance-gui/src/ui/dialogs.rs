@@ -149,6 +149,39 @@ impl GuiApp {
                     ui.add_space(8.0);
                     ui.separator();
                     ui.add_space(4.0);
+                    ui.label(egui::RichText::new("EQ phase").strong());
+                    if let Some(s) = &state {
+                        // Daemon state, not a preference: mirrors the live mode
+                        // and sends the toggle. Not routed through `queue_edit` —
+                        // the undo snapshot doesn't cover the phase mode (it is
+                        // preserved across `ApplyState`, like dither and the IR).
+                        ui.horizontal(|ui| {
+                            let mut linear = s.phase_mode_linear;
+                            if ui
+                                .checkbox(&mut linear, "Linear phase")
+                                .on_hover_text(
+                                    "Render the static EQ bands to an FIR — no phase \
+                                     rotation, but adds latency (~171 ms at 48 kHz). \
+                                     Mid/Side-scoped and dynamic bands stay \
+                                     minimum-phase.",
+                                )
+                                .changed()
+                            {
+                                self.queue(Command::SetPhaseMode { linear });
+                            }
+                            if s.phase_mode_linear && s.eq_fir_latency_frames > 0 {
+                                let ms = s.eq_fir_latency_frames as f64 / s.sample_rate.max(1.0)
+                                    * 1000.0;
+                                ui.weak(format!("(+{ms:.1} ms)"));
+                            }
+                        });
+                    } else {
+                        ui.weak("Connect the daemon to change the EQ phase mode.");
+                    }
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
                     ui.label(egui::RichText::new("Channels").strong());
                     if let Some(s) = &state {
                         if s.channels >= 2 {
