@@ -806,3 +806,59 @@ mod tests {
         assert_eq!(down.len(), 500);
     }
 }
+
+#[cfg(test)]
+mod downsample_repro {
+    use super::*;
+
+    #[test]
+    fn resample_ir_downsampling_preserves_a_short_delta() {
+        // A centred delta in a short IR at 96 kHz, downsampled to 48 kHz, must
+        // still be a ~unit-DC-gain kernel with its energy inside the window.
+        let mut delta = vec![0.0; 64];
+        delta[32] = 1.0;
+        let out = resample_ir(&delta, 96_000.0, 48_000.0);
+        assert_eq!(out.len(), 32);
+        let dc: f64 = out.iter().sum();
+        let peak = out.iter().cloned().fold(0.0f64, |a, b| a.max(b.abs()));
+        assert!(
+            (dc - 1.0).abs() < 0.05,
+            "DC gain should stay ~1.0 after 96k→48k, got {dc:.4} (peak {peak:.4})"
+        );
+    }
+}
+
+#[cfg(test)]
+mod engine_downsample_repro {
+    use super::*;
+
+    #[test]
+    fn engine_with_96k_delta_ir_at_48k_is_near_transparent() {
+        let ir = std::sync::Arc::new(IrData {
+            name: "d".into(),
+            path: "/d.wav".into(),
+            sample_rate: 96_000.0,
+            channels: vec![{
+                let mut v = vec![0.0; 64];
+                v[32] = 1.0;
+                v
+            }],
+        });
+        let mut e = ConvolutionEngine::new(2, 48_000.0);
+        e.load_ir(ir).unwrap();
+        // Steady 1 kHz tone: output RMS must be ≈ input RMS (unit DC-ish gain).
+        let n = 8192usize;
+        let tone: Vec<f64> = (0..n)
+            .map(|i| (2.0 * std::f64::consts::PI * 1000.0 / 48_000.0 * i as f64).sin() * 0.25)
+            .collect();
+        let mut buf: Vec<f64> = tone.iter().flat_map(|&s| [s, s]).collect();
+        e.process(&mut buf, 2);
+        let rms = |v: &[f64]| (v.iter().map(|x| x * x).sum::<f64>() / v.len() as f64).sqrt();
+        let (a, b) = (rms(&tone[2048..]), rms(&buf[4096..]));
+        let gain_db = 20.0 * (b / a).log10();
+        assert!(
+            gain_db.abs() < 1.0,
+            "96k delta IR at 48k engine should be ~0 dB, got {gain_db:.2} dB"
+        );
+    }
+}

@@ -694,6 +694,51 @@ mod hires_harness {
     }
 
     #[test]
+    fn apo_convolution_rate_mismatched_ir_is_transparent() {
+        // The live-VM scenario that failed: a 96 kHz delta IR convolved by a
+        // 48 kHz engine. The engine must resample the kernel (gain-compensated)
+        // and stay ~0 dB — a broken downsample path shows up as a huge loss.
+        let mut chain = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48_000.0)
+            .build();
+        chain
+            .convolution
+            .load_ir(std::sync::Arc::new(resonance_dsp::convolution::IrData {
+                name: "delta96".into(),
+                path: "/delta96.wav".into(),
+                sample_rate: 96_000.0,
+                channels: vec![{
+                    let mut v = vec![0.0; 64];
+                    v[32] = 1.0;
+                    v
+                }],
+            }))
+            .unwrap();
+        {
+            let mut w = ApoStateWriter::create(&default_state_path()).expect("state writer");
+            w.publish(&chain);
+        }
+        let (gain_db, peak_hz) = measure(48_000.0, 1_000.0);
+        assert!(
+            gain_db.abs() < 1.0,
+            "96k delta IR at 48k engine should be ~0 dB, got {gain_db:.2}"
+        );
+        assert!((peak_hz - 1_000.0).abs() < 8.0, "pitch intact: {peak_hz}");
+        // Restore a flat default state for the following tests.
+        {
+            let mut w = ApoStateWriter::create(&default_state_path()).expect("state writer");
+            w.publish(
+                &ProcessorChain::builder()
+                    .channels(2)
+                    .sample_rate(48_000.0)
+                    .build(),
+            );
+        }
+        let _ = std::fs::remove_file(crate::state::default_ir_path());
+    }
+
+    #[test]
     fn apo_convolution_ir_from_blob_is_applied() {
         // A single-tap 0.5 IR = a broadband −6.02 dB. Publish a flat chain with
         // it loaded; the APO must read the sidecar blob at format lock, prepare
