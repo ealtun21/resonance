@@ -789,6 +789,20 @@ impl ApoFilter {
         self.enabled && self.realizable && self.dyn_state.is_some()
     }
 
+    /// Whether the band is realisable at the bound sample rate (see the
+    /// `realizable` field docs — distinct from the user `enabled` intent).
+    #[must_use]
+    pub fn is_realizable(&self) -> bool {
+        self.realizable
+    }
+
+    /// Every cascaded section's coefficients, head first — the band's full
+    /// transfer function for response evaluation (FR display, linear-phase
+    /// kernel synthesis).
+    pub fn sections(&self) -> impl Iterator<Item = &BiquadCoeffs> {
+        std::iter::once(&self.biquad.coeffs).chain(self.extra.iter().map(|s| &s.coeffs))
+    }
+
     /// Per-frame dynamics hook: feed one detector sample (the band's input —
     /// masked-channel mean, or the Mid/Side value), update the envelope and
     /// morph the head gain when the offset moved. Call **before** processing

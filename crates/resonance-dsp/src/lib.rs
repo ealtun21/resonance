@@ -4,6 +4,7 @@ pub mod convolution;
 pub mod dither;
 pub mod effects;
 pub mod filter;
+pub mod linphase;
 pub mod resample;
 
 #[cfg(test)]
