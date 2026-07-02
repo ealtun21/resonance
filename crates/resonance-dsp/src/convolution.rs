@@ -1,14 +1,20 @@
-//! Convolution / impulse-response engine — uniform partitioned overlap-save
-//! FFT convolution for room correction, speaker correction and HRTF IRs.
+//! Convolution / impulse-response engine — two-stage non-uniform partitioned
+//! overlap-save FFT convolution for room correction, speaker correction,
+//! HRTF and reverb IRs.
 //!
-//! The IR is split into [`BLOCK`]-sample partitions, each transformed once at
-//! load time; at run time each input block costs one forward FFT, one
-//! multiply-accumulate pass over the frequency-delay line, and one inverse FFT
-//! — O(log N) per sample regardless of IR length, versus O(taps) for direct
-//! convolution. The engine buffers arbitrary-length chain blocks to the
-//! partition boundary, which adds a fixed [`BLOCK`]-sample latency
-//! ([`ConvolutionEngine::latency_frames`]); the daemon reports it so the UIs
-//! can show the added delay.
+//! The IR is split at [`HEAD_LEN`] taps into two uniform stages, each
+//! transformed once at load time. The *head* uses [`BLOCK`]-sample partitions
+//! so the stage keeps its fixed [`BLOCK`]-sample latency
+//! ([`ConvolutionEngine::latency_frames`]; the daemon reports it so the UIs
+//! can show the added delay). The *tail* uses [`TAIL_BLOCK`]-sample
+//! partitions, amortising the per-block cost that made long IRs infeasible
+//! under uniform partitioning (Gardner-style, two levels). `HEAD_LEN` is
+//! exactly two tail blocks, so a completed tail block finishes one full
+//! [`RATIO`]-sub-block cycle before its earliest output is due — the tail
+//! FFTs and delay-line MACs are spread across that cycle's sub-blocks instead
+//! of spiking one of them, keeping the RT path deterministic with no worker
+//! thread. The engine buffers arbitrary-length chain blocks to the partition
+//! boundary.
 //!
 //! Rate + width behaviour matches the rest of the chain: the source IR is kept
 //! (shared via `Arc`) so a sample-rate rebind re-resamples and re-transforms it
@@ -33,11 +39,29 @@ pub const BLOCK: usize = 256;
 /// window holds the previous block + the current one).
 const FFT_LEN: usize = 2 * BLOCK;
 
-/// Upper bound on the usable IR length, in seconds at the DSP rate. Uniform
-/// partitioning costs one spectrum MAC per partition per block, so an
-/// unbounded IR could swamp the RT budget; 2 s comfortably covers room/speaker
-/// correction and HRTF IRs. Longer files are truncated (the daemon logs it).
-pub const MAX_IR_SECONDS: f64 = 2.0;
+/// Input samples per tail partition. Larger partitions amortise the delay-line
+/// MAC over more output samples, which is what makes multi-second IRs cheap.
+const TAIL_BLOCK: usize = 4096;
+
+/// Tail FFT size: two tail blocks (overlap-save, like the head).
+const TAIL_FFT_LEN: usize = 2 * TAIL_BLOCK;
+
+/// Taps covered by the head stage before the tail takes over. Exactly two
+/// tail blocks — load-bearing: a tail input block's earliest output through
+/// tail partition 0 is due two tail blocks after that block starts, so a
+/// completed block leaves one full cycle of sub-blocks to compute in.
+const HEAD_LEN: usize = 2 * TAIL_BLOCK;
+
+/// Head blocks per tail block — the tail work-spreading cycle length.
+const RATIO: usize = TAIL_BLOCK / BLOCK;
+
+/// Upper bound on the usable IR length, in seconds at the DSP rate. The tail
+/// stage makes the per-sample cost nearly flat in IR length, but the delay
+/// line and kernel spectra still cost ~32 bytes per tap per channel each;
+/// 10 s covers hall/church reverbs and any room correction while bounding
+/// memory (~90 MB for a stereo 10 s IR at 96 kHz). Longer files are truncated
+/// (the daemon logs it).
+pub const MAX_IR_SECONDS: f64 = 10.0;
 
 /// Frames per `process` call the FIFOs are pre-sized for (matches the
 /// resampler's `MAX_INPUT_FRAMES`); larger calls still work but may grow them.
@@ -126,10 +150,13 @@ struct ChannelState {
     segment: Vec<f64>,
     /// Frequency-delay line: one input spectrum per partition, newest first.
     fdl: VecDeque<Vec<Complex<f64>>>,
+    /// Tail-stage streaming state, present only when the IR outgrows
+    /// [`HEAD_LEN`] — short IRs pay nothing for the second stage.
+    tail: Option<TailChannelState>,
 }
 
 impl ChannelState {
-    fn new(partitions: usize) -> Self {
+    fn new(partitions: usize, tail_partitions: usize) -> Self {
         let mut ready = VecDeque::with_capacity(BLOCK + MAX_INPUT_FRAMES);
         ready.extend(std::iter::repeat_n(0.0, BLOCK));
         Self {
@@ -139,6 +166,7 @@ impl ChannelState {
             fdl: (0..partitions)
                 .map(|_| vec![Complex::new(0.0, 0.0); FFT_LEN])
                 .collect(),
+            tail: (tail_partitions > 0).then(|| TailChannelState::new(tail_partitions)),
         }
     }
 
@@ -150,6 +178,62 @@ impl ChannelState {
         for spec in &mut self.fdl {
             spec.fill(Complex::new(0.0, 0.0));
         }
+        if let Some(tail) = self.tail.as_mut() {
+            tail.reset();
+        }
+    }
+}
+
+/// Per-audio-channel tail-stage state. One *cycle* is [`RATIO`] head blocks =
+/// one tail block; `phase` is the position within it. During cycle `C` the
+/// stage emits `out` (computed last cycle), collects the cycle's input into
+/// `collect`, and spreads the FFT + delay-line MAC for the *next* segment
+/// across the sub-blocks, accumulating in `acc` and finishing into `next`.
+#[derive(Clone)]
+struct TailChannelState {
+    /// Input samples of the in-progress tail block, one head block written
+    /// per sub-block at offset `phase * BLOCK`.
+    collect: Vec<f64>,
+    /// Tail overlap-save window: previous tail block + the completed one.
+    segment: Vec<f64>,
+    /// Tail frequency-delay line: one tail-block spectrum per partition,
+    /// newest first.
+    fdl: VecDeque<Vec<Complex<f64>>>,
+    /// Spectrum accumulator built up across the cycle's MAC phases.
+    acc: Vec<Complex<f64>>,
+    /// Tail output segment being emitted this cycle.
+    out: Vec<f64>,
+    /// Tail output segment being computed this cycle (emitted next cycle).
+    next: Vec<f64>,
+    /// Position within the [`RATIO`]-sub-block cycle.
+    phase: usize,
+}
+
+impl TailChannelState {
+    fn new(partitions: usize) -> Self {
+        Self {
+            collect: vec![0.0; TAIL_BLOCK],
+            segment: vec![0.0; TAIL_FFT_LEN],
+            fdl: (0..partitions)
+                .map(|_| vec![Complex::new(0.0, 0.0); TAIL_FFT_LEN])
+                .collect(),
+            acc: vec![Complex::new(0.0, 0.0); TAIL_FFT_LEN],
+            out: vec![0.0; TAIL_BLOCK],
+            next: vec![0.0; TAIL_BLOCK],
+            phase: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.collect.fill(0.0);
+        self.segment.fill(0.0);
+        for spec in &mut self.fdl {
+            spec.fill(Complex::new(0.0, 0.0));
+        }
+        self.acc.fill(Complex::new(0.0, 0.0));
+        self.out.fill(0.0);
+        self.next.fill(0.0);
+        self.phase = 0;
     }
 }
 
@@ -160,6 +244,8 @@ struct Kernel {
     /// `[ir_channel][partition][bin]`, with the inverse-FFT 1/N normalisation
     /// folded in at load time. Shared so cloning a chain never re-transforms.
     partitions: Arc<Vec<Vec<Vec<Complex<f64>>>>>,
+    /// Tail-stage kernel, present only when the IR outgrows [`HEAD_LEN`].
+    tail: Option<TailKernel>,
     /// Taps convolved at the DSP rate (post-resample, post-cap).
     taps: usize,
     fft: Arc<dyn Fft<f64>>,
@@ -169,6 +255,19 @@ struct Kernel {
     work: Vec<Complex<f64>>,
     /// Spectrum multiply-accumulate target for the current block.
     acc: Vec<Complex<f64>>,
+    scratch: Vec<Complex<f64>>,
+}
+
+/// Shared tail-stage kernel: [`TAIL_BLOCK`]-tap partition spectra plus the
+/// tail FFT plans and their working storage.
+#[derive(Clone)]
+struct TailKernel {
+    /// `[ir_channel][partition][bin]` at [`TAIL_FFT_LEN`], 1/N folded in.
+    partitions: Arc<Vec<Vec<Vec<Complex<f64>>>>>,
+    fft: Arc<dyn Fft<f64>>,
+    ifft: Arc<dyn Fft<f64>>,
+    /// Forward-FFT working buffer for completed tail blocks.
+    work: Vec<Complex<f64>>,
     scratch: Vec<Complex<f64>>,
 }
 
@@ -184,8 +283,11 @@ impl std::fmt::Debug for Kernel {
 
 impl Kernel {
     /// Resample the IR to `sample_rate`, cap it to [`MAX_IR_SECONDS`], and
-    /// transform each [`BLOCK`]-sized partition. Returns `None` for a
+    /// transform the first [`HEAD_LEN`] taps into [`BLOCK`]-sized partitions
+    /// and the remainder into [`TAIL_BLOCK`]-sized ones. Returns `None` for a
     /// degenerate IR (no channels / no samples).
+    // similar_names: fft/ifft pairs are the domain's own vocabulary.
+    #[allow(clippy::similar_names)]
     fn prepare(ir: &IrData, sample_rate: f64, channels: usize) -> Option<Self> {
         if ir.channels.is_empty() || ir.frames() == 0 || sample_rate <= 0.0 {
             return None;
@@ -198,12 +300,18 @@ impl Kernel {
         let mut planner = FftPlanner::new();
         let fft = planner.plan_fft_forward(FFT_LEN);
         let ifft = planner.plan_fft_inverse(FFT_LEN);
+        let tail_fft = planner.plan_fft_forward(TAIL_FFT_LEN);
+        let tail_ifft = planner.plan_fft_inverse(TAIL_FFT_LEN);
         let scratch_len = fft
             .get_inplace_scratch_len()
             .max(ifft.get_inplace_scratch_len());
+        let tail_scratch_len = tail_fft
+            .get_inplace_scratch_len()
+            .max(tail_ifft.get_inplace_scratch_len());
 
         let mut taps = 0usize;
-        let mut all: Vec<Vec<Vec<Complex<f64>>>> = Vec::with_capacity(ir.channels.len());
+        let mut heads: Vec<Vec<Vec<Complex<f64>>>> = Vec::with_capacity(ir.channels.len());
+        let mut tails: Vec<Vec<Vec<Complex<f64>>>> = Vec::with_capacity(ir.channels.len());
         for src in &ir.channels {
             let capped = &src[..src.len().min(src_cap.max(1))];
             let mut h = resample_ir(capped, ir.sample_rate, sample_rate);
@@ -213,40 +321,51 @@ impl Kernel {
             }
             taps = taps.max(h.len());
 
-            let nparts = h.len().div_ceil(BLOCK);
-            let mut specs = Vec::with_capacity(nparts);
-            let mut buf = vec![Complex::new(0.0, 0.0); FFT_LEN];
-            let mut scratch = vec![Complex::new(0.0, 0.0); scratch_len];
-            // Fold the inverse FFT's 1/N into the kernel so the RT path never
-            // scales.
-            let norm = 1.0 / FFT_LEN as f64;
-            for part in h.chunks(BLOCK) {
-                buf.fill(Complex::new(0.0, 0.0));
-                for (i, &s) in part.iter().enumerate() {
-                    buf[i] = Complex::new(s * norm, 0.0);
-                }
-                fft.process_with_scratch(&mut buf, &mut scratch);
-                specs.push(buf.clone());
-            }
-            all.push(specs);
+            let split = h.len().min(HEAD_LEN);
+            heads.push(partition_spectra(
+                &h[..split],
+                BLOCK,
+                FFT_LEN,
+                fft.as_ref(),
+                scratch_len,
+            ));
+            tails.push(partition_spectra(
+                &h[split..],
+                TAIL_BLOCK,
+                TAIL_FFT_LEN,
+                tail_fft.as_ref(),
+                tail_scratch_len,
+            ));
         }
         // Every IR channel must span the same number of partitions so a single
         // FDL depth serves them all: pad shorter channels with zero spectra.
-        let nparts = all.iter().map(Vec::len).max().unwrap_or(0);
+        let nparts = heads.iter().map(Vec::len).max().unwrap_or(0);
         if nparts == 0 {
             return None;
         }
-        for specs in &mut all {
+        for specs in &mut heads {
             specs.resize(nparts, vec![Complex::new(0.0, 0.0); FFT_LEN]);
         }
+        let tail_nparts = tails.iter().map(Vec::len).max().unwrap_or(0);
+        for specs in &mut tails {
+            specs.resize(tail_nparts, vec![Complex::new(0.0, 0.0); TAIL_FFT_LEN]);
+        }
+        let tail = (tail_nparts > 0).then(|| TailKernel {
+            partitions: Arc::new(tails),
+            fft: tail_fft,
+            ifft: tail_ifft,
+            work: vec![Complex::new(0.0, 0.0); TAIL_FFT_LEN],
+            scratch: vec![Complex::new(0.0, 0.0); tail_scratch_len],
+        });
 
         Some(Self {
-            partitions: Arc::new(all),
+            partitions: Arc::new(heads),
+            tail,
             taps,
             fft,
             ifft,
             state: (0..channels.max(1))
-                .map(|_| ChannelState::new(nparts))
+                .map(|_| ChannelState::new(nparts, tail_nparts))
                 .collect(),
             work: vec![Complex::new(0.0, 0.0); FFT_LEN],
             acc: vec![Complex::new(0.0, 0.0); FFT_LEN],
@@ -296,9 +415,90 @@ impl Kernel {
             .process_with_scratch(&mut self.acc, &mut self.scratch);
 
         // Overlap-save: the first half is circular wrap garbage; the second
-        // half is the valid linear convolution of the new block.
-        st.ready.extend(self.acc[BLOCK..].iter().map(|c| c.re));
+        // half is the valid linear convolution of the new block. With a tail
+        // stage, sum in its precomputed segment and run this sub-block's
+        // share of the next segment's work.
+        if let (Some(tk), Some(ts)) = (self.tail.as_mut(), st.tail.as_mut()) {
+            let base = ts.phase * BLOCK;
+            st.ready.extend(
+                self.acc[BLOCK..]
+                    .iter()
+                    .zip(ts.out[base..base + BLOCK].iter())
+                    .map(|(c, &t)| c.re + t),
+            );
+
+            if ts.phase == 0 {
+                // A tail block just completed: window it, transform it,
+                // rotate the tail FDL, start a fresh accumulation.
+                ts.segment.copy_within(TAIL_BLOCK.., 0);
+                ts.segment[TAIL_BLOCK..].copy_from_slice(&ts.collect);
+                for (w, &s) in tk.work.iter_mut().zip(ts.segment.iter()) {
+                    *w = Complex::new(s, 0.0);
+                }
+                tk.fft.process_with_scratch(&mut tk.work, &mut tk.scratch);
+                if let Some(mut oldest) = ts.fdl.pop_back() {
+                    oldest.copy_from_slice(&tk.work);
+                    ts.fdl.push_front(oldest);
+                }
+                ts.acc.fill(Complex::new(0.0, 0.0));
+            }
+
+            // Stash this sub-block's input for the tail block in progress
+            // (after the phase-0 hand-off above so it is never clobbered).
+            ts.collect[base..base + BLOCK].copy_from_slice(&st.segment[BLOCK..]);
+
+            // This phase's slice of the tail delay-line MAC — spread so no
+            // single sub-block pays for the whole line.
+            let parts = &tk.partitions[ir_ch];
+            let chunk = parts.len().div_ceil(RATIO);
+            let lo = (ts.phase * chunk).min(parts.len());
+            let hi = ((ts.phase + 1) * chunk).min(parts.len());
+            for (spec, part) in ts.fdl.iter().skip(lo).zip(parts[lo..hi].iter()) {
+                for ((a, x), h) in ts.acc.iter_mut().zip(spec.iter()).zip(part.iter()) {
+                    *a += x * h;
+                }
+            }
+
+            if ts.phase == RATIO - 1 {
+                // Cycle ends: finish the segment and hand it over for
+                // emission throughout the next cycle.
+                tk.ifft.process_with_scratch(&mut ts.acc, &mut tk.scratch);
+                for (o, c) in ts.next.iter_mut().zip(ts.acc[TAIL_BLOCK..].iter()) {
+                    *o = c.re;
+                }
+                std::mem::swap(&mut ts.out, &mut ts.next);
+                ts.phase = 0;
+            } else {
+                ts.phase += 1;
+            }
+        } else {
+            st.ready.extend(self.acc[BLOCK..].iter().map(|c| c.re));
+        }
     }
+}
+
+/// Transform `h` into overlap-save partition spectra of `block` taps each,
+/// zero-padded to `fft_len`, with the inverse FFT's 1/N folded in so the RT
+/// path never scales. Empty input yields no partitions.
+fn partition_spectra(
+    h: &[f64],
+    block: usize,
+    fft_len: usize,
+    fft: &dyn Fft<f64>,
+    scratch_len: usize,
+) -> Vec<Vec<Complex<f64>>> {
+    let norm = 1.0 / fft_len as f64;
+    let mut scratch = vec![Complex::new(0.0, 0.0); scratch_len];
+    h.chunks(block)
+        .map(|part| {
+            let mut buf = vec![Complex::new(0.0, 0.0); fft_len];
+            for (b, &s) in buf.iter_mut().zip(part.iter()) {
+                *b = Complex::new(s * norm, 0.0);
+            }
+            fft.process_with_scratch(&mut buf, &mut scratch);
+            buf
+        })
+        .collect()
 }
 
 /// Partitioned-convolution chain stage. Off + empty by default (bit-exact
@@ -425,7 +625,13 @@ impl ConvolutionEngine {
         self.channels = channels;
         if let Some(k) = self.kernel.as_mut() {
             let nparts = k.partitions.first().map_or(0, Vec::len);
-            k.state = (0..channels).map(|_| ChannelState::new(nparts)).collect();
+            let tail_nparts = k
+                .tail
+                .as_ref()
+                .map_or(0, |t| t.partitions.first().map_or(0, Vec::len));
+            k.state = (0..channels)
+                .map(|_| ChannelState::new(nparts, tail_nparts))
+                .collect();
         }
     }
 
@@ -820,6 +1026,220 @@ mod tests {
         assert_eq!(ir.frames(), 3);
         assert!(IrData::from_interleaved("x".into(), "p".into(), 48_000.0, 0, &[1.0]).is_none());
         assert!(IrData::from_interleaved("x".into(), "p".into(), 48_000.0, 2, &[]).is_none());
+    }
+
+    /// Sparse IR: mostly zeros with a few taps, so the analytic reference is
+    /// a cheap sum of delayed copies — exact alignment checks stay fast even
+    /// for IRs far past the head/tail partition boundary.
+    fn sparse_ir(len: usize, taps: &[(usize, f64)]) -> Vec<f64> {
+        let mut h = vec![0.0; len];
+        for &(i, a) in taps {
+            h[i] = a;
+        }
+        h
+    }
+
+    fn sparse_reference(x: &[f64], taps: &[(usize, f64)]) -> Vec<f64> {
+        (0..x.len())
+            .map(|n| {
+                taps.iter()
+                    .filter(|&&(i, _)| n >= i)
+                    .map(|&(i, a)| a * x[n - i])
+                    .sum()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn long_sparse_ir_matches_reference_across_head_tail_boundary() {
+        // Taps straddle every alignment hazard: block edges, the head/tail
+        // split at 8192, tail-partition edges and the IR's last sample.
+        let taps = [
+            (0usize, 1.0),
+            (255, -0.5),
+            (8191, 0.75),
+            (8192, -0.25),
+            (8193, 0.5),
+            (12000, -0.125),
+            (16384, 0.375),
+            (20479, -0.0625),
+        ];
+        let h = sparse_ir(20480, &taps);
+        let x = noise(30000);
+        let reference = sparse_reference(&x, &taps);
+
+        let mut e = ConvolutionEngine::new(1, 48_000.0);
+        e.load_ir(ir_from_taps(vec![h], 48_000.0)).unwrap();
+        let mut buf = x.clone();
+        buf.extend(std::iter::repeat_n(0.0, BLOCK));
+        e.process(&mut buf, 1);
+
+        for (i, r) in reference.iter().enumerate() {
+            assert!(
+                (buf[i + BLOCK] - r).abs() < 1e-9,
+                "long sparse IR mismatch at {i}: {} vs {r}",
+                buf[i + BLOCK]
+            );
+        }
+    }
+
+    #[test]
+    fn long_dense_ir_matches_direct_convolution() {
+        // 10 000 dense taps crosses the head/tail boundary; 16 384 input
+        // samples spans four tail cycles, so the segment swap runs repeatedly.
+        let h = noise(10_000);
+        let x = noise(16_384);
+        let reference = direct_conv(&x, &h);
+
+        let mut e = ConvolutionEngine::new(1, 48_000.0);
+        e.load_ir(ir_from_taps(vec![h], 48_000.0)).unwrap();
+        let mut buf = x.clone();
+        buf.extend(std::iter::repeat_n(0.0, BLOCK));
+        e.process(&mut buf, 1);
+
+        for (i, r) in reference.iter().enumerate() {
+            assert!(
+                (buf[i + BLOCK] - r).abs() < 1e-9,
+                "long dense IR mismatch at {i}: {} vs {r}",
+                buf[i + BLOCK]
+            );
+        }
+    }
+
+    #[test]
+    fn long_ir_streaming_is_block_size_invariant() {
+        let taps = [(0usize, 1.0), (9000, 0.5), (16383, -0.25)];
+        let h = sparse_ir(16_384, &taps);
+        let x = noise(20_000);
+
+        let mut one = ConvolutionEngine::new(1, 48_000.0);
+        one.load_ir(ir_from_taps(vec![h.clone()], 48_000.0))
+            .unwrap();
+        let mut whole = x.clone();
+        one.process(&mut whole, 1);
+
+        let mut chopped = ConvolutionEngine::new(1, 48_000.0);
+        chopped.load_ir(ir_from_taps(vec![h], 48_000.0)).unwrap();
+        let mut pieces = Vec::new();
+        let sizes = [480usize, 37, 1024, 3, 256, 700, 4096, 8191];
+        let mut off = 0;
+        for &s in sizes.iter().cycle() {
+            if off >= x.len() {
+                break;
+            }
+            let end = (off + s).min(x.len());
+            let mut part = x[off..end].to_vec();
+            chopped.process(&mut part, 1);
+            pieces.extend_from_slice(&part);
+            off = end;
+        }
+
+        for (i, (a, b)) in whole.iter().zip(pieces.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-12,
+                "long-IR block-size variance at {i}: {a} vs {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn mid_length_ir_is_no_longer_truncated() {
+        // 3 s at 48 kHz — over the old 2 s cap, well under the new one.
+        let taps = 3 * 48_000;
+        let mut e = ConvolutionEngine::new(1, 48_000.0);
+        e.load_ir(ir_from_taps(vec![vec![0.001; taps]], 48_000.0))
+            .unwrap();
+        assert_eq!(e.info().unwrap().taps, taps);
+    }
+
+    #[test]
+    fn long_ir_reenabling_clears_stale_tails() {
+        let mut e = ConvolutionEngine::new(1, 48_000.0);
+        e.load_ir(ir_from_taps(vec![noise(20_000)], 48_000.0))
+            .unwrap();
+        let mut buf = noise(6 * 4096);
+        e.process(&mut buf, 1);
+        e.set_enabled(false);
+        e.set_enabled(true);
+        // A long IR keeps state in the tail stage too: silence in must give
+        // silence out across several full tail cycles.
+        let mut silence = vec![0.0; 6 * 4096];
+        e.process(&mut silence, 1);
+        assert!(
+            silence.iter().all(|&s| s.abs() < 1e-12),
+            "stale tail-stage state leaked through re-enable"
+        );
+    }
+
+    #[test]
+    fn long_ir_survives_rebind_and_channel_resize() {
+        let taps = [(0usize, 1.0), (10_000, 0.5)];
+        let h = sparse_ir(10_001, &taps);
+        let mut e = ConvolutionEngine::new(2, 48_000.0);
+        e.load_ir(ir_from_taps(vec![h], 48_000.0)).unwrap();
+
+        e.rebind_sample_rate(96_000.0);
+        let t = e.info().unwrap().taps;
+        assert!(
+            (19_900..=20_100).contains(&t),
+            "expected ~20002 taps at 96 k, got {t}"
+        );
+        e.rebind_sample_rate(48_000.0);
+        e.set_channels(4);
+
+        // Back at the original rate + a new width the sparse reference must
+        // still hold exactly on every channel.
+        let x = noise(24_000);
+        let reference = sparse_reference(&x, &taps);
+        let mut buf: Vec<f64> = x.iter().flat_map(|&s| [s, s, s, s]).collect();
+        buf.extend(std::iter::repeat_n(0.0, 4 * BLOCK));
+        e.process(&mut buf, 4);
+        for (i, r) in reference.iter().enumerate() {
+            for ch in 0..4 {
+                assert!(
+                    (buf[(i + BLOCK) * 4 + ch] - r).abs() < 1e-6,
+                    "ch {ch} mismatch at {i} after rebind+resize"
+                );
+            }
+        }
+    }
+
+    /// Manual RT-budget check (`cargo test -p resonance-dsp --release -- \
+    /// --ignored worst_case`): the tail work-spreading exists so no single
+    /// 256-frame callback pays for the whole delay line. Feed a worst-case
+    /// 10 s stereo IR at 96 kHz and require every per-call time to fit well
+    /// inside the 2.67 ms real-time window. Ignored in CI: wall-clock timing
+    /// is machine-dependent.
+    #[test]
+    #[ignore = "wall-clock timing; run manually in release"]
+    fn worst_case_block_time_fits_rt_budget() {
+        let rate = 96_000.0;
+        let taps = (MAX_IR_SECONDS * rate) as usize;
+        let mut e = ConvolutionEngine::new(2, rate);
+        e.load_ir(ir_from_taps(vec![noise(taps)], rate)).unwrap();
+
+        let block: Vec<f64> = noise(2 * BLOCK);
+        let mut worst = std::time::Duration::ZERO;
+        let mut total = std::time::Duration::ZERO;
+        let calls = 4 * RATIO * 8; // several full tail cycles, warmed up
+        for _ in 0..calls {
+            let mut buf = block.clone();
+            let t0 = std::time::Instant::now();
+            e.process(&mut buf, 2);
+            let dt = t0.elapsed();
+            worst = worst.max(dt);
+            total += dt;
+        }
+        let budget = std::time::Duration::from_micros(2666);
+        eprintln!(
+            "10 s stereo IR @96 kHz: mean {:?}, worst {:?} (budget {budget:?})",
+            total / u32::try_from(calls).unwrap(),
+            worst
+        );
+        assert!(
+            worst < budget,
+            "worst per-block time {worst:?} exceeds the RT budget {budget:?}"
+        );
     }
 
     #[test]
