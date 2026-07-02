@@ -15,14 +15,14 @@
 //!   `--save-baseline`, change one thing, run again with `--baseline` and the
 //!   deviation column shows exactly what that change did to the response.
 //!
-//! Windows note: the daemon owns no audio there (the APO inside audiodg does),
-//! so `CaptureOutput` is empty — use `resonanced --measure-loopback` for the
-//! real-path measurement instead.
+//! On Windows the daemon owns no audio path (the APO inside audiodg does), so
+//! instead of `CaptureOutput` the harness plays its tone with a WASAPI output
+//! stream and captures the same endpoint's **loopback** (the engine's rendered
+//! mix, post-APO) via cpal — the analysis and comparison are identical.
 
 use anyhow::{Context, Result, bail};
 use resonance_ipc::{Command, DaemonState, FxEffectId, Response, fr};
 use std::fmt::Write as _;
-use std::path::PathBuf;
 
 pub struct Options {
     pub freqs: Vec<f64>,
@@ -90,7 +90,7 @@ pub fn run(o: &Options) -> Result<()> {
     let mode = pick_mode(&state, o)?;
 
     // Quiet pre-check: other audio playing pollutes every measurement.
-    let (_, pre) = capture((rate * 0.4) as u32)?;
+    let pre = ambient_capture(rate, 400)?;
     let noise_db = rms_db(&pre);
     if noise_db > -45.0 {
         eprintln!(
@@ -108,8 +108,8 @@ pub fn run(o: &Options) -> Result<()> {
     // the floor is a legitimate measurement (e.g. a low-pass IR's stopband).
     if rows.iter().all(|r| !r.present) {
         bail!(
-            "no probe tone reached the daemon — player missing, or audio is not routed \
-             through Resonance (on Windows use `resonanced --measure-loopback`)"
+            "no probe tone made it through the audio path — player missing, output muted, \
+             or audio is not routed through Resonance"
         );
     }
 
@@ -159,27 +159,9 @@ fn pick_mode(state: &DaemonState, o: &Options) -> Result<Mode> {
     Ok(Mode::Predicted)
 }
 
-/// Play one tone through the system path and measure the daemon's output.
+/// Play one tone through the system path and measure the processed output.
 fn probe_tone(freq: f64, rate: f64, o: &Options) -> Result<Row> {
-    let dur_ms = o.settle_ms + o.capture_ms + 500;
-    let wav = write_tone_wav(freq, rate, o.amp, dur_ms)?;
-    let mut child = spawn_player(&wav)?;
-
-    std::thread::sleep(std::time::Duration::from_millis(o.settle_ms + o.capture_ms));
-    let frames = (rate * o.capture_ms as f64 / 1000.0) as u32;
-    let (cap_rate, samples) = capture(frames)?;
-
-    let _ = child.kill();
-    let _ = child.wait();
-    let _ = std::fs::remove_file(&wav);
-
-    if (samples.len() as f64) < f64::from(frames) * 0.5 {
-        bail!(
-            "daemon returned {} of {frames} requested samples — no audio is flowing through \
-             Resonance (on Windows use `resonanced --measure-loopback` instead)",
-            samples.len()
-        );
-    }
+    let (cap_rate, samples) = measure_tone(freq, rate, o)?;
     let amp = sine_amplitude(&samples, cap_rate, freq);
     let measured_db = 20.0 * amp.max(1e-12).log10();
     let present = measured_db > FLOOR_DB;
@@ -314,7 +296,58 @@ fn report(state: &DaemonState, mode: &Mode, rows: &[Row], o: &Options, rate: f64
     }
 }
 
+// ── Platform measurement paths ───────────────────────────────────────────────
+//
+// Unix (Linux/macOS): play the tone with the system player (it routes through
+// the daemon like any application) and read the daemon's post-DSP rolling
+// buffer over IPC. Windows: the daemon has no audio path (the APO inside
+// audiodg does the DSP), so play + capture happen right here over WASAPI —
+// an output stream for the tone, loopback capture (post-APO) on the endpoint.
+
+/// One tone's `(rate, mono samples)` measurement of the processed output.
+#[cfg(not(windows))]
+fn measure_tone(freq: f64, rate: f64, o: &Options) -> Result<(f64, Vec<f32>)> {
+    let dur_ms = o.settle_ms + o.capture_ms + 500;
+    let wav = write_tone_wav(freq, rate, o.amp, dur_ms)?;
+    let mut child = spawn_player(&wav)?;
+
+    std::thread::sleep(std::time::Duration::from_millis(o.settle_ms + o.capture_ms));
+    let frames = (rate * o.capture_ms as f64 / 1000.0) as u32;
+    let result = capture(frames);
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_file(&wav);
+
+    let (cap_rate, samples) = result?;
+    if (samples.len() as f64) < f64::from(frames) * 0.5 {
+        bail!(
+            "daemon returned {} of {frames} requested samples — no audio is flowing through \
+             Resonance",
+            samples.len()
+        );
+    }
+    Ok((cap_rate, samples))
+}
+
+#[cfg(windows)]
+fn measure_tone(freq: f64, _rate: f64, o: &Options) -> Result<(f64, Vec<f32>)> {
+    win::tone_and_loopback(freq, o.amp, o.settle_ms, o.capture_ms)
+}
+
+/// Ambient (no tone) capture for the quiet pre-check.
+#[cfg(not(windows))]
+fn ambient_capture(rate: f64, ms: u64) -> Result<Vec<f32>> {
+    Ok(capture((rate * ms as f64 / 1000.0) as u32)?.1)
+}
+
+#[cfg(windows)]
+fn ambient_capture(_rate: f64, ms: u64) -> Result<Vec<f32>> {
+    Ok(win::capture_loopback(ms)?.1)
+}
+
 /// Fetch the freshest post-DSP samples from the daemon.
+#[cfg(not(windows))]
 fn capture(frames: u32) -> Result<(f64, Vec<f32>)> {
     match crate::send(Command::CaptureOutput { frames })? {
         Response::Capture { rate, samples } => Ok((rate, samples)),
@@ -326,7 +359,8 @@ fn capture(frames: u32) -> Result<(f64, Vec<f32>)> {
 }
 
 /// Write a mono float32 sine WAV into the temp dir and return its path.
-fn write_tone_wav(freq: f64, rate: f64, amp: f64, dur_ms: u64) -> Result<PathBuf> {
+#[cfg(not(windows))]
+fn write_tone_wav(freq: f64, rate: f64, amp: f64, dur_ms: u64) -> Result<std::path::PathBuf> {
     let path = std::env::temp_dir().join(format!("resonance-verify-{freq:.0}hz.wav"));
     let spec = hound::WavSpec {
         channels: 1,
@@ -348,6 +382,7 @@ fn write_tone_wav(freq: f64, rate: f64, amp: f64, dur_ms: u64) -> Result<PathBuf
 
 /// Start the platform's audio player on the file; audio must route through the
 /// system's default output so the daemon processes it like any application.
+#[cfg(not(windows))]
 fn spawn_player(path: &std::path::Path) -> Result<std::process::Child> {
     #[cfg(target_os = "linux")]
     let mut cmd = {
@@ -355,29 +390,128 @@ fn spawn_player(path: &std::path::Path) -> Result<std::process::Child> {
         c.arg(path);
         c
     };
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "linux"))]
     let mut cmd = {
         let mut c = std::process::Command::new("afplay");
         c.arg(path);
-        c
-    };
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let mut cmd = {
-        let mut c = std::process::Command::new("powershell");
-        c.args([
-            "-NoProfile",
-            "-Command",
-            &format!(
-                "(New-Object Media.SoundPlayer '{}').PlaySync()",
-                path.display()
-            ),
-        ]);
         c
     };
     cmd.stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .context("start audio player (pw-play / afplay)")
+}
+
+/// WASAPI tone playback + loopback capture (Windows only). Loopback yields the
+/// engine's rendered mix for the endpoint — i.e. after the Resonance APO has
+/// processed it inside audiodg — so this measures what the speakers get.
+#[cfg(windows)]
+mod win {
+    use anyhow::{Context, Result, bail};
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+    /// Capture `ms` of the default render endpoint's loopback, mono-averaged.
+    pub fn capture_loopback(ms: u64) -> Result<(f64, Vec<f32>)> {
+        run(None, 0, ms)
+    }
+
+    /// Play a sine at `freq`/`amp` on the default endpoint, wait `settle_ms`,
+    /// then capture `capture_ms` of the endpoint's loopback.
+    pub fn tone_and_loopback(
+        freq: f64,
+        amp: f64,
+        settle_ms: u64,
+        capture_ms: u64,
+    ) -> Result<(f64, Vec<f32>)> {
+        run(Some((freq, amp)), settle_ms, capture_ms)
+    }
+
+    fn run(tone: Option<(f64, f64)>, settle_ms: u64, capture_ms: u64) -> Result<(f64, Vec<f32>)> {
+        let device = cpal::default_host()
+            .default_output_device()
+            .context("no default output device")?;
+        let config = device
+            .default_output_config()
+            .context("query output config")?;
+        if config.sample_format() != cpal::SampleFormat::F32 {
+            // WASAPI's shared-mode mix format is float32 in practice; anything
+            // else means an exclusive-mode oddity this harness doesn't handle.
+            bail!("unsupported endpoint format {:?}", config.sample_format());
+        }
+        let rate = f64::from(config.sample_rate().0);
+        let channels = usize::from(config.channels());
+        let stream_config: cpal::StreamConfig = config.into();
+
+        // Loopback: WASAPI lets an *output* device open an input stream that
+        // yields the engine's rendered (post-APO) mix.
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<f32>>();
+        let in_stream = device
+            .build_input_stream(
+                &stream_config,
+                move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    let _ = tx.send(data.to_vec());
+                },
+                |e| eprintln!("loopback capture error: {e}"),
+                None,
+            )
+            .context("open WASAPI loopback capture on the output endpoint")?;
+        in_stream.play().context("start loopback capture")?;
+
+        // Optional tone, every channel driven with the same sine.
+        let _out_stream = if let Some((freq, amp)) = tone {
+            let mut phase = 0.0f64;
+            let step = 2.0 * std::f64::consts::PI * freq / rate;
+            let stream = device
+                .build_output_stream(
+                    &stream_config,
+                    move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                        for frame in data.chunks_mut(channels) {
+                            let s = (amp * phase.sin()) as f32;
+                            phase = (phase + step) % (2.0 * std::f64::consts::PI);
+                            frame.fill(s);
+                        }
+                    },
+                    |e| eprintln!("tone playback error: {e}"),
+                    None,
+                )
+                .context("open tone output stream")?;
+            stream.play().context("start tone")?;
+            Some(stream)
+        } else {
+            None
+        };
+
+        std::thread::sleep(std::time::Duration::from_millis(settle_ms));
+        // Drop whatever arrived during settle; keep only steady-state audio.
+        while rx.try_recv().is_ok() {}
+
+        let want = (rate * capture_ms as f64 / 1000.0) as usize;
+        let mut mono = Vec::with_capacity(want);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(capture_ms * 4 + 2000);
+        while mono.len() < want {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                bail!(
+                    "loopback capture stalled ({} of {want} samples)",
+                    mono.len()
+                );
+            }
+            match rx.recv_timeout(deadline - now) {
+                Ok(chunk) => mono.extend(
+                    chunk
+                        .chunks(channels)
+                        .map(|f| f.iter().sum::<f32>() / channels as f32),
+                ),
+                Err(_) => bail!(
+                    "loopback capture stalled ({} of {want} samples)",
+                    mono.len()
+                ),
+            }
+        }
+        mono.truncate(want);
+        Ok((rate, mono))
+    }
 }
 
 // ── Analysis ─────────────────────────────────────────────────────────────────
