@@ -93,5 +93,48 @@ fn bench_chain(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_chain);
+/// Deterministic pseudo-noise IR taps (no RNG dep, reproducible runs).
+fn noise(len: usize) -> Vec<f64> {
+    let mut x = 0x2545_F491_4F6C_DD1Du64;
+    (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (((x >> 11) as f64) / ((1u64 << 53) as f64) - 0.5) * 0.01
+        })
+        .collect()
+}
+
+/// Convolution stage alone at IR lengths that exercise the head stage only
+/// (0.1 s), both stages at the old cap (2 s) and both at the new cap (10 s).
+/// The per-block cost must stay nearly flat past 2 s — that is the point of
+/// the tail stage.
+fn bench_convolution(c: &mut Criterion) {
+    use resonance_dsp::convolution::{ConvolutionEngine, IrData};
+    use std::sync::Arc;
+
+    let buffer = test_buffer();
+    for seconds in [0.1f64, 2.0, 10.0] {
+        let taps = (seconds * SAMPLE_RATE) as usize;
+        let mut engine = ConvolutionEngine::new(CHANNELS, SAMPLE_RATE);
+        engine
+            .load_ir(Arc::new(IrData {
+                name: format!("bench-{seconds}s"),
+                path: String::new(),
+                sample_rate: SAMPLE_RATE,
+                channels: vec![noise(taps)],
+            }))
+            .unwrap();
+        c.bench_function(&format!("convolution_{seconds}s_ir"), |b| {
+            b.iter_batched_ref(
+                || buffer.clone(),
+                |buf| engine.process(black_box(buf), CHANNELS),
+                BatchSize::SmallInput,
+            );
+        });
+    }
+}
+
+criterion_group!(benches, bench_chain, bench_convolution);
 criterion_main!(benches);

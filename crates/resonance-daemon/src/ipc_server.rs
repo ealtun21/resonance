@@ -294,7 +294,7 @@ fn handle_set_dither(state: &SharedState, bits: Option<u32>) -> Response {
 
 /// Decode, resample and FFT-prepare a WAV impulse response, then swap the
 /// prepared engine onto the chain. All the heavy lifting (file IO, sinc
-/// resampling, partition FFTs — real work for a 2 s IR) runs on a blocking
+/// resampling, partition FFTs — real work for a 10 s IR) runs on a blocking
 /// thread; the RT thread only installs the finished kernel.
 async fn handle_set_convolution_ir(state: &SharedState, path: String) -> Response {
     let (channels, sample_rate) = {
@@ -1315,6 +1315,57 @@ mod tests {
             assert!(
                 buf[ch].abs() < 1e-12,
                 "priming region must be silent on ch{ch}"
+            );
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn set_convolution_ir_over_two_seconds_loads_uncut() {
+        use resonance_dsp::convolution::BLOCK;
+        // 100 001 taps at 48 kHz ≈ 2.08 s — past the old 2 s cap. A delta at
+        // t=0 plus a tap deep in the tail stage proves the whole IR convolves.
+        let late = 100_000usize;
+        let mut taps = vec![0.0f32; late + 1];
+        taps[0] = 1.0;
+        taps[late] = 0.5;
+        let path = write_test_ir("resonance-ipcconv-long", &taps);
+        let (state, mut rx) = test_state();
+
+        let resp = dispatch(
+            Command::SetConvolutionIr {
+                path: path.to_string_lossy().into_owned(),
+            },
+            &state,
+        )
+        .await;
+        assert!(matches!(resp, Response::Ok), "long IR load: {resp:?}");
+        let conv = state.snapshot().convolution.expect("IR should be loaded");
+        assert_eq!(conv.taps, late + 1, "IR must not be truncated");
+        assert_eq!(conv.latency_frames, BLOCK, "latency stays one block");
+
+        let mut rt_chain = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48_000.0)
+            .build();
+        while let Ok(cmd) = rx.pop() {
+            crate::audio::apply_command(&mut rt_chain, cmd);
+        }
+        let frames = late + 2 * BLOCK;
+        let mut buf = vec![0.0f64; frames * 2];
+        buf[0] = 1.0;
+        buf[1] = 1.0;
+        rt_chain.process(&mut buf);
+        for ch in 0..2 {
+            assert!(
+                (buf[BLOCK * 2 + ch] - 1.0).abs() < 1e-9,
+                "h[0] should appear at frame BLOCK on ch{ch}"
+            );
+            assert!(
+                (buf[(BLOCK + late) * 2 + ch] - 0.5).abs() < 1e-9,
+                "h[{late}] should appear at frame BLOCK+{late} on ch{ch}, got {}",
+                buf[(BLOCK + late) * 2 + ch]
             );
         }
 
