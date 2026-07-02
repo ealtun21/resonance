@@ -16,19 +16,15 @@ angle so it can be picked up directly.
   slot in there. Linux: per-stream target routing or per-app filter graphs.
   Model/IPC needs a per-app band set (relates to backlog item 16's `BandScope`).
 
-- **Convolution / impulse-response (IR) loader** — load a `.wav` IR for room
-  correction, speaker correction, or HRTF/spatialization. EqualizerAPO and ViPER
-  have it. Angle: FFT partitioned convolution via `rustfft` on the RT path
-  (shares the linear-phase FIR work in backlog item 8); a new `ProcessorChain`
-  stage + a "load IR" surface in CLI/GUI/TUI. Reports added latency.
-
 ## Medium value
 
 - **Dynamic EQ** — per-band gain driven by input level (de-essing,
   compression-style). Backlog item 8. Sidechain envelope follower per biquad.
 
 - **Linear-phase EQ mode** — FIR path avoiding biquad phase rotation. Backlog
-  item 8; pairs with the convolution engine above. Significant latency.
+  item 8; can reuse the shipped partitioned-convolution engine
+  (`resonance-dsp/src/convolution.rs`) by rendering the EQ curve to an FIR
+  kernel. Significant latency.
 
 - **Input-device / source selection** — eqMac lets you pick the capture source;
   we only follow the output device. Expose an input picker.
@@ -48,5 +44,7 @@ effect emulation (Fidelity/Ambience/Surround/Dynamic Boost/Bass);
 **loudness compensation (ISO 226:2023 equal-loudness)** — the "loudness" button
 most consumer EQs have; **headphone crossfeed** (Bauer/Meier); **adjustable
 filter slopes** (12/24/48 dB/oct Butterworth on shelves + HP/LP); **mid/side
-EQ** (per-band `Stereo | Mid | Side`); and **output dithering** (TPDF). Most
-competitors do a subset of these on a single OS.
+EQ** (per-band `Stereo | Mid | Side`); **output dithering** (TPDF); and a
+**convolution / impulse-response loader** (partitioned FFT, WAV IRs for room
+correction/HRTF, reported latency, persisted in profiles — shipped 2026-07-02).
+Most competitors do a subset of these on a single OS.
