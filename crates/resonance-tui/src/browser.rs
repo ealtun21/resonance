@@ -194,12 +194,25 @@ fn meta_block(path: &Path) -> Vec<String> {
     let Some(meta) = resonance_preset::metadata::PresetMeta::load_for(path) else {
         return Vec::new();
     };
+    // Whitespace-normalise sidecar strings: the preview is line-oriented, so
+    // an embedded newline in a hand-edited sidecar must not split a field
+    // across preview lines.
+    let clean = |s: &String| s.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut out: Vec<String> = meta
         .author
         .iter()
-        .map(|a| format!("author : {a}"))
-        .chain(meta.description.iter().map(|d| format!("about  : {d}")))
-        .chain((!meta.tags.is_empty()).then(|| format!("tags   : {}", meta.tags.join(", "))))
+        .map(|a| format!("author : {}", clean(a)))
+        .chain(
+            meta.description
+                .iter()
+                .map(|d| format!("about  : {}", clean(d))),
+        )
+        .chain((!meta.tags.is_empty()).then(|| {
+            format!(
+                "tags   : {}",
+                meta.tags.iter().map(clean).collect::<Vec<_>>().join(", ")
+            )
+        }))
         .collect();
     if !out.is_empty() {
         out.push(String::new());
@@ -393,6 +406,28 @@ mod tests {
         // Blank separator, then the parsed preset content follows.
         assert_eq!(lines[3], "");
         assert!(lines.iter().any(|l| l.contains("preamp -3.0 dB")));
+    }
+
+    #[test]
+    fn preview_normalises_multiline_metadata() {
+        // A hand-edited sidecar can hold newlines/tabs inside a field; the
+        // line-oriented preview must keep each field on its own single line.
+        let dir = scratch("multiline-meta");
+        let preset = dir.join("flat.txt");
+        std::fs::write(&preset, "Preamp: -3 dB\n").unwrap();
+        PresetMeta {
+            author: Some("Jane\nDoe".into()),
+            description: Some("line one\n\tline two".into()),
+            tags: vec!["multi\nline".into()],
+        }
+        .save_for(&preset)
+        .unwrap();
+
+        let lines = preview_file(&preset);
+        assert_eq!(lines[0], "author : Jane Doe");
+        assert_eq!(lines[1], "about  : line one line two");
+        assert_eq!(lines[2], "tags   : multi line");
+        assert_eq!(lines[3], "");
     }
 
     #[test]

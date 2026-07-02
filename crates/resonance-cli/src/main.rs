@@ -1375,6 +1375,18 @@ mod tests {
     }
 
     #[test]
+    fn meta_edit_on_missing_preset_bails_without_orphan_sidecar() {
+        let dir = scratch("missing-preset");
+        let preset = dir.join("typo.fac");
+        let err = run_meta(&preset, Some("x".into()), None, Vec::new(), false).unwrap_err();
+        assert!(err.to_string().contains("no such preset"), "got: {err}");
+        assert!(
+            !PresetMeta::sidecar_path(&preset).exists(),
+            "bail must not strand an orphan sidecar"
+        );
+    }
+
+    #[test]
     fn meta_tail_absent_without_sidecar() {
         let dir = scratch("no-sidecar");
         assert_eq!(meta_tail(&dir.join("plain.txt")), None);
