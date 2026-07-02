@@ -162,6 +162,12 @@ enum Sub {
         /// Release time constant in ms (default 150)
         release: Option<f64>,
     },
+    /// Switch the EQ phase behaviour: linear (fir, adds latency, no phase
+    /// rotation) or minimum (biquads, zero latency — the default)
+    Phase {
+        /// linear | minimum (min)
+        mode: String,
+    },
     /// Reset to defaults: flat EQ, all effects off, 0 dB preamp
     Reset,
     /// Export the current EQ to an `EqualizerAPO` .txt file
@@ -573,6 +579,11 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
                 dynamics: Some(dynamics),
             })
         }
+        Sub::Phase { mode } => match mode.to_ascii_lowercase().as_str() {
+            "linear" | "lin" => Ok(Command::SetPhaseMode { linear: true }),
+            "minimum" | "min" => Ok(Command::SetPhaseMode { linear: false }),
+            other => bail!("phase must be linear or minimum, got {other}"),
+        },
         Sub::Reset => Ok(Command::Reset),
         Sub::Export { path } => Ok(Command::ExportApo {
             path: absolutize(path),
@@ -1040,6 +1051,17 @@ fn print_state(p: &Paint, s: &resonance_ipc::DaemonState) {
 
     println!("{}{}", label("dither"), dither_label(s.dither_bits));
 
+    if s.phase_mode_linear {
+        let ms = s.eq_fir_latency_frames as f64 / s.sample_rate * 1000.0;
+        let tail = if s.eq_fir_latency_frames > 0 {
+            format!(" (+{ms:.1} ms)")
+        } else {
+            // Mode armed but no kernel (no linearizable bands) — IIR fallback.
+            " (no static bands — minimum-phase fallback)".to_string()
+        };
+        println!("{}linear{tail}", label("phase"));
+    }
+
     if let Some(c) = &s.convolution {
         let detail = if c.enabled {
             let ms = c.latency_frames as f64 / s.sample_rate * 1000.0;
@@ -1448,6 +1470,29 @@ mod tests {
         assert!(band_dyn(1, "-30", None).is_err());
         assert!(band_dyn(1, "nan", Some(-6.0)).is_err());
         assert!(band_dyn(1, "not-a-number", Some(-6.0)).is_err());
+    }
+
+    #[test]
+    fn phase_parses_modes_and_rejects_garbage() {
+        assert!(matches!(
+            to_ipc_command(Sub::Phase {
+                mode: "linear".into()
+            })
+            .unwrap(),
+            Command::SetPhaseMode { linear: true }
+        ));
+        for m in ["minimum", "min"] {
+            assert!(matches!(
+                to_ipc_command(Sub::Phase { mode: m.into() }).unwrap(),
+                Command::SetPhaseMode { linear: false }
+            ));
+        }
+        assert!(
+            to_ipc_command(Sub::Phase {
+                mode: "sideways".into()
+            })
+            .is_err()
+        );
     }
 
     #[test]
