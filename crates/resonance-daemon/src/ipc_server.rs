@@ -333,11 +333,13 @@ async fn handle_set_convolution_ir(state: &SharedState, path: String) -> Respons
             state.send(
                 AudioCommand::SetConvolution(Box::new(engine.clone())),
                 move |chain| {
+                    // Keep the engine at the LIVE format it was prepared at
+                    // (issue #53): the shadow chain's own rate/width are frozen
+                    // at construction, and force-matching them re-prepared the
+                    // kernel at the stale rate, so status/GUI reported wrong
+                    // taps + latency. The shadow never processes audio, and a
+                    // resync ReplaceChain re-binds on the RT side anyway.
                     chain.convolution = engine;
-                    // The shadow chain's format can differ from the live one the
-                    // engine was prepared at; force-match (no-op when equal).
-                    chain.convolution.rebind_sample_rate(chain.sample_rate);
-                    chain.convolution.set_channels(chain.channels);
                 },
             );
             Response::Ok
@@ -1369,6 +1371,43 @@ mod tests {
                 "priming region must be silent on ch{ch}"
             );
         }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn convolution_snapshot_reports_live_rate_taps() {
+        // Issue #53: with the graph live at 96 kHz (meters) and the shadow
+        // chain frozen at its 48 kHz construction rate, a loaded IR must be
+        // reported (taps/latency) at the LIVE rate — the old force-match
+        // down-bound the correctly-prepared engine to the stale shadow rate,
+        // halving the displayed taps.
+        let taps_48k = 480; // 10 ms at the 48 kHz source rate
+        let mut taps = vec![0.0f32; taps_48k];
+        taps[0] = 1.0;
+        let path = write_test_ir("resonance-ipcconv-liverate", &taps);
+        let (state, _rx) = test_state();
+        state.0.lock().unwrap().meters.set_sample_rate(96_000.0);
+
+        let resp = dispatch(
+            Command::SetConvolutionIr {
+                path: path.to_string_lossy().into_owned(),
+            },
+            &state,
+        )
+        .await;
+        assert!(
+            matches!(resp, Response::Ok),
+            "load should succeed: {resp:?}"
+        );
+
+        let conv = state.snapshot().convolution.expect("IR should be loaded");
+        let expected = taps_48k * 2; // resampled 48k → 96k
+        assert!(
+            conv.taps.abs_diff(expected) <= 2,
+            "taps must be reported at the live 96 kHz rate: got {}, want ~{expected}",
+            conv.taps
+        );
 
         let _ = std::fs::remove_file(&path);
     }
