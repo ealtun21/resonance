@@ -148,11 +148,17 @@ fn pick_mode(state: &DaemonState, o: &Options) -> Result<Mode> {
     let effects_active = FxEffectId::ALL.iter().any(|&id| {
         let (intensity, enabled) = state.effects.get(id);
         enabled && intensity.abs() > 1e-6
-    }) || state.convolution.as_ref().is_some_and(|c| c.enabled);
+    }) || state.convolution.as_ref().is_some_and(|c| c.enabled)
+        // A dynamic band's gain depends on the probe level, so the static EQ
+        // prediction no longer holds either.
+        || state
+            .bands
+            .iter()
+            .any(|b| b.enabled && b.dynamics.is_some());
     if effects_active && state.enabled {
         eprintln!(
-            "note: effects/convolution active — the EQ prediction doesn't model them, so this \
-             run measures + pitch-checks only. Use --save-baseline / --baseline for A/B."
+            "note: effects/convolution/dynamics active — the EQ prediction doesn't model them, \
+             so this run measures + pitch-checks only. Use --save-baseline / --baseline for A/B."
         );
         return Ok(Mode::MeasureOnly);
     }

@@ -4,7 +4,9 @@ mod verify;
 use anyhow::{Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
-use resonance_ipc::{BandScope, ChannelMask, Command, FxEffectId, Response, transport::SyncClient};
+use resonance_ipc::{
+    BandDynamics, BandScope, ChannelMask, Command, FxEffectId, Response, transport::SyncClient,
+};
 use resonance_preset::metadata::PresetMeta;
 use std::io::{self, IsTerminal};
 use std::path::Path;
@@ -143,6 +145,22 @@ enum Sub {
         index: usize,
         /// Scope: stereo | mid | side
         scope: String,
+    },
+    /// Set or clear an EQ band's dynamic EQ — the band's gain morphs toward
+    /// gain+range while in-band level exceeds the threshold (peaking bands only)
+    BandDyn {
+        /// Band index (1-based, as shown in `status`)
+        index: usize,
+        /// Threshold in dBFS (-80..0), or `off` to clear
+        #[arg(allow_hyphen_values = true)]
+        threshold: String,
+        /// Max gain offset in dB (-24..24; negative = cut when loud)
+        #[arg(allow_hyphen_values = true)]
+        range: Option<f64>,
+        /// Attack time constant in ms (default 5)
+        attack: Option<f64>,
+        /// Release time constant in ms (default 150)
+        release: Option<f64>,
     },
     /// Reset to defaults: flat EQ, all effects off, 0 dB preamp
     Reset,
@@ -505,6 +523,54 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
             Ok(Command::SetBandScope {
                 index: index - 1,
                 scope,
+            })
+        }
+        Sub::BandDyn {
+            index,
+            threshold,
+            range,
+            attack,
+            release,
+        } => {
+            if index == 0 {
+                bail!("band index is 1-based (see `status`)");
+            }
+            let index = index - 1;
+            if matches!(
+                threshold.to_ascii_lowercase().as_str(),
+                "off" | "none" | "clear"
+            ) {
+                return Ok(Command::SetBandDynamics {
+                    index,
+                    dynamics: None,
+                });
+            }
+            let threshold_db: f64 = threshold
+                .parse()
+                .map_err(|_| anyhow::anyhow!("threshold must be a dBFS value or `off`"))?;
+            let Some(range_db) = range else {
+                bail!("usage: band-dyn <index> <threshold_db> <range_db> [attack_ms] [release_ms]");
+            };
+            let dynamics = BandDynamics {
+                threshold_db,
+                range_db,
+                attack_ms: attack.unwrap_or(BandDynamics::DEFAULT.attack_ms),
+                release_ms: release.unwrap_or(BandDynamics::DEFAULT.release_ms),
+            };
+            if [
+                dynamics.threshold_db,
+                dynamics.range_db,
+                dynamics.attack_ms,
+                dynamics.release_ms,
+            ]
+            .iter()
+            .any(|v| !v.is_finite())
+            {
+                bail!("dynamics parameters must be finite numbers");
+            }
+            Ok(Command::SetBandDynamics {
+                index,
+                dynamics: Some(dynamics),
             })
         }
         Sub::Reset => Ok(Command::Reset),
@@ -1035,7 +1101,14 @@ fn print_state(p: &Paint, s: &resonance_ipc::DaemonState) {
             } else {
                 format!("  {}", p.dim(&chlabel))
             };
-            let tail = format!("{slope_tail}{scope_tail}{ch_tail}");
+            // range@threshold, e.g. "dyn -6@-30" = cut up to 6 dB above -30 dBFS.
+            let dyn_tail = b.dynamics.map_or(String::new(), |d| {
+                format!(
+                    "  {}",
+                    p.dim(&format!("dyn {:+.0}@{:.0}", d.range_db, d.threshold_db))
+                )
+            });
+            let tail = format!("{slope_tail}{scope_tail}{dyn_tail}{ch_tail}");
             println!(
                 "  {:>2}  {}  {:>8.1} Hz  {:+5.1} dB  Q {:>4.2}  {state}{tail}",
                 i + 1,
@@ -1331,6 +1404,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn band_dyn(index: usize, threshold: &str, range: Option<f64>) -> Result<Command> {
+        to_ipc_command(Sub::BandDyn {
+            index,
+            threshold: threshold.into(),
+            range,
+            attack: None,
+            release: None,
+        })
+    }
+
+    #[test]
+    fn band_dyn_parses_set_with_defaults() {
+        use resonance_ipc::BandDynamics;
+        match band_dyn(2, "-30", Some(-6.0)).unwrap() {
+            Command::SetBandDynamics {
+                index,
+                dynamics: Some(d),
+            } => {
+                assert_eq!(index, 1, "index is 1-based on the CLI");
+                assert!((d.threshold_db - (-30.0)).abs() < 1e-9);
+                assert!((d.range_db - (-6.0)).abs() < 1e-9);
+                assert!((d.attack_ms - BandDynamics::DEFAULT.attack_ms).abs() < 1e-9);
+                assert!((d.release_ms - BandDynamics::DEFAULT.release_ms).abs() < 1e-9);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn band_dyn_parses_off_and_rejects_bad_input() {
+        assert!(matches!(
+            band_dyn(1, "off", None).unwrap(),
+            Command::SetBandDynamics {
+                index: 0,
+                dynamics: None,
+            }
+        ));
+        // 0 index (1-based), missing range, and non-finite threshold all bail.
+        assert!(band_dyn(0, "off", None).is_err());
+        assert!(band_dyn(1, "-30", None).is_err());
+        assert!(band_dyn(1, "nan", Some(-6.0)).is_err());
+        assert!(band_dyn(1, "not-a-number", Some(-6.0)).is_err());
     }
 
     #[test]
