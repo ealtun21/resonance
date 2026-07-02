@@ -808,10 +808,7 @@ mod tests {
         let input = buf.clone();
         chain.process(&mut buf);
         for (a, b) in input.iter().zip(&buf) {
-            assert!(
-                (a - b).abs() < 1e-9,
-                "side dyn band must not react to mono"
-            );
+            assert!((a - b).abs() < 1e-9, "side dyn band must not react to mono");
         }
     }
 

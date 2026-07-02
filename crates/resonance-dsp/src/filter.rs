@@ -71,7 +71,11 @@ impl DynParams {
     #[must_use]
     pub fn clamped(self) -> Self {
         let sane = |v: f64, lo: f64, hi: f64, default: f64| {
-            if v.is_finite() { v.clamp(lo, hi) } else { default }
+            if v.is_finite() {
+                v.clamp(lo, hi)
+            } else {
+                default
+            }
         };
         Self {
             threshold_db: sane(self.threshold_db, -80.0, 0.0, Self::DEFAULT.threshold_db),
@@ -1406,7 +1410,10 @@ mod tests {
         let gf = dyn_windowed_gain_db(&mut ff, 1000.0, 0.5, 960, win.clone(), SR);
         let mut fs = dyn_build(1000.0, 0.0, 1.0, Some(slow), SR);
         let gs = dyn_windowed_gain_db(&mut fs, 1000.0, 0.5, 960, win, SR);
-        assert!(gf < -4.0, "fast attack should be mostly engaged: {gf:.2} dB");
+        assert!(
+            gf < -4.0,
+            "fast attack should be mostly engaged: {gf:.2} dB"
+        );
         assert!(gs > -2.0, "slow attack should barely move: {gs:.2} dB");
     }
 
@@ -1499,7 +1506,10 @@ mod tests {
         let mut f = dyn_build(1000.0, 0.0, 1.0, Some(DP), SR);
         f.rebind(96_000.0);
         let g = dyn_settled_gain_db(&mut f, 1000.0, 0.5, 96_000.0);
-        assert!((g - (-6.0)).abs() < 0.7, "morph after rebind: got {g:.2} dB");
+        assert!(
+            (g - (-6.0)).abs() < 0.7,
+            "morph after rebind: got {g:.2} dB"
+        );
         assert!(f.dynamics().is_some(), "dynamics survive the rebind");
     }
 
