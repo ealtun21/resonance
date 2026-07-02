@@ -232,6 +232,16 @@ pub fn apply_command(chain: &mut ProcessorChain, cmd: AudioCommand) {
         AudioCommand::SetRouting { matrix } => {
             chain.routing = matrix;
         }
+        AudioCommand::SetConvolution(engine) => {
+            chain.convolution = *engine;
+            // The engine was prepared at the rate/width the IPC thread believed
+            // was live; force-match the RT chain's actual format (no-ops when
+            // they already agree — the common case).
+            chain.convolution.rebind_sample_rate(chain.sample_rate);
+            chain.convolution.set_channels(chain.channels);
+        }
+        AudioCommand::SetConvolutionEnabled(on) => chain.convolution.set_enabled(on),
+        AudioCommand::ClearConvolution => chain.convolution.clear(),
     }
 }
 

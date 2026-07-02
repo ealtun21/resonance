@@ -1,8 +1,9 @@
-use crate::config::{self, KnownSinks, Mappings, Profile};
+use crate::config::{self, ConvolutionProfile, KnownSinks, Mappings, Profile};
 use crate::state::{AppControl, AudioCommand, SharedState, SinkCtl};
 use anyhow::Result;
 use resonance_dsp::chain::ProcessorChain;
 use resonance_dsp::channel::{ChannelMask as DspMask, ChannelMatrix};
+use resonance_dsp::convolution::{ConvolutionEngine, MAX_IR_SECONDS};
 use resonance_dsp::filter::{ApoFilter, FilterError, FilterType};
 use resonance_ipc::{
     AbSlot, BandScope, BandState, BandType, ChannelMask, Command, EffectsState, FxEffectId,
@@ -190,6 +191,11 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
         Command::SetSinkVolume { name, volume } => handle_set_sink_volume(state, name, volume),
         Command::SetSinkMute { name, muted } => handle_set_sink_mute(state, name, muted),
         Command::SetDither { bits } => handle_set_dither(state, bits),
+        Command::SetConvolutionIr { path } => handle_set_convolution_ir(state, path).await,
+        Command::ClearConvolutionIr => handle_clear_convolution(state),
+        Command::SetConvolutionEnabled { enabled } => {
+            handle_set_convolution_enabled(state, enabled)
+        }
         // The actual cleanup + exit happens in `handle_client` after this Ok is
         // flushed to the client (see the `is_shutdown` branch there).
         Command::Shutdown => Response::Ok,
@@ -281,6 +287,74 @@ fn handle_set_effect_intensity(state: &SharedState, effect: FxEffectId, value: f
 fn handle_set_dither(state: &SharedState, bits: Option<u32>) -> Response {
     state.send(AudioCommand::SetDither { bits }, move |chain| {
         chain.set_dither(bits);
+    });
+    Response::Ok
+}
+
+/// Decode, resample and FFT-prepare a WAV impulse response, then swap the
+/// prepared engine onto the chain. All the heavy lifting (file IO, sinc
+/// resampling, partition FFTs — real work for a 2 s IR) runs on a blocking
+/// thread; the RT thread only installs the finished kernel.
+async fn handle_set_convolution_ir(state: &SharedState, path: String) -> Response {
+    let (channels, sample_rate) = {
+        let inner = state.0.lock().unwrap();
+        // Live format, not the frozen shadow (see SharedState::rebuild_chain).
+        let sr = inner
+            .meters
+            .sample_rate()
+            .unwrap_or(inner.chain.sample_rate);
+        let ch = inner.meters.channels().unwrap_or(inner.chain.channels);
+        (ch, sr)
+    };
+    let prepared = tokio::task::spawn_blocking(move || -> Result<ConvolutionEngine, String> {
+        let ir = crate::ir::load_wav_ir(&path)?;
+        let seconds = ir.frames() as f64 / ir.sample_rate;
+        if seconds > MAX_IR_SECONDS {
+            warn!(
+                "impulse response '{}' is {seconds:.2}s — truncated to {MAX_IR_SECONDS}s",
+                ir.name
+            );
+        }
+        let mut engine = ConvolutionEngine::new(channels, sample_rate);
+        engine.load_ir(std::sync::Arc::new(ir))?;
+        Ok(engine)
+    })
+    .await;
+    match prepared {
+        Ok(Ok(engine)) => {
+            state.send(
+                AudioCommand::SetConvolution(Box::new(engine.clone())),
+                move |chain| {
+                    chain.convolution = engine;
+                    // The shadow chain's format can differ from the live one the
+                    // engine was prepared at; force-match (no-op when equal).
+                    chain.convolution.rebind_sample_rate(chain.sample_rate);
+                    chain.convolution.set_channels(chain.channels);
+                },
+            );
+            Response::Ok
+        }
+        Ok(Err(e)) => Response::Error(e),
+        Err(e) => Response::Error(format!("impulse-response load task failed: {e}")),
+    }
+}
+
+/// Drop the convolution IR entirely (passthrough, zero added latency).
+fn handle_clear_convolution(state: &SharedState) -> Response {
+    state.send(AudioCommand::ClearConvolution, |chain| {
+        chain.convolution.clear();
+    });
+    Response::Ok
+}
+
+/// Bypass or re-arm the convolution stage without dropping the loaded IR.
+fn handle_set_convolution_enabled(state: &SharedState, enabled: bool) -> Response {
+    let loaded = state.0.lock().unwrap().chain.convolution.source().is_some();
+    if !loaded {
+        return Response::Error("no impulse response loaded — load a .wav IR first".to_string());
+    }
+    state.send(AudioCommand::SetConvolutionEnabled(enabled), move |chain| {
+        chain.convolution.set_enabled(enabled);
     });
     Response::Ok
 }
@@ -702,17 +776,22 @@ fn handle_apply_state(
     bands: Vec<BandState>,
     effects: EffectsState,
 ) -> Response {
+    let snap = state.snapshot();
     let profile = Profile {
         preamp_db,
         enabled,
         effects,
         bands,
-        // ApplyState carries EQ + effects only (undo/redo, bulk edits); dither is
-        // owned by SetDither, so preserve the live setting across the rebuild
-        // rather than clobbering it to off.
-        dither_bits: state.snapshot().dither_bits,
+        // ApplyState carries EQ + effects only (undo/redo, bulk edits); dither
+        // and convolution are owned by their own commands, so preserve the live
+        // settings across the rebuild rather than clobbering them to off.
+        dither_bits: snap.dither_bits,
+        convolution: snap.convolution.map(|c| ConvolutionProfile {
+            path: c.path,
+            enabled: c.enabled,
+        }),
     };
-    state.rebuild_chain(|ch, sr| profile.clone().into_chain(ch, sr));
+    apply_profile_chain(&profile, state);
     Response::Ok
 }
 
@@ -752,7 +831,7 @@ fn handle_recall_slot(state: &SharedState, slot: AbSlot) -> Response {
     let stored = state.0.lock().unwrap().ab_slots[slot_index(slot)].clone();
     match stored {
         Some(profile) => {
-            state.rebuild_chain(|ch, sr| profile.clone().into_chain(ch, sr));
+            apply_profile_chain(&profile, state);
             Response::Ok
         }
         None => Response::Error("slot is empty — store it first".to_string()),
@@ -905,8 +984,46 @@ fn apply_preset(preset: &resonance_preset::model::Preset, state: &SharedState) {
 /// Load a named profile from the config dir and apply it to the chain.
 fn load_profile(name: &str, state: &SharedState) -> Result<(), String> {
     let profile = config::load_profile(name)?;
-    state.rebuild_chain(|ch, sr| profile.clone().into_chain(ch, sr));
+    apply_profile_chain(&profile, state);
     Ok(())
+}
+
+/// Rebuild the chain from a profile, restoring its convolution IR (if any).
+///
+/// The IR is re-read from its source WAV — unless the live chain already holds
+/// the same file, in which case the decoded samples are reused (undo/redo and
+/// A/B recall never re-hit the disk). A missing or corrupt IR file drops the
+/// stage with a warning instead of failing the whole profile apply.
+pub(crate) fn apply_profile_chain(profile: &Profile, state: &SharedState) {
+    let ir = profile.convolution.as_ref().and_then(|conv| {
+        let live = {
+            let inner = state.0.lock().unwrap();
+            inner
+                .chain
+                .convolution
+                .source()
+                .filter(|s| s.path == conv.path)
+                .cloned()
+        };
+        live.or_else(|| match crate::ir::load_wav_ir(&conv.path) {
+            Ok(data) => Some(std::sync::Arc::new(data)),
+            Err(e) => {
+                warn!("convolution IR not restored: {e}");
+                None
+            }
+        })
+    });
+    let conv_enabled = profile.convolution.as_ref().is_some_and(|c| c.enabled);
+    state.rebuild_chain(|ch, sr| {
+        let mut chain = profile.clone().into_chain(ch, sr);
+        if let Some(ir) = ir.clone() {
+            match chain.convolution.load_ir(ir) {
+                Ok(()) => chain.convolution.set_enabled(conv_enabled),
+                Err(e) => warn!("convolution IR not restored: {e}"),
+            }
+        }
+        chain
+    });
 }
 
 /// List preset files. `Some(dir)` scans that directory; `None` scans the XDG

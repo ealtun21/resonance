@@ -11,6 +11,7 @@
 mod audio;
 mod config;
 mod ipc_server;
+mod ir;
 mod meters;
 mod shutdown;
 mod spectrum;
@@ -509,20 +510,11 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Load a named profile and swap it onto the chain (used by the output-mapping task).
+/// Load a named profile and swap it onto the chain (used by the output-mapping
+/// task). Goes through the shared profile apply so the convolution IR (if the
+/// profile carries one) is restored too.
 fn apply_profile(name: &str, state: &state::SharedState) -> Result<(), String> {
     let profile = Profile::load(name)?;
-    let (sr, channels) = {
-        let inner = state.0.lock().unwrap();
-        // Live RT rate, not the frozen shadow rate (see SharedState::rebuild_chain).
-        let sr = inner
-            .meters
-            .sample_rate()
-            .unwrap_or(inner.chain.sample_rate);
-        (sr, inner.chain.channels)
-    };
-    let chain_rt = profile.clone().into_chain(channels, sr);
-    let chain_shadow = profile.into_chain(channels, sr);
-    state.replace_chain(chain_rt, chain_shadow);
+    ipc_server::apply_profile_chain(&profile, state);
     Ok(())
 }

@@ -26,6 +26,20 @@ pub struct Profile {
     /// written before dither existed still load.
     #[serde(default)]
     pub dither_bits: Option<u32>,
+    /// Convolution IR reference (`None` = off). Only the source path + enabled
+    /// flag persist — the daemon re-reads the WAV when the profile is applied.
+    /// `serde` default so profiles written before convolution existed still load.
+    #[serde(default)]
+    pub convolution: Option<ConvolutionProfile>,
+}
+
+/// The persisted slice of the convolution stage: enough to restore it from disk.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ConvolutionProfile {
+    /// Source WAV path.
+    pub path: String,
+    /// False = keep the IR loaded but bypassed.
+    pub enabled: bool,
 }
 
 impl Profile {
@@ -37,6 +51,10 @@ impl Profile {
             effects: s.effects.clone(),
             bands: s.bands.clone(),
             dither_bits: s.dither_bits,
+            convolution: s.convolution.as_ref().map(|c| ConvolutionProfile {
+                path: c.path.clone(),
+                enabled: c.enabled,
+            }),
         }
     }
 
@@ -94,6 +112,7 @@ impl Profile {
             },
             bands,
             dither_bits: None,
+            convolution: None,
         }
     }
 
@@ -439,6 +458,7 @@ mod tests {
             enabled: true,
             effects: EffectsState::default(),
             dither_bits: None,
+            convolution: None,
             bands: vec![
                 BandState {
                     band_type: BandType::Peaking,
@@ -467,6 +487,36 @@ mod tests {
         let back: Profile = toml::from_str(&text).unwrap();
         assert_eq!(back.bands[0].channels, ChannelMask::ALL);
         assert_eq!(back.bands[1].channels, ChannelMask::single(0));
+    }
+
+    #[test]
+    fn profile_convolution_round_trips_toml_and_defaults_to_none() {
+        let profile = Profile {
+            preamp_db: 0.0,
+            enabled: true,
+            effects: EffectsState::default(),
+            bands: vec![],
+            dither_bits: None,
+            convolution: Some(ConvolutionProfile {
+                path: "/irs/room.wav".into(),
+                enabled: true,
+            }),
+        };
+        let text = toml::to_string_pretty(&profile).unwrap();
+        let back: Profile = toml::from_str(&text).unwrap();
+        assert_eq!(back.convolution, profile.convolution);
+
+        // A profile written before convolution existed loads with None.
+        let legacy = "preamp_db = 0.0\nenabled = true\n\n[effects]\n\
+             fidelity_intensity = 0.0\nfidelity_enabled = false\n\
+             ambience_intensity = 0.0\nambience_enabled = false\n\
+             surround_intensity = 0.0\nsurround_enabled = false\n\
+             dynamic_boost_intensity = 0.0\ndynamic_boost_enabled = false\n\
+             bass_intensity = 0.0\nbass_enabled = false\n\n\
+             [[bands]]\nband_type = \"Peaking\"\nfreq = 1000.0\n\
+             gain_db = 3.0\nq = 1.0\nenabled = true\n";
+        let p: Profile = toml::from_str(legacy).unwrap();
+        assert!(p.convolution.is_none());
     }
 
     #[test]
