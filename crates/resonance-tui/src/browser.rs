@@ -13,12 +13,16 @@ pub struct Item {
 }
 
 /// Why the picker is open — decides what happens when a file is chosen.
+// The `Load` prefix is the point: each variant names what gets loaded.
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BrowsePurpose {
     /// Import + load a preset/profile (`.fac` / APO `.txt` / `.toml`).
     LoadPreset,
     /// Load a measurement curve into the reference overlay (`.txt` / `.csv`).
     LoadMeasurement,
+    /// Load a `.wav` impulse response into the convolution stage.
+    LoadIr,
 }
 
 pub struct Browser {
@@ -38,6 +42,11 @@ impl Browser {
     /// A picker for loading a measurement curve into the reference overlay.
     pub fn new_measurement(start: PathBuf) -> Self {
         Self::with_purpose(start, BrowsePurpose::LoadMeasurement)
+    }
+
+    /// A picker for loading a `.wav` impulse response (convolution stage).
+    pub fn new_ir(start: PathBuf) -> Self {
+        Self::with_purpose(start, BrowsePurpose::LoadIr)
     }
 
     fn with_purpose(start: PathBuf, purpose: BrowsePurpose) -> Self {
@@ -156,6 +165,7 @@ fn accepts(name: &str, purpose: BrowsePurpose) -> bool {
     match purpose {
         BrowsePurpose::LoadPreset => has_ext("fac") || has_ext("txt") || has_ext("toml"),
         BrowsePurpose::LoadMeasurement => has_ext("txt") || has_ext("csv"),
+        BrowsePurpose::LoadIr => has_ext("wav"),
     }
 }
 
@@ -172,6 +182,38 @@ fn read_head(path: &Path, max: usize) -> std::io::Result<String> {
 /// Build a human-readable preview for a preset file (falls back to a raw head).
 fn preview_file(path: &Path) -> Vec<String> {
     const MAX_BANDS: usize = 16;
+
+    // WAV impulse responses are binary — summarise the header instead of
+    // reading the file as text.
+    if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("wav"))
+    {
+        return match hound::WavReader::open(path) {
+            Ok(r) => {
+                let spec = r.spec();
+                let frames = r.duration();
+                let secs = f64::from(frames) / f64::from(spec.sample_rate);
+                vec![
+                    "⮞ WAV impulse response".to_string(),
+                    String::new(),
+                    format!("channels : {}", spec.channels),
+                    format!("rate     : {} Hz", spec.sample_rate),
+                    format!(
+                        "format   : {}-bit {}",
+                        spec.bits_per_sample,
+                        match spec.sample_format {
+                            hound::SampleFormat::Float => "float",
+                            hound::SampleFormat::Int => "int",
+                        }
+                    ),
+                    format!("length   : {frames} frames ({secs:.2} s)"),
+                ]
+            }
+            Err(e) => vec![format!("(cannot read WAV: {e})")],
+        };
+    }
+
     // Cap the read: this runs on every cursor move while browsing, so a huge or
     // hostile file shouldn't be slurped whole. Real presets are a few KB; 64 KiB
     // is plenty to summarise, and the parsers tolerate a truncated tail.

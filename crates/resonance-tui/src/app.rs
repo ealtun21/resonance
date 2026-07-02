@@ -44,12 +44,14 @@ pub(crate) fn channels_visible(show_channels: bool, channels: usize) -> bool {
 #[allow(clippy::similar_names)]
 pub(crate) fn advanced_hint_label(
     dither: bool,
+    ir: bool,
     slope: bool,
     scope: bool,
     channels: bool,
 ) -> Option<String> {
     let parts: Vec<&str> = [
         ("dither", dither),
+        ("ir", ir),
         ("slope", slope),
         ("scope", scope),
         ("channels", channels),
@@ -551,6 +553,14 @@ impl App {
                     self.refresh_state();
                 }
                 crate::browser::BrowsePurpose::LoadMeasurement => self.load_measurement(&path),
+                crate::browser::BrowsePurpose::LoadIr => {
+                    match self.query(Command::SetConvolutionIr { path }) {
+                        Some(Response::Ok) => self.set_status("impulse response loaded"),
+                        Some(Response::Error(e)) => self.set_status(format!("IR load failed: {e}")),
+                        _ => self.set_status("IR load failed"),
+                    }
+                    self.refresh_state();
+                }
             }
         }
     }
@@ -1246,6 +1256,7 @@ impl App {
     pub(crate) fn advanced_active_hint(&self) -> Option<String> {
         let s = self.state.as_ref()?;
         let dither = !self.prefs.show_dither && s.dither_bits.is_some();
+        let ir = !self.prefs.show_ir && s.convolution.as_ref().is_some_and(|c| c.enabled);
         let slope = !self.prefs.show_slope
             && s.bands
                 .iter()
@@ -1256,7 +1267,7 @@ impl App {
                 .any(|b| b.scope != resonance_ipc::BandScope::Stereo);
         let channels = !channels_visible(self.prefs.show_channels, s.channels)
             && (s.routing.is_some() || s.bands.iter().any(|b| !b.channels.is_global(s.channels)));
-        advanced_hint_label(dither, slope, scope, channels)
+        advanced_hint_label(dither, ir, slope, scope, channels)
     }
 
     /// Open the per-band channel-target picker (`c`) for the selected band.
@@ -1381,6 +1392,58 @@ impl App {
             self.set_status("swapped L/R");
         }
         self.refresh_state();
+    }
+
+    // ── Convolution / impulse response ────────────────────────────────────
+
+    /// Open the `.wav` impulse-response picker (`I`). Enter loads/replaces the
+    /// IR; while the picker is open, `t` toggles bypass and `x` removes it.
+    pub fn open_ir_browser(&mut self) {
+        let start = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_dir())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        self.mode = InputMode::Browse(crate::browser::Browser::new_ir(start));
+    }
+
+    /// Toggle the loaded IR between enabled and bypassed (`t` in the picker).
+    pub fn browse_ir_toggle(&mut self) {
+        if !self.browse_is_ir() {
+            return;
+        }
+        let Some(enabled) = self
+            .state
+            .as_ref()
+            .and_then(|s| s.convolution.as_ref())
+            .map(|c| c.enabled)
+        else {
+            self.set_status("no impulse response loaded");
+            return;
+        };
+        self.send(Command::SetConvolutionEnabled { enabled: !enabled });
+        self.set_status(if enabled {
+            "impulse response bypassed"
+        } else {
+            "impulse response enabled"
+        });
+        self.refresh_state();
+    }
+
+    /// Remove the loaded IR entirely (`x` in the picker) and close the picker.
+    pub fn browse_ir_clear(&mut self) {
+        if !self.browse_is_ir() {
+            return;
+        }
+        self.mode = InputMode::Normal;
+        self.send(Command::ClearConvolutionIr);
+        self.set_status("impulse response removed");
+        self.refresh_state();
+    }
+
+    fn browse_is_ir(&self) -> bool {
+        matches!(&self.mode, InputMode::Browse(b)
+            if b.purpose == crate::browser::BrowsePurpose::LoadIr)
     }
 
     // ── Reference overlay / Auto-EQ ──────────────────────────────────────────
@@ -2143,12 +2206,16 @@ impl App {
                 self.prefs.save();
             }
             9 => {
+                self.prefs.show_ir = !self.prefs.show_ir;
+                self.prefs.save();
+            }
+            10 => {
                 self.prefs.show_channels = !self.prefs.show_channels;
                 self.prefs.save();
             }
             // Swap L/R lives here too (parity with the GUI's relocated channel
             // controls) so it's reachable even when the channels column is hidden.
-            10 => self.toggle_swap_lr(),
+            11 => self.toggle_swap_lr(),
             _ => {}
         }
     }
@@ -2377,14 +2444,17 @@ mod tests {
 
     #[test]
     fn advanced_hint_label_lists_active() {
-        assert_eq!(super::advanced_hint_label(false, false, false, false), None);
         assert_eq!(
-            super::advanced_hint_label(true, false, true, false).as_deref(),
+            super::advanced_hint_label(false, false, false, false, false),
+            None
+        );
+        assert_eq!(
+            super::advanced_hint_label(true, false, false, true, false).as_deref(),
             Some("adv: dither scope")
         );
         assert_eq!(
-            super::advanced_hint_label(true, true, true, true).as_deref(),
-            Some("adv: dither slope scope channels")
+            super::advanced_hint_label(true, true, true, true, true).as_deref(),
+            Some("adv: dither ir slope scope channels")
         );
     }
 }

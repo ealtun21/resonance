@@ -120,8 +120,8 @@ impl SettingsState {
             1 => self.mappings.len().saturating_sub(1),
             2 => self.sinks.len().saturating_sub(1),
             // Preferences: fps / refresh / confirm / band-Q / band-type / spectrum
-            // + advanced toggles (slope / scope / dither / channels) + swap L/R.
-            3 => 10,
+            // + advanced toggles (slope / scope / dither / IR / channels) + swap L/R.
+            3 => 11,
             4 => 3, // Daemon: Start / Stop / Restart / Autostart
             // Reference: on / target / measurement / browse-online / autoeq /
             // show-meas / normalize / bounds / tilt / bass / ear / treble / reset.
