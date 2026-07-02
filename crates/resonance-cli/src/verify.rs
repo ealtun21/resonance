@@ -457,29 +457,27 @@ mod win {
             .context("open WASAPI loopback capture on the output endpoint")?;
         in_stream.play().context("start loopback capture")?;
 
-        // Optional tone, every channel driven with the same sine.
-        let _out_stream = if let Some((freq, amp)) = tone {
-            let mut phase = 0.0f64;
-            let step = 2.0 * std::f64::consts::PI * freq / rate;
-            let stream = device
-                .build_output_stream(
-                    &stream_config,
-                    move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                        for frame in data.chunks_mut(channels) {
-                            let s = (amp * phase.sin()) as f32;
-                            phase = (phase + step) % (2.0 * std::f64::consts::PI);
-                            frame.fill(s);
-                        }
-                    },
-                    |e| eprintln!("tone playback error: {e}"),
-                    None,
-                )
-                .context("open tone output stream")?;
-            stream.play().context("start tone")?;
-            Some(stream)
-        } else {
-            None
-        };
+        // Render stream — always active: WASAPI loopback only produces packets
+        // while something is rendering, so the ambient (no-tone) capture drives
+        // the endpoint with silence (amplitude 0) to keep data flowing.
+        let (freq, amp) = tone.unwrap_or((440.0, 0.0));
+        let mut phase = 0.0f64;
+        let step = 2.0 * std::f64::consts::PI * freq / rate;
+        let out_stream = device
+            .build_output_stream(
+                &stream_config,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    for frame in data.chunks_mut(channels) {
+                        let s = (amp * phase.sin()) as f32;
+                        phase = (phase + step) % (2.0 * std::f64::consts::PI);
+                        frame.fill(s);
+                    }
+                },
+                |e| eprintln!("tone playback error: {e}"),
+                None,
+            )
+            .context("open tone output stream")?;
+        out_stream.play().context("start tone")?;
 
         std::thread::sleep(std::time::Duration::from_millis(settle_ms));
         // Drop whatever arrived during settle; keep only steady-state audio.
