@@ -1893,6 +1893,20 @@ impl App {
         self.refresh_state();
     }
 
+    /// Toggle the chain-level EQ phase mode: minimum (biquads, zero latency) ↔
+    /// linear (static bands rendered to one FIR — no phase rotation, adds
+    /// latency; Mid/Side + dynamic bands stay minimum phase).
+    pub fn toggle_phase_mode(&mut self) {
+        let linear = self.state.as_ref().is_some_and(|s| s.phase_mode_linear);
+        self.send(Command::SetPhaseMode { linear: !linear });
+        self.set_status(if linear {
+            "phase: minimum"
+        } else {
+            "phase: linear"
+        });
+        self.refresh_state();
+    }
+
     // ── Settings popup ─────────────────────────────────────────────────────
 
     pub fn begin_settings(&mut self) {
@@ -2335,6 +2349,8 @@ impl App {
             // Swap L/R lives here too (parity with the GUI's relocated channel
             // controls) so it's reachable even when the channels column is hidden.
             12 => self.toggle_swap_lr(),
+            // Chain-level EQ phase mode (like power/dither — not an advanced pref).
+            13 => self.toggle_phase_mode(),
             _ => {}
         }
     }
