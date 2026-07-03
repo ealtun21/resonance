@@ -80,6 +80,7 @@ assets = [
     { source = "target/release/resonance", dest = "/usr/bin/resonance", mode = "755" },
     { source = "target/release/resonance-tui", dest = "/usr/bin/resonance-tui", mode = "755" },
     { source = "target/release/resonance-gui", dest = "/usr/bin/resonance-gui", mode = "755" },
+    { source = "target/release/resonance-tray", dest = "/usr/bin/resonance-tray", mode = "755" },
     { source = "contrib/io.github.ealtun21.Resonance.desktop", dest = "/usr/share/applications/io.github.ealtun21.Resonance.desktop", mode = "644" },
     { source = "contrib/io.github.ealtun21.Resonance.svg", dest = "/usr/share/icons/hicolor/scalable/apps/io.github.ealtun21.Resonance.svg", mode = "644" },
     { source = "contrib/io.github.ealtun21.Resonance.metainfo.xml", dest = "/usr/share/metainfo/io.github.ealtun21.Resonance.metainfo.xml", mode = "644" },

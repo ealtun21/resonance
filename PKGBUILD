@@ -43,6 +43,7 @@ package() {
     install -Dm755 target/release/resonance       "$pkgdir/usr/bin/resonance"
     install -Dm755 target/release/resonance-tui   "$pkgdir/usr/bin/resonance-tui"
     install -Dm755 target/release/resonance-gui   "$pkgdir/usr/bin/resonance-gui"
+    install -Dm755 target/release/resonance-tray  "$pkgdir/usr/bin/resonance-tray"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
     install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
 

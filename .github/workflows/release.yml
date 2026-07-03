@@ -47,6 +47,7 @@ jobs:
              target/release/resonance \
              target/release/resonance-tui \
              target/release/resonance-gui \
+             target/release/resonance-tray \
              "dist/$name/"
           cp README.md LICENSE "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"

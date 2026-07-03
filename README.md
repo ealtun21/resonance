@@ -28,6 +28,9 @@ result back. It loads FxSound `.fac` presets and EqualizerAPO `.txt` configs.
 - **FxSound-matched effects** — Fidelity, Ambience, Surround, Dynamic Boost, Bass.
 - **Preset interop** — FxSound `.fac` and EqualizerAPO `.txt`.
 - **Three clients** — CLI (`resonance`), TUI (`resonance-tui`), GUI (`resonance-gui`).
+- **Optional system tray** — `resonance-tray` controls daemon power/preset/
+  lifecycle and opens/quits a UI; requires the daemon plus at least one
+  client, never embedded in the daemon. See [contrib/tray/README.md](contrib/tray/README.md).
 - **Lock-free RT audio path** — tokio IPC thread → `rtrb` SPSC → audio thread.
 
 ## Install
@@ -312,7 +315,10 @@ resonance/
     │                       memory-mapped daemon⇄APO control/telemetry bridge
     ├── resonance-cli/      CLI client  (resonance)
     ├── resonance-tui/      ratatui TUI client (resonance-tui)
-    └── resonance-gui/      egui/eframe desktop client (resonance-gui)
+    ├── resonance-gui/      egui/eframe desktop client (resonance-gui)
+    └── resonance-tray/     optional system-tray controller (resonance-tray);
+                            own process, requires the daemon + one client,
+                            never embedded in resonance-daemon
 ```
 
 Signal flow:
