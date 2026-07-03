@@ -18,6 +18,17 @@ pub enum PhaseMode {
     Linear,
 }
 
+/// Output-envelope state for click-free FIR-path transitions: the audible
+/// switch (mode flip or kernel swap) is deferred until a short fade-out
+/// completes, then the new path fades back in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum FirFade {
+    #[default]
+    Stable,
+    Out,
+    In,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FxEffect {
     Fidelity,
@@ -63,6 +74,21 @@ pub struct ProcessorChain {
     /// otherwise the IIR bank keeps running, so a pending or failed render can
     /// never leave a flat/silent gap.
     pub eq_fir: ConvolutionEngine,
+    /// Whether the FIR path is the one currently audible. Lags the *desired*
+    /// state (mode + kernel) by one short fade so switches are click-free.
+    fir_active: bool,
+    /// Identity of the kernel `fir_active` was faded in with (Arc pointer):
+    /// a swap while active (band edit re-render) also rides the fade.
+    fir_kernel_id: usize,
+    fir_fade: FirFade,
+    /// Output gain during a transition (1 = untouched; Stable skips the
+    /// multiply entirely so the steady path stays bit-exact).
+    fir_gain: f64,
+    /// Input ramp into the FIR after a flip: the engine starts from reset, so
+    /// without this the mid-stream input onset is a hard cut whose (faithful)
+    /// convolution arrives `latency` later as a click — long after the output
+    /// fade has ended. Ramping the input makes the delayed arrival smooth.
+    fir_in_gain: f64,
     pub fidelity: FidelityEffect,
     pub ambience: AmbienceEffect,
     pub surround: SurroundEffect,
@@ -101,9 +127,42 @@ impl ProcessorChain {
         }
 
         // Linear phase engages only with a loaded kernel (see `eq_fir` docs).
-        let fir_active = self.phase_mode == PhaseMode::Linear
+        let fir_want = self.phase_mode == PhaseMode::Linear
             && self.eq_fir.enabled()
             && self.eq_fir.source().is_some();
+        let kernel_id = self
+            .eq_fir
+            .source()
+            .map_or(0, |a| std::sync::Arc::as_ptr(a).cast::<u8>() as usize);
+        // The audible switch is deferred: fade out on the old path, flip at
+        // silence, fade the new path in (see `FirFade`).
+        match self.fir_fade {
+            FirFade::Stable => {
+                let swap = self.fir_active && fir_want && kernel_id != self.fir_kernel_id;
+                if fir_want != self.fir_active || swap {
+                    self.fir_fade = FirFade::Out;
+                } else {
+                    // Track silent kernel changes while inactive (no fade).
+                    self.fir_kernel_id = kernel_id;
+                }
+            }
+            FirFade::Out if self.fir_gain <= 0.0 => {
+                self.fir_active = fir_want;
+                self.fir_kernel_id = kernel_id;
+                if fir_want {
+                    // Fresh audible start for the (possibly swapped) kernel,
+                    // with a ramped input onset (see `fir_in_gain`).
+                    self.eq_fir.reset();
+                    self.fir_in_gain = 0.0;
+                } else if self.phase_mode != PhaseMode::Linear {
+                    // Mode left Linear: drop the kernel now that it's silent.
+                    self.eq_fir.clear();
+                }
+                self.fir_fade = FirFade::In;
+            }
+            _ => {}
+        }
+        let fir_active = self.fir_active;
 
         // Band-major cascade: each biquad makes one pass over the buffer. The
         // buffer is small enough to stay cache-resident across passes, so this
@@ -194,7 +253,38 @@ impl ProcessorChain {
         }
 
         if fir_active {
+            if self.fir_in_gain < 1.0 {
+                let step = 1.0 / (self.sample_rate * 0.008).max(1.0);
+                let frames = buf.len() / channels;
+                for frame in 0..frames {
+                    self.fir_in_gain = (self.fir_in_gain + step).min(1.0);
+                    for s in &mut buf[frame * channels..(frame + 1) * channels] {
+                        *s *= self.fir_in_gain;
+                    }
+                }
+            }
             self.eq_fir.process(buf, channels);
+        }
+        // Transition envelope (8 ms raised ramp each way). Stable = no touch,
+        // keeping the steady path bit-exact.
+        if self.fir_fade != FirFade::Stable {
+            let step = 1.0 / (self.sample_rate * 0.008).max(1.0);
+            let frames = buf.len() / channels;
+            for frame in 0..frames {
+                match self.fir_fade {
+                    FirFade::Out => self.fir_gain = (self.fir_gain - step).max(0.0),
+                    FirFade::In => {
+                        self.fir_gain = (self.fir_gain + step).min(1.0);
+                        if self.fir_gain >= 1.0 {
+                            self.fir_fade = FirFade::Stable;
+                        }
+                    }
+                    FirFade::Stable => {}
+                }
+                for s in &mut buf[frame * channels..(frame + 1) * channels] {
+                    *s *= self.fir_gain;
+                }
+            }
         }
         self.convolution.process(buf, channels);
         self.fidelity.process(buf, channels);
@@ -215,13 +305,11 @@ impl ProcessorChain {
         self.dither.set_bits(bits);
     }
 
-    /// Switch the EQ phase behaviour. Leaving `Linear` drops the FIR kernel —
-    /// the IIR bank resumes immediately; re-entering requires a fresh render
-    /// (the daemon/APO owns that).
+    /// Switch the EQ phase behaviour. The audible change rides a short fade
+    /// inside [`ProcessorChain::process`]; leaving `Linear` drops the FIR
+    /// kernel once it has faded out (re-entering requires a fresh render —
+    /// the daemon/APO owns that).
     pub fn set_phase_mode(&mut self, mode: PhaseMode) {
-        if mode == PhaseMode::Minimum && self.phase_mode == PhaseMode::Linear {
-            self.eq_fir.clear();
-        }
         self.phase_mode = mode;
     }
 
@@ -286,6 +374,18 @@ impl ProcessorChain {
             .for_each(super::filter::ApoFilter::reset);
         self.convolution.reset();
         self.eq_fir.reset();
+        // A reset is a hard restart: finalise any pending path transition so
+        // the chain starts on the desired path at full gain.
+        self.fir_active = self.phase_mode == PhaseMode::Linear
+            && self.eq_fir.enabled()
+            && self.eq_fir.source().is_some();
+        self.fir_kernel_id = self
+            .eq_fir
+            .source()
+            .map_or(0, |a| std::sync::Arc::as_ptr(a).cast::<u8>() as usize);
+        self.fir_fade = FirFade::Stable;
+        self.fir_gain = 1.0;
+        self.fir_in_gain = 1.0;
         self.fidelity.reset();
         self.ambience.reset();
         self.surround.reset();
@@ -456,6 +556,11 @@ impl ProcessorChainBuilder {
             convolution: ConvolutionEngine::new(channels, sr),
             phase_mode: PhaseMode::default(),
             eq_fir: ConvolutionEngine::new(channels, sr),
+            fir_active: false,
+            fir_kernel_id: 0,
+            fir_fade: FirFade::default(),
+            fir_gain: 1.0,
+            fir_in_gain: 1.0,
             fidelity: FidelityEffect::new(channels, sr),
             ambience: AmbienceEffect::new(channels, sr),
             surround: SurroundEffect::new(sr),
@@ -956,6 +1061,9 @@ mod tests {
         let ir = crate::linphase::render(&chain.filters, 2, 48_000.0).expect("kernel");
         chain.eq_fir.load_ir(std::sync::Arc::new(ir)).expect("load");
         chain.set_phase_mode(PhaseMode::Linear);
+        // Start settled on the FIR path (a fresh daemon chain, not a live
+        // mid-stream toggle — those are covered by the click-free tests).
+        chain.reset();
         chain
     }
 
@@ -1104,5 +1212,79 @@ mod tests {
         );
         chain.set_phase_mode(PhaseMode::Minimum);
         assert_eq!(chain.eq_fir_latency_frames(), 0);
+    }
+
+    // ── Click-free phase-mode transitions ───────────────────────────────────
+
+    /// Feed a continuous low-frequency sine block-by-block, flipping something
+    /// mid-stream; the largest sample-to-sample step in the output bounds the
+    /// audible click. A 200 Hz sine at 0.5 amp moves ≤ ~0.014/sample on its
+    /// own, so anything ≫ that is a discontinuity.
+    fn max_step_across(mut chain: ProcessorChain, flip: impl FnOnce(&mut ProcessorChain)) -> f64 {
+        let frames = 512;
+        let blocks = 40;
+        let mut phase = 0.0f64;
+        let dp = 2.0 * std::f64::consts::PI * 200.0 / 48_000.0;
+        let mut prev = 0.0f64;
+        let mut max_step = 0.0f64;
+        let mut flip = Some(flip);
+        for blk in 0..blocks {
+            let mut buf = Vec::with_capacity(frames * 2);
+            for _ in 0..frames {
+                let x = 0.5 * phase.sin();
+                phase += dp;
+                buf.push(x);
+                buf.push(x);
+            }
+            if blk == 10 {
+                if let Some(f) = flip.take() {
+                    f(&mut chain);
+                }
+            }
+            chain.process(&mut buf);
+            for fr in 0..frames {
+                let y = buf[fr * 2];
+                max_step = max_step.max((y - prev).abs());
+                prev = y;
+            }
+        }
+        max_step
+    }
+
+    #[test]
+    fn entering_linear_mode_is_click_free() {
+        let mut chain = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48_000.0)
+            .add_filter(peak_band(1_000.0, 12.0, 1.0))
+            .build();
+        let ir = crate::linphase::render(&chain.filters, 2, 48_000.0).unwrap();
+        chain.eq_fir.load_ir(std::sync::Arc::new(ir)).unwrap();
+        // still in Minimum; the flip switches to Linear mid-stream
+        let step = max_step_across(chain, |c| c.set_phase_mode(PhaseMode::Linear));
+        assert!(step < 0.05, "entering linear clicked: max step {step:.3}");
+    }
+
+    #[test]
+    fn leaving_linear_mode_is_click_free() {
+        let chain = linear_chain(vec![peak_band(1_000.0, 12.0, 1.0)]);
+        let step = max_step_across(chain, |c| c.set_phase_mode(PhaseMode::Minimum));
+        assert!(step < 0.05, "leaving linear clicked: max step {step:.3}");
+    }
+
+    #[test]
+    fn kernel_swap_while_linear_is_click_free() {
+        // A band edit in linear mode swaps in a fresh kernel (new engine
+        // history) — must also ride the fade.
+        let chain = linear_chain(vec![peak_band(1_000.0, 12.0, 1.0)]);
+        let step = max_step_across(chain, |c| {
+            let mut f2 = vec![peak_band(2_000.0, 6.0, 2.0)];
+            let ir = crate::linphase::render(&f2, 2, 48_000.0).unwrap();
+            let mut fresh = ConvolutionEngine::new(2, 48_000.0);
+            fresh.load_ir(std::sync::Arc::new(ir)).unwrap();
+            c.eq_fir = fresh;
+            let _ = &mut f2;
+        });
+        assert!(step < 0.05, "kernel swap clicked: max step {step:.3}");
     }
 }
