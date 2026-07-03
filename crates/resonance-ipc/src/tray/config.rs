@@ -11,12 +11,27 @@ pub enum LeftClick {
     Menu,
 }
 
+/// Settings upper bound for `recent_count`. The top position of the count
+/// control means "All" (no limit), stored as [`RECENT_ALL`].
+pub const RECENT_MAX: usize = 20;
+
+/// Sentinel `recent_count` meaning "show every recent preset" (no limit).
+/// `Vec::truncate` / `Iterator::take` treat `usize::MAX` as unbounded, so no
+/// consumer of `recent_count` has to special-case it.
+pub const RECENT_ALL: usize = usize::MAX;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TrayConfig {
     pub left_click: LeftClick,
     pub poll_secs: u64,
-    pub close_gui_to_tray: bool,
+    /// When set, quitting a UI (the GUI window close, or the tray's quit item)
+    /// also stops the daemon — quit closes *everything*. On by default. When
+    /// cleared, each quit only closes the thing you quit, leaving the daemon
+    /// (and the rest of the stack) running.
+    pub quit_stops_daemon: bool,
+    /// Number of recent presets to list in the tray menu. [`RECENT_ALL`] =
+    /// unlimited (show every one).
     pub recent_count: usize,
 }
 
@@ -25,7 +40,7 @@ impl Default for TrayConfig {
         Self {
             left_click: LeftClick::ToggleUi,
             poll_secs: 3,
-            close_gui_to_tray: false,
+            quit_stops_daemon: true,
             recent_count: 8,
         }
     }
@@ -72,7 +87,7 @@ mod tests {
         let c = TrayConfig::default();
         assert_eq!(c.left_click, LeftClick::ToggleUi);
         assert_eq!(c.poll_secs, 3);
-        assert!(!c.close_gui_to_tray, "off by default = lowest RAM");
+        assert!(c.quit_stops_daemon, "quit closes everything by default");
         assert_eq!(c.recent_count, 8);
     }
 
@@ -81,8 +96,8 @@ mod tests {
         let c = TrayConfig {
             left_click: LeftClick::Menu,
             poll_secs: 5,
-            close_gui_to_tray: true,
-            recent_count: 4,
+            quit_stops_daemon: true,
+            recent_count: RECENT_ALL,
         };
         let text = toml::to_string(&c).unwrap();
         let back: TrayConfig = toml::from_str(&text).unwrap();
@@ -95,6 +110,18 @@ mod tests {
         let back: TrayConfig = toml::from_str("poll_secs = 10\n").unwrap();
         assert_eq!(back.poll_secs, 10);
         assert_eq!(back.left_click, LeftClick::ToggleUi);
+        assert_eq!(back.recent_count, 8);
+    }
+
+    #[test]
+    fn stale_close_to_tray_field_is_ignored() {
+        // Configs written before close-to-tray was removed must still load
+        // (serde ignores unknown fields), falling back to the new defaults.
+        let back: TrayConfig = toml::from_str("close_gui_to_tray = true\n").unwrap();
+        assert!(
+            back.quit_stops_daemon,
+            "unknown field ignored; new field defaults"
+        );
         assert_eq!(back.recent_count, 8);
     }
 }

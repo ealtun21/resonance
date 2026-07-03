@@ -2146,9 +2146,19 @@ impl App {
                 }
             }
             TextPurpose::TrayRecent => {
-                if let Ok(n) = buf.trim().parse::<usize>() {
+                use resonance_ipc::tray::{RECENT_ALL, RECENT_MAX};
+                let trimmed = buf.trim();
+                let parsed = if trimmed.eq_ignore_ascii_case("all") {
+                    Some(RECENT_ALL)
+                } else {
+                    trimmed
+                        .parse::<usize>()
+                        .ok()
+                        .map(|n| if n >= RECENT_MAX { RECENT_ALL } else { n })
+                };
+                if let Some(count) = parsed {
                     let mut cfg = resonance_ipc::tray::TrayConfig::load();
-                    cfg.recent_count = n.clamp(0, 20);
+                    cfg.recent_count = count;
                     let _ = cfg.save();
                 }
                 if let InputMode::Settings(s) = &mut self.mode {
@@ -2302,7 +2312,7 @@ impl App {
         }
     }
 
-    /// Tray tab actions: start/stop, toggle autostart, toggle close-to-tray,
+    /// Tray tab actions: start/stop, toggle autostart, toggle quit-stops-daemon,
     /// cycle left-click, edit poll/recent (numeric — opens a `TextInput`).
     /// Full parity with the GUI settings dialog's Tray section and the CLI's
     /// `resonance tray` / `resonance tray config` subcommands.
@@ -2332,9 +2342,9 @@ impl App {
             }
             2 => {
                 let mut cfg = TrayConfig::load();
-                cfg.close_gui_to_tray = !cfg.close_gui_to_tray;
+                cfg.quit_stops_daemon = !cfg.quit_stops_daemon;
                 let r = cfg.save();
-                self.tray_action("close-to-tray", r);
+                self.tray_action("quit-stops-daemon", r);
             }
             3 => {
                 let mut cfg = TrayConfig::load();
@@ -2356,12 +2366,17 @@ impl App {
                 }
             }
             5 => {
-                let v = TrayConfig::load().recent_count.to_string();
+                let count = TrayConfig::load().recent_count;
+                let v = if count >= resonance_ipc::tray::RECENT_MAX {
+                    "all".to_string()
+                } else {
+                    count.to_string()
+                };
                 if let InputMode::Settings(s) = &mut self.mode {
                     s.text_input = Some(TextInput::new(
                         v,
                         TextPurpose::TrayRecent,
-                        "Recent presets (0-20)",
+                        "Recent presets (0-20 or 'all')",
                     ));
                 }
             }

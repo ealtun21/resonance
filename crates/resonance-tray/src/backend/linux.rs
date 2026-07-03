@@ -171,7 +171,7 @@ impl ksni::Tray for TrayApp {
         );
         items.push(
             StandardItem {
-                label: "Quit tray".into(),
+                label: crate::menu::quit_label(m.quit_stops_daemon).into(),
                 activate: Box::new(|t: &mut Self| t.emit(MenuAction::Quit)),
                 ..Default::default()
             }

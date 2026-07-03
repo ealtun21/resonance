@@ -130,7 +130,7 @@ impl SettingsState {
             // Reference: on / target / measurement / browse-online / autoeq /
             // show-meas / normalize / bounds / tilt / bass / ear / treble / reset.
             5 => 12,
-            // Tray: running / autostart / close-to-tray / left-click / poll / recent.
+            // Tray: running / autostart / quit-stops-daemon / left-click / poll / recent.
             6 => 5,
             _ => 0,
         }

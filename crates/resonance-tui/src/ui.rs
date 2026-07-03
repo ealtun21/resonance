@@ -2671,9 +2671,9 @@ fn render_tab_tray(s: &SettingsState, frame: &mut Frame, area: Rect) {
             "(Enter toggles tray-at-login)",
         ),
         (
-            "Close-to-tray",
-            cfg.close_gui_to_tray.to_string(),
-            "(Enter toggles; GUI close hides to tray instead of quitting)",
+            "Quit stops daemon",
+            cfg.quit_stops_daemon.to_string(),
+            "(Enter toggles; quit closes everything vs. just the UI)",
         ),
         (
             "Left-click",
@@ -2687,8 +2687,12 @@ fn render_tab_tray(s: &SettingsState, frame: &mut Frame, area: Rect) {
         ),
         (
             "Recent",
-            cfg.recent_count.to_string(),
-            "(Enter edits; recent-presets count in the tray menu)",
+            if cfg.recent_count >= resonance_ipc::tray::RECENT_MAX {
+                "All".to_string()
+            } else {
+                cfg.recent_count.to_string()
+            },
+            "(Enter edits; recent-presets count in the tray menu, or 'all')",
         ),
     ];
 

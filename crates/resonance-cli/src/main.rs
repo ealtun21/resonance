@@ -342,9 +342,9 @@ enum TrayAction {
     Uninstall,
     /// Show running/autostart status (default)
     Status,
-    /// Get or set a config value: left-click | poll | close-to-tray | recent
+    /// Get or set a config value: left-click | poll | quit-stops-daemon | recent
     Config {
-        /// One of: left-click, poll, close-to-tray, recent. Omit to print all.
+        /// One of: left-click, poll, quit-stops-daemon, recent. Omit to print all.
         key: Option<String>,
         /// New value; omit to read the current value.
         value: Option<String>,
@@ -963,22 +963,30 @@ fn run_tray(action: &TrayAction) -> Result<()> {
 /// key, print all fields; with a key but no value, print that field; with
 /// both, set and persist it.
 fn run_tray_config(key: Option<&str>, value: Option<&str>) -> Result<()> {
-    use resonance_ipc::tray::{LeftClick, TrayConfig};
+    use resonance_ipc::tray::{LeftClick, RECENT_ALL, RECENT_MAX, TrayConfig};
+    // "All" (no limit) prints instead of the raw `RECENT_ALL` sentinel.
+    let recent_str = |n: usize| {
+        if n >= RECENT_MAX {
+            "All".to_string()
+        } else {
+            n.to_string()
+        }
+    };
     let mut cfg = TrayConfig::load();
     let Some(key) = key else {
-        println!("left-click   = {:?}", cfg.left_click);
-        println!("poll         = {}", cfg.poll_secs);
-        println!("close-to-tray= {}", cfg.close_gui_to_tray);
-        println!("recent       = {}", cfg.recent_count);
+        println!("left-click       = {:?}", cfg.left_click);
+        println!("poll             = {}", cfg.poll_secs);
+        println!("quit-stops-daemon= {}", cfg.quit_stops_daemon);
+        println!("recent           = {}", recent_str(cfg.recent_count));
         return Ok(());
     };
     let Some(value) = value else {
         match key {
             "left-click" => println!("{:?}", cfg.left_click),
             "poll" => println!("{}", cfg.poll_secs),
-            "close-to-tray" => println!("{}", cfg.close_gui_to_tray),
-            "recent" => println!("{}", cfg.recent_count),
-            _ => bail!("unknown key '{key}' (left-click|poll|close-to-tray|recent)"),
+            "quit-stops-daemon" => println!("{}", cfg.quit_stops_daemon),
+            "recent" => println!("{}", recent_str(cfg.recent_count)),
+            _ => bail!("unknown key '{key}' (left-click|poll|quit-stops-daemon|recent)"),
         }
         return Ok(());
     };
@@ -996,13 +1004,19 @@ fn run_tray_config(key: Option<&str>, value: Option<&str>) -> Result<()> {
                 .map_err(|_| anyhow::anyhow!("poll must be an integer (seconds)"))?;
             cfg.poll_secs = secs.clamp(1, 60);
         }
-        "close-to-tray" => cfg.close_gui_to_tray = parse_bool(value)?,
+        "quit-stops-daemon" => cfg.quit_stops_daemon = parse_bool(value)?,
         "recent" => {
-            cfg.recent_count = value
-                .parse()
-                .map_err(|_| anyhow::anyhow!("recent must be an integer"))?;
+            // "all" (or any count at/above the max) = unlimited.
+            cfg.recent_count = if value.eq_ignore_ascii_case("all") {
+                RECENT_ALL
+            } else {
+                let n: usize = value
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("recent must be an integer or 'all'"))?;
+                if n >= RECENT_MAX { RECENT_ALL } else { n }
+            };
         }
-        _ => bail!("unknown key '{key}' (left-click|poll|close-to-tray|recent)"),
+        _ => bail!("unknown key '{key}' (left-click|poll|quit-stops-daemon|recent)"),
     }
     cfg.save()?;
     println!("set {key} = {value}");

@@ -93,7 +93,15 @@ pub fn execute(action: &MenuAction) -> anyhow::Result<()> {
                 tray::control::open_ui()?;
             }
         }
-        MenuAction::Quit => std::process::exit(0),
+        MenuAction::Quit => {
+            // "Quit Resonance" (the default) tears down the daemon too; plain
+            // "Quit tray" leaves it running. Best-effort: a failed stop must not
+            // block the tray from exiting.
+            if tray::TrayConfig::load().quit_stops_daemon {
+                let _ = service::stop();
+            }
+            std::process::exit(0);
+        }
         // Handled by plan_command above.
         MenuAction::TogglePower | MenuAction::LoadPreset(_) => {}
     }

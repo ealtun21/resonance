@@ -295,8 +295,14 @@ impl GuiApp {
                         let mut changed = false;
                         changed |= ui
                             .checkbox(
-                                &mut cfg.close_gui_to_tray,
-                                "Close window to tray (keep running)",
+                                &mut cfg.quit_stops_daemon,
+                                "Quit closes everything (stop the daemon too)",
+                            )
+                            .on_hover_text(
+                                "On: closing the window (or the tray's \"Quit \
+                                 Resonance\") also stops the daemon, so nothing \
+                                 keeps running. Off: quit only closes the window; \
+                                 the daemon (and tray) stay up.",
                             )
                             .changed();
                         egui::ComboBox::from_label("Left click")
@@ -323,12 +329,31 @@ impl GuiApp {
                         changed |= ui
                             .add(egui::Slider::new(&mut cfg.poll_secs, 1..=60).text("Poll (s)"))
                             .changed();
-                        changed |= ui
+                        // Recent-presets count. The top of the range means "All"
+                        // (no limit), stored as the RECENT_ALL sentinel.
+                        let recent_max = resonance_ipc::tray::RECENT_MAX;
+                        let mut recent_ui = cfg.recent_count.min(recent_max);
+                        if ui
                             .add(
-                                egui::Slider::new(&mut cfg.recent_count, 0..=20)
-                                    .text("Recent presets"),
+                                egui::Slider::new(&mut recent_ui, 0..=recent_max)
+                                    .text("Recent presets")
+                                    .custom_formatter(move |n, _| {
+                                        if n as usize >= recent_max {
+                                            "All".to_owned()
+                                        } else {
+                                            format!("{n}")
+                                        }
+                                    }),
                             )
-                            .changed();
+                            .changed()
+                        {
+                            cfg.recent_count = if recent_ui >= recent_max {
+                                resonance_ipc::tray::RECENT_ALL
+                            } else {
+                                recent_ui
+                            };
+                            changed = true;
+                        }
                         if changed {
                             let _ = cfg.save();
                         }

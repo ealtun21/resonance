@@ -150,7 +150,7 @@ impl App {
             .insert(tauto.id().clone(), MenuAction::TrayAutostart);
         let _ = menu.append(&tauto);
 
-        let quit = MenuItem::new("Quit tray", true, None);
+        let quit = MenuItem::new(crate::menu::quit_label(m.quit_stops_daemon), true, None);
         self.menu_ids.insert(quit.id().clone(), MenuAction::Quit);
         let _ = menu.append(&quit);
 
@@ -181,15 +181,13 @@ impl App {
         }
     }
 
-    /// Dispatch a menu-item activation to its mapped action, exiting the loop
-    /// on `Quit`.
-    fn on_menu(&mut self, el: &ActiveEventLoop, id: &MenuId) {
+    /// Dispatch a menu-item activation to its mapped action. `Quit` is handled
+    /// by the action thread (`daemon::execute`), which stops the daemon when
+    /// configured and then exits the whole process — so the winit loop must not
+    /// also exit here (that would race the daemon teardown to termination).
+    fn on_menu(&mut self, id: &MenuId) {
         if let Some(action) = self.menu_ids.get(id).cloned() {
-            let quit = action == MenuAction::Quit;
             let _ = self.actions.send(action);
-            if quit {
-                el.exit();
-            }
         }
     }
 }
@@ -214,13 +212,13 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn window_event(&mut self, _el: &ActiveEventLoop, _id: WindowId, _ev: WindowEvent) {}
 
-    fn user_event(&mut self, el: &ActiveEventLoop, ev: UserEvent) {
+    fn user_event(&mut self, _el: &ActiveEventLoop, ev: UserEvent) {
         match ev {
             UserEvent::Model(m) => {
                 self.model = m;
                 self.refresh_tray();
             }
-            UserEvent::Menu(me) => self.on_menu(el, &me.id),
+            UserEvent::Menu(me) => self.on_menu(&me.id),
             // Treat a completed left click on the icon as `LeftClick`; ignore
             // hover/move/enter/leave and non-left buttons so we fire once.
             UserEvent::Tray(TrayIconEvent::Click {

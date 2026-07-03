@@ -6,7 +6,7 @@ pub mod autostart;
 pub mod config;
 pub mod control;
 
-pub use config::{LeftClick, TrayConfig};
+pub use config::{LeftClick, RECENT_ALL, RECENT_MAX, TrayConfig};
 
 use std::path::PathBuf;
 

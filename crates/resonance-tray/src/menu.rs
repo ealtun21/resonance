@@ -36,6 +36,9 @@ pub struct MenuModel {
     pub tray_autostart: bool,
     pub daemon_autostart: bool,
     pub left_click: LeftClick,
+    /// When true, the quit item tears down the daemon too — so it reads
+    /// "Quit Resonance" rather than "Quit tray".
+    pub quit_stops_daemon: bool,
 }
 
 /// Build the display model from the latest daemon snapshot (or `None` when the
@@ -91,6 +94,19 @@ pub fn build_model(
         tray_autostart,
         daemon_autostart,
         left_click: cfg.left_click,
+        quit_stops_daemon: cfg.quit_stops_daemon,
+    }
+}
+
+/// The quit menu item's label, adapting to what quitting actually does:
+/// "Quit Resonance" when it also tears down the daemon (everything), else the
+/// tray-only "Quit tray".
+#[must_use]
+pub fn quit_label(quit_stops_daemon: bool) -> &'static str {
+    if quit_stops_daemon {
+        "Quit Resonance"
+    } else {
+        "Quit tray"
     }
 }
 
@@ -184,6 +200,20 @@ mod tests {
                 path: "/x/a.fac".into()
             })
         );
+    }
+
+    #[test]
+    fn quit_label_reflects_whether_it_stops_the_daemon() {
+        assert_eq!(quit_label(true), "Quit Resonance");
+        assert_eq!(quit_label(false), "Quit tray");
+    }
+
+    #[test]
+    fn build_model_carries_quit_stops_daemon() {
+        let mut cfg = cfg();
+        cfg.quit_stops_daemon = false;
+        let m = build_model(None, &cfg, &[Ui::Gui], &[], false, false, false);
+        assert!(!m.quit_stops_daemon);
     }
 
     #[test]
