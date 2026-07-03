@@ -119,7 +119,7 @@ fn render_help(app: &App, frame: &mut Frame, area: Rect) {
         key("a", "add band"),
         key("d / Del", "remove band"),
         key("t", "cycle band type"),
-        key("L", "solo band (audition one; press again to clear)"),
+        key("L", "audition band: cycle off → solo → listen"),
         Line::raw(""),
         head("FR graph (Tab to it, or use the mouse)"),
         key("↑↓ / ←→", "drag node: gain / frequency"),
@@ -224,10 +224,10 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
         Panel::Effects => "  •  [←→] intensity".to_string(),
         Panel::Apps => "  •  [←→] volume  [Space] mute  [A] hide".to_string(),
         Panel::Sinks => "  •  [←→] volume  [Space] mute  [O] hide".to_string(),
-        Panel::Bands => format!("  •  [a] add  [d] del  [t] type  [L] solo{band_adv}"),
+        Panel::Bands => format!("  •  [a] add  [d] del  [t] type  [L] audition{band_adv}"),
         Panel::Graph => {
             format!(
-                "  •  drag node: [↑↓] gain  [←→] freq  [ ][ ] select  [a/d/t] band  [L] solo{band_adv}"
+                "  •  drag node: [↑↓] gain  [←→] freq  [ ][ ] select  [a/d/t] band  [L] audition{band_adv}"
             )
         }
     };
@@ -434,12 +434,15 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         spans.push(Span::styled(lin, Style::default().fg(Color::Cyan)));
         spans.push(sep());
     }
-    // Solo badge — a transient audition that mutes every other band, so it must
-    // always be visible (never behind a pref) to avoid confusion over "why do I
-    // only hear one band". Bold yellow, showing the 1-based band number.
-    if let Some(i) = app.state.as_ref().and_then(|s| s.solo_band) {
+    // Audition badge — a transient mode that alters what you hear, so always
+    // visible (never behind a pref). Bold yellow, 1-based band + mode.
+    if let Some(a) = app.state.as_ref().and_then(|s| s.audition) {
+        let m = match a.mode {
+            resonance_ipc::AuditionMode::Solo => "SOLO",
+            resonance_ipc::AuditionMode::Listen => "LISTEN",
+        };
         spans.push(Span::styled(
-            format!("SOLO {}", i + 1),
+            format!("{m} {}", a.band + 1),
             Style::default().fg(Color::Yellow).bold(),
         ));
         spans.push(sep());
@@ -1442,12 +1445,12 @@ fn render_band_row(
     let idx = BandColumnIndices::resolve(cols.len(), show_ch);
     let bar_rect = cols[idx.bar];
 
-    let soloed = app.state.as_ref().is_some_and(|s| s.solo_band == Some(i));
+    let audition = app.state.as_ref().and_then(|s| s.audition).filter(|a| a.band == i);
 
-    // Row background: a soloed band gets a warm tint (it overrides everything
-    // else this frame, so it must never read as silently active); otherwise a
-    // subtle stripe on the selected row so it reads as a row, not a cell.
-    if soloed {
+    // Row background: an auditioned band gets a warm tint (it overrides
+    // everything else this frame, so it must never read as silently active);
+    // otherwise a subtle stripe on the selected row so it reads as a row.
+    if audition.is_some() {
         frame.render_widget(
             Block::default().style(Style::default().bg(Color::Rgb(60, 48, 12))),
             row_rect,
@@ -1504,11 +1507,11 @@ fn render_band_row(
     } else {
         type_name
     };
-    // Solo tag is never pref-gated — an active audition must always be visible.
-    let type_name = if soloed {
-        format!("{type_name} solo")
-    } else {
-        type_name
+    // Audition tag is never pref-gated — an active audition must always be visible.
+    let type_name = match audition.map(|a| a.mode) {
+        Some(resonance_ipc::AuditionMode::Solo) => format!("{type_name} solo"),
+        Some(resonance_ipc::AuditionMode::Listen) => format!("{type_name} listen"),
+        None => type_name,
     };
 
     put_cell(

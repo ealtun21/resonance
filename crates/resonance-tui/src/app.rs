@@ -1060,11 +1060,11 @@ impl App {
         self.refresh_state();
     }
 
-    /// Solo (audition) the selected band (`L` key): bypass every other band so
-    /// only this one is heard. Pressing it on the already-soloed band clears the
-    /// solo. Transient — no undo entry, never saved; suspends linear-phase while
-    /// active. The daemon also auto-clears it on any band-table edit.
-    pub fn toggle_band_solo(&mut self) {
+    /// Cycle the selected band's audition (`L` key): Off → Solo → Listen → Off.
+    /// Solo bypasses other bands; Listen band-passes this band's region.
+    /// Transient — no undo entry, never saved; suspends linear-phase while
+    /// active. The daemon auto-clears it on any band-table edit.
+    pub fn cycle_band_audition(&mut self) {
         if !matches!(self.focus, Panel::Bands | Panel::Graph) {
             return;
         }
@@ -1073,12 +1073,16 @@ impl App {
         if idx >= state.bands.len() {
             return;
         }
-        let index = if state.solo_band == Some(idx) {
-            None
-        } else {
-            Some(idx)
+        let cur = state.audition.filter(|a| a.band == idx).map(|a| a.mode);
+        let next = match cur {
+            None => Some(resonance_ipc::AuditionMode::Solo),
+            Some(resonance_ipc::AuditionMode::Solo) => Some(resonance_ipc::AuditionMode::Listen),
+            Some(resonance_ipc::AuditionMode::Listen) => None,
         };
-        self.send(Command::SetBandSolo { index });
+        self.send(Command::SetBandAudition {
+            index: next.map(|_| idx),
+            mode: next.unwrap_or(resonance_ipc::AuditionMode::Solo),
+        });
         self.refresh_state();
     }
 
