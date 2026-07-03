@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-03
 **Crate:** `resonance-gui`
-**Status:** design for review (several decisions flagged **CONFIRM** — made on best judgment while the requester was away; correct any at the review gate)
+**Status:** approved (all decisions confirmed with the requester; see "Decisions")
 
 ## Motivation
 
@@ -30,7 +30,7 @@ Two problems with the just-shipped hide-panes feature, plus a redesign request:
   Slope/Scope/Dyn bands-table columns) remain controlled **only** by
   Settings → Advanced features. They are not listed in the tray.
 - **Remove the Settings → Panes checkboxes** — arrange mode is the single place
-  to add/remove the main panes. **(CONFIRM: edit-mode-only vs keep both.)**
+  to add/remove the main panes.
 
 ## Non-goals
 
@@ -58,10 +58,13 @@ Two kinds, both already modeled by `PaneId`:
   - Add a card back **at a chosen position** (dropped into a column) → remove
     from `hidden_panes` **and** `move_card` it to the drop index.
 - Bands / Reference bar: `hidden_panes` membership only (no position).
+- **New persisted preference** `bands_off_layout: BandsOffLayout` — an enum
+  `{ Columns, Stacked }`, default `Columns`, saved as a string storage key. Only
+  affects the bands-hidden live layout (see below).
 
 ## Interaction — arrange mode
 
-**CONFIRM: drag-primary (matches the selected mock) with button shortcuts.**
+Drag-primary (matches the selected mock) with × / ＋ button shortcuts.
 
 Drop zones in arrange mode, payload = `PaneId`, each validating pane kind:
 
@@ -91,17 +94,32 @@ center is a no-op).
 
 ## Live layout (non-edit)
 
-`lower_has_content()` unchanged (any card visible OR bands visible).
+`lower_has_content()` unchanged (any card visible OR bands visible). Column count
+is driven by EQ-bands visibility and which card columns hold visible cards:
 
-- **Bands visible** (current 3-column, unchanged): Left panel (only if it holds
-  a visible card) | bands center (fills the slack) | Right panel (only if it
-  holds a visible card).
-- **Bands hidden** (NEW — the dual fix): the Left and Right visible cards render
-  as **two equal side-by-side columns** filling the width (egui `ui.columns(2)`
-  inside the controls strip). If only one column has visible cards, it fills the
-  width; if neither does (and bands hidden), `lower_has_content()` is false and
-  the graph fills the window (existing full-graph fallback).
-  **(CONFIRM: equal 50/50 split when both columns populated.)**
+**EQ bands shown** (already how `lower_columns_live` behaves — side panels drop
+when their column has no visible card, and the bands center fills the slack):
+
+| Left has cards | Right has cards | Columns |
+|:---:|:---:|:---:|
+| yes | yes | **3** — Left \| bands \| Right |
+| yes | no  | **2** — Left \| bands |
+| no  | yes | **2** — bands \| Right |
+| no  | no  | **1** — bands fills the width |
+
+**EQ bands hidden** — governed by a persisted preference `bands_off_layout`:
+
+- **Columns** (default): visible cards render in their Left/Right columns
+  side-by-side. Both sides populated → two equal columns (50/50, egui
+  `ui.columns(2)`); only one side populated → it fills the width.
+- **Stacked**: all visible cards stack in a single full-width column (the prior
+  behaviour).
+- No visible cards **and** bands hidden → `lower_has_content()` is false → the
+  graph fills the window (existing full-graph fallback).
+
+The preference is a small segmented control in the arrange banner ("When EQ bands
+is hidden: Columns | Stack"), persisted like the other GUI prefs. It is
+configured in arrange mode and applies to the live view.
 
 ## Arrange (edit) layout
 
@@ -117,8 +135,7 @@ center is a no-op).
   - Columns show the existing compact draggable card tiles (visible cards only),
     each with an × shortcut; empty columns show "(empty — drag a card here)".
   - Center shows a compact "EQ bands" tile (grip + × ) when shown, or a "drop EQ
-    bands here" placeholder drop zone when hidden. **(CONFIRM: compact tile vs
-    the full live table in the center during arrange.)**
+    bands here" placeholder drop zone when hidden.
 - **Hidden tray**: a labelled area (e.g. below the columns) listing a tile per
   hidden pane, each a drag source and carrying ＋ to restore. Always shown in
   arrange mode (reads "nothing hidden" when empty) so the mechanism is teachable.
@@ -126,7 +143,7 @@ center is a no-op).
 ## Settings changes
 
 - **Remove** the Settings → Panes section (the seven visibility checkboxes and
-  "Show all panes") added previously. **(CONFIRM.)**
+  "Show all panes") added previously.
 - Settings order becomes: **Theme → Channels → Advanced features → EQ phase**
   (Panes removed).
 - Settings → Advanced features unchanged.
@@ -144,7 +161,8 @@ center is a no-op).
 - `crates/resonance-gui/src/ui/dialogs.rs` — remove the Settings → Panes section.
 - `crates/resonance-gui/src/app.rs` — drop the "Show all panes" plumbing if
   unused after the Settings removal; keep `hidden_panes` + `pane_visible` +
-  reset-clears-hidden.
+  reset-clears-hidden; add the `bands_off_layout` preference (field + load/save +
+  reset default) and the arrange-banner segmented control that sets it.
 
 ## Testing
 
@@ -157,10 +175,13 @@ center is a no-op).
   live dual columns (bands hidden), arrange tray add/remove, center placeholder,
   reference row, and the all-hidden → full-graph fallback.
 
-## Open decisions (please confirm at review)
+## Decisions (confirmed with the requester)
 
-1. Remove Settings → Panes (edit-mode only) vs keep both.
-2. Advanced items stay Settings-only (assumed) vs become first-class panes.
-3. Drag-primary + button shortcuts vs buttons-only vs drag-only.
-4. Center during arrange: compact "EQ bands" tile vs the full live table.
-5. Bands-hidden live split: equal 50/50 vs proportional/resizable.
+1. **Remove Settings → Panes** — arrange mode is the single place to add/remove
+   main panes. ✅
+2. **Advanced items stay Settings-only** — not listed in the tray. ✅
+3. **Drag-primary + × / ＋ button shortcuts.** ✅
+4. **Center during arrange = compact "EQ bands" tile** (not the full table). ✅
+5. **Live column count** per the table above: bands shown → 3 / 2 / 1 by how many
+   card columns are populated; bands hidden → `bands_off_layout` preference
+   (Columns default, or Stacked). ✅
