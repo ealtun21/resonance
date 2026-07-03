@@ -4,7 +4,10 @@ use std::time::Duration;
 
 const FFT_SIZE: usize = 4096;
 const BINS: usize = SPECTRUM_BINS;
-const FREQ_MIN: f64 = 25.0;
+// Matches the clients' log frequency axis (`resonance_ipc::fr::LOG_MIN`/`LOG_MAX`
+// = log10(20)..log10(20000)) so display band `i` lands under the axis position
+// the GUI/TUI draw it at.
+const FREQ_MIN: f64 = 20.0;
 const FREQ_MAX: f64 = 20000.0;
 
 /// Display-envelope state machine for the analyzer bars, factored out of the
@@ -113,12 +116,7 @@ pub async fn run(mut rx: rtrb::Consumer<f32>, state: SharedState) {
         .collect();
 
     // Log-spaced bin edges (BINS+1 boundaries from FREQ_MIN to FREQ_MAX).
-    let edges: Vec<f64> = (0..=BINS)
-        .map(|i| {
-            let t = i as f64 / BINS as f64;
-            FREQ_MIN * (FREQ_MAX / FREQ_MIN).powf(t)
-        })
-        .collect();
+    let edges = band_edges();
 
     let mut buf: Vec<f32> = vec![0.0; FFT_SIZE];
     let mut write_pos: usize = 0;
@@ -126,6 +124,7 @@ pub async fn run(mut rx: rtrb::Consumer<f32>, state: SharedState) {
 
     // Reused across iterations so the 40 Hz loop never allocates.
     let mut fft_buf: Vec<Complex<f32>> = vec![Complex::new(0.0, 0.0); FFT_SIZE];
+    let mut half_mags: Vec<f32> = vec![0.0; FFT_SIZE / 2];
     let mut drained: Vec<f32> = Vec::with_capacity(8192);
 
     let mut interval = tokio::time::interval(Duration::from_millis(25)); // ~40 fps
@@ -203,36 +202,129 @@ pub async fn run(mut rx: rtrb::Consumer<f32>, state: SharedState) {
         let hz_per_bin = sr / FFT_SIZE as f64;
         let norm = 2.0 / FFT_SIZE as f32;
 
-        let mut mags = [0.0f32; BINS];
-        for (k, c) in fft_buf[..FFT_SIZE / 2].iter().enumerate() {
-            let freq = k as f64 * hz_per_bin;
-            if freq < edges[0] {
-                continue;
-            }
-            let mag = c.norm() * norm;
-            let bin_idx = band_for_freq(freq, &edges);
-            if bin_idx < BINS && mags[bin_idx] < mag {
-                mags[bin_idx] = mag;
-            }
+        for (m, c) in half_mags.iter_mut().zip(fft_buf[..FFT_SIZE / 2].iter()) {
+            *m = c.norm() * norm;
         }
+        let mags = fold_to_bands(&half_mags, hz_per_bin, &edges);
 
         state.update_spectrum(env.apply(&mags));
     }
 }
 
-fn band_for_freq(freq: f64, edges: &[f64]) -> usize {
-    // edges has BINS+1 entries; find the band whose [lo, hi) contains freq.
-    for i in 0..BINS {
-        if freq < edges[i + 1] {
-            return i;
-        }
+/// The BINS+1 log-spaced band boundaries from [`FREQ_MIN`] to [`FREQ_MAX`].
+fn band_edges() -> Vec<f64> {
+    (0..=BINS)
+        .map(|i| {
+            let t = i as f64 / BINS as f64;
+            FREQ_MIN * (FREQ_MAX / FREQ_MIN).powf(t)
+        })
+        .collect()
+}
+
+/// Fold the FFT half-spectrum (`mags[k]` = linear magnitude of bin `k`, whose
+/// centre frequency is `k * hz_per_bin`) into the [`BINS`] log-spaced display
+/// bands defined by `edges`.
+///
+/// For each band we take the peak of every FFT bin whose centre lands in its
+/// `[lo, hi)` range. At the low end the log-spaced bands are only a few Hz wide
+/// — narrower than the FFT resolution (`hz_per_bin`) — so a band can contain no
+/// bin centre at all. Rather than leave it permanently dark (the dead-bar bug),
+/// we sample the spectrum by linear interpolation at the band's geometric
+/// centre, giving a smooth low-frequency analyzer that tracks whatever plays.
+fn fold_to_bands(mags: &[f32], hz_per_bin: f64, edges: &[f64]) -> [f32; BINS] {
+    let mut out = [0.0f32; BINS];
+    if mags.is_empty() || !hz_per_bin.is_finite() || hz_per_bin <= 0.0 {
+        return out;
     }
-    BINS - 1
+    for (b, slot) in out.iter_mut().enumerate() {
+        let (lo, hi) = (edges[b], edges[b + 1]);
+        // FFT bins whose centre falls in [lo, hi): k in [ceil(lo/step), ceil(hi/step)).
+        // ceil(lo/step) >= 1 here (lo >= FREQ_MIN >= step at these rates) so DC is
+        // never included.
+        let k_start = (lo / hz_per_bin).ceil() as usize;
+        let k_end = ((hi / hz_per_bin).ceil() as usize).min(mags.len());
+        *slot = if k_start < k_end {
+            mags[k_start..k_end].iter().copied().fold(0.0, f32::max)
+        } else {
+            interp_mag(mags, (lo * hi).sqrt() / hz_per_bin)
+        };
+    }
+    out
+}
+
+/// Linear interpolation of the FFT magnitude at fractional bin position `pos`.
+fn interp_mag(mags: &[f32], pos: f64) -> f32 {
+    let pos = pos.max(0.0);
+    let k = pos.floor() as usize;
+    match (mags.get(k), mags.get(k + 1)) {
+        (Some(&a), Some(&b)) => {
+            let frac = (pos - k as f64) as f32;
+            a * (1.0 - frac) + b * frac
+        }
+        (Some(&a), None) => a,
+        _ => 0.0,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_band_lights_for_broadband_input() {
+        // A flat, broadband signal excites every frequency, so every display
+        // band must light. Regression for the low-frequency dead-bar bug: the
+        // log-spaced bands below ~150 Hz are narrower than the FFT resolution
+        // (sr / FFT_SIZE), so the old scatter mapping — assign each FFT bin to
+        // one band — left several low bands with no bin at all, permanently
+        // dark regardless of what was playing. The effect worsens with sample
+        // rate (coarser hz_per_bin), so exercise the common rates.
+        let edges = band_edges();
+        let mags = vec![1.0f32; FFT_SIZE / 2]; // equal energy in every FFT bin
+        for &sr in &[44100.0f64, 48000.0, 96000.0] {
+            let hz_per_bin = sr / FFT_SIZE as f64;
+            let bands = fold_to_bands(&mags, hz_per_bin, &edges);
+            let dark: Vec<usize> = bands
+                .iter()
+                .enumerate()
+                .filter(|&(_, &v)| v <= 0.0)
+                .map(|(i, _)| i)
+                .collect();
+            assert!(
+                dark.is_empty(),
+                "broadband input left dark bands at {sr} Hz: {dark:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tone_peaks_in_the_band_that_spans_it() {
+        // Lighting every band must not come at the cost of frequency accuracy:
+        // a single-bin tone must still peak in the display band whose [lo, hi)
+        // range contains it — including low tones that rely on interpolation.
+        let edges = band_edges();
+        let sr = 48000.0f64;
+        let hz_per_bin = sr / FFT_SIZE as f64;
+        for &k in &[4usize, 40, 400] {
+            // ~47 Hz (interpolated region), ~469 Hz, ~4688 Hz (gathered region)
+            let mut mags = vec![0.0f32; FFT_SIZE / 2];
+            mags[k] = 1.0;
+            let tone = k as f64 * hz_per_bin;
+            let bands = fold_to_bands(&mags, hz_per_bin, &edges);
+            let peak_b = bands
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .map(|(i, _)| i)
+                .unwrap();
+            assert!(
+                edges[peak_b] <= tone && tone < edges[peak_b + 1],
+                "tone {tone:.1} Hz peaked in band {peak_b} = [{:.1}, {:.1})",
+                edges[peak_b],
+                edges[peak_b + 1]
+            );
+        }
+    }
 
     #[test]
     fn steady_audio_keeps_the_bars_lit() {
