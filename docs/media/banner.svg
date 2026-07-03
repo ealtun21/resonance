@@ -1,0 +1,49 @@
+<svg width="1200" height="300" viewBox="0 0 1200 300" xmlns="http://www.w3.org/2000/svg" font-family="Montserrat, 'DejaVu Sans', sans-serif">
+  <defs>
+    <linearGradient id="card" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2b2240"/>
+      <stop offset="1" stop-color="#120d1c"/>
+    </linearGradient>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b2240"/>
+      <stop offset="1" stop-color="#15101f"/>
+    </linearGradient>
+    <linearGradient id="bar" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#7c4dff"/>
+      <stop offset="1" stop-color="#18e0d8"/>
+    </linearGradient>
+    <linearGradient id="wm" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#a98bff"/>
+      <stop offset="0.55" stop-color="#7c4dff"/>
+      <stop offset="1" stop-color="#18e0d8"/>
+    </linearGradient>
+  </defs>
+
+  <!-- card background -->
+  <rect x="0" y="0" width="1200" height="300" rx="34" fill="url(#card)"/>
+
+  <!-- faint response-curve motif across the card -->
+  <path d="M60 210 C 300 210, 360 90, 560 96 S 900 210, 1160 130"
+        fill="none" stroke="url(#wm)" stroke-opacity="0.10" stroke-width="10" stroke-linecap="round"/>
+
+  <!-- app icon (scaled from the shipped icon) -->
+  <g transform="translate(84,64) scale(1.35)">
+    <rect x="4" y="4" width="120" height="120" rx="26" fill="url(#bg)" stroke="#3a2f55" stroke-width="1.5"/>
+    <g fill="url(#bar)">
+      <rect x="24" y="62" width="12" height="42" rx="4"/>
+      <rect x="42" y="44" width="12" height="60" rx="4"/>
+      <rect x="60" y="28" width="12" height="76" rx="4"/>
+      <rect x="78" y="50" width="12" height="54" rx="4"/>
+      <rect x="96" y="70" width="12" height="34" rx="4"/>
+    </g>
+    <path d="M16 86 C 40 86, 50 40, 64 40 S 92 78, 112 56"
+          fill="none" stroke="#ffffff" stroke-opacity="0.9" stroke-width="5" stroke-linecap="round"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="308" y="158" font-size="104" font-weight="800" letter-spacing="-2" fill="url(#wm)">Resonance</text>
+
+  <!-- tagline -->
+  <text x="312" y="212" font-size="33" font-weight="600" fill="#cfc7e6">System-wide equalizer &amp; audio effects</text>
+  <text x="312" y="256" font-size="27" font-weight="500" fill="#8f86a8" xml:space="preserve">Linux <tspan fill="#5c5470">·</tspan> macOS <tspan fill="#5c5470">·</tspan> Windows <tspan fill="#5c5470">   —   </tspan> GUI <tspan fill="#5c5470">·</tspan> TUI <tspan fill="#5c5470">·</tspan> CLI</text>
+</svg>
