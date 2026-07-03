@@ -262,6 +262,11 @@ enum Sub {
         #[command(subcommand)]
         action: DaemonAction,
     },
+    /// Manage the optional system-tray controller (start/stop/autostart/config).
+    Tray {
+        #[command(subcommand)]
+        action: TrayAction,
+    },
     /// Print shell completions
     Completions {
         /// Shell: bash | zsh | fish | elvish | powershell
@@ -319,6 +324,33 @@ enum DaemonAction {
     Status,
 }
 
+#[derive(Subcommand)]
+enum TrayAction {
+    /// Start the tray now (spawns resonance-tray if not running)
+    Start,
+    /// Stop the running tray
+    Stop,
+    /// Restart the tray
+    Restart,
+    /// Enable autostart at login and start now
+    Enable,
+    /// Disable autostart and stop now
+    Disable,
+    /// Write the autostart entry (does not start)
+    Install,
+    /// Remove the autostart entry
+    Uninstall,
+    /// Show running/autostart status (default)
+    Status,
+    /// Get or set a config value: left-click | poll | close-to-tray | recent
+    Config {
+        /// One of: left-click, poll, close-to-tray, recent. Omit to print all.
+        key: Option<String>,
+        /// New value; omit to read the current value.
+        value: Option<String>,
+    },
+}
+
 fn main() -> Result<()> {
     // Piped invocations (`resonance status | head`) must end quietly when the
     // reader closes early, not panic on EPIPE — restore the default SIGPIPE
@@ -367,6 +399,12 @@ fn main() -> Result<()> {
     // macOS); it never touches the socket.
     if let Sub::Daemon { action } = &sub {
         return run_daemon(action);
+    }
+
+    // `tray` controls the optional system-tray controller process; it never
+    // touches the daemon socket.
+    if let Sub::Tray { action } = &sub {
+        return run_tray(action);
     }
 
     // `meta` reads/writes the preset's metadata sidecar client-side; it never
@@ -659,6 +697,7 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
         // are handled in `main` before this point.
         Sub::Channel { .. }
         | Sub::Daemon { .. }
+        | Sub::Tray { .. }
         | Sub::Devices
         | Sub::Apps
         | Sub::App { .. }
@@ -869,6 +908,103 @@ fn run_daemon(action: &DaemonAction) -> Result<()> {
         yn(s.enabled, "autostart on", "autostart off"),
         yn(s.installed, "installed", "not installed"),
     );
+    Ok(())
+}
+
+/// `resonance tray`: start/stop/autostart/config the optional system-tray
+/// controller. The tray is a separate process (`resonance-tray`) that never
+/// touches the daemon socket itself; this just manages its lifecycle.
+fn run_tray(action: &TrayAction) -> Result<()> {
+    use resonance_ipc::tray::{self, autostart, control};
+    let p = Paint::auto();
+    match action {
+        TrayAction::Start => control::start()?,
+        TrayAction::Stop => {
+            control::stop()?;
+        }
+        TrayAction::Restart => {
+            let _ = control::stop()?;
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            control::start()?;
+        }
+        TrayAction::Enable => {
+            autostart::enable()?;
+            control::start()?;
+        }
+        TrayAction::Disable => {
+            autostart::disable()?;
+            let _ = control::stop()?;
+        }
+        TrayAction::Install => autostart::enable()?,
+        TrayAction::Uninstall => autostart::disable()?,
+        TrayAction::Status => {}
+        TrayAction::Config { key, value } => {
+            return run_tray_config(key.as_deref(), value.as_deref());
+        }
+    }
+    let s = control::status();
+    let yn = |b: bool, yes: &str, no: &str| {
+        if b { p.green(yes) } else { p.dim(no) }
+    };
+    println!(
+        "{}  {}  {}",
+        p.magenta_bold("♪ resonance-tray"),
+        yn(s.running, "● running", "○ stopped"),
+        yn(s.autostart, "autostart on", "autostart off"),
+    );
+    // Guard: the tray cannot run standalone without a UI to control.
+    if tray::installed_uis().is_empty() {
+        println!("{}", p.dim("(no UI installed — tray will refuse to start)"));
+    }
+    Ok(())
+}
+
+/// `resonance tray config`: read or write one field of `tray.toml`. With no
+/// key, print all fields; with a key but no value, print that field; with
+/// both, set and persist it.
+fn run_tray_config(key: Option<&str>, value: Option<&str>) -> Result<()> {
+    use resonance_ipc::tray::{LeftClick, TrayConfig};
+    let mut cfg = TrayConfig::load();
+    let Some(key) = key else {
+        println!("left-click   = {:?}", cfg.left_click);
+        println!("poll         = {}", cfg.poll_secs);
+        println!("close-to-tray= {}", cfg.close_gui_to_tray);
+        println!("recent       = {}", cfg.recent_count);
+        return Ok(());
+    };
+    let Some(value) = value else {
+        match key {
+            "left-click" => println!("{:?}", cfg.left_click),
+            "poll" => println!("{}", cfg.poll_secs),
+            "close-to-tray" => println!("{}", cfg.close_gui_to_tray),
+            "recent" => println!("{}", cfg.recent_count),
+            _ => bail!("unknown key '{key}' (left-click|poll|close-to-tray|recent)"),
+        }
+        return Ok(());
+    };
+    match key {
+        "left-click" => {
+            cfg.left_click = match value {
+                "toggle-ui" | "toggle" => LeftClick::ToggleUi,
+                "menu" => LeftClick::Menu,
+                _ => bail!("left-click must be toggle-ui|menu"),
+            };
+        }
+        "poll" => {
+            cfg.poll_secs = value
+                .parse()
+                .map_err(|_| anyhow::anyhow!("poll must be an integer (seconds)"))?;
+        }
+        "close-to-tray" => cfg.close_gui_to_tray = parse_bool(value)?,
+        "recent" => {
+            cfg.recent_count = value
+                .parse()
+                .map_err(|_| anyhow::anyhow!("recent must be an integer"))?;
+        }
+        _ => bail!("unknown key '{key}' (left-click|poll|close-to-tray|recent)"),
+    }
+    cfg.save()?;
+    println!("set {key} = {value}");
     Ok(())
 }
 
@@ -1717,5 +1853,10 @@ mod tests {
         .save_for(&preset)
         .unwrap();
         assert_eq!(meta_tail(&preset).as_deref(), Some("flat studio"));
+    }
+
+    #[test]
+    fn cli_command_tree_is_valid() {
+        Cli::command().debug_assert();
     }
 }
