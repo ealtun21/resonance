@@ -8,7 +8,7 @@
 use crate::card_layout::{CardCol, CardId, CardLayout};
 use crate::curve;
 use crate::ipc::IpcClient;
-use crate::panes::{PaneId, hidden_from_json_or_default};
+use crate::panes::{BandsOffLayout, PaneId, hidden_from_json_or_default};
 use crate::state::{Confirm, Dialog, Snapshot};
 use crate::theme::{Palette, Theme};
 use crate::ui::kit;
@@ -354,6 +354,8 @@ pub struct GuiApp {
     /// Panes the user has hidden via Settings → Panes (persisted). Empty ⇒ every
     /// pane is shown. The FR graph itself is never in this set.
     pub(crate) hidden_panes: std::collections::HashSet<PaneId>,
+    /// Live lower-area layout when EQ bands is hidden (persisted).
+    pub(crate) bands_off_layout: BandsOffLayout,
     /// A card move requested this frame by a drop, applied after the columns
     /// finish rendering (so the lists aren't mutated mid-iteration).
     pub(crate) pending_card_move: Option<(CardId, CardCol, usize)>,
@@ -723,6 +725,11 @@ impl GuiApp {
                 .storage
                 .and_then(|s| s.get_string("hidden_panes"))
                 .map(|s| hidden_from_json_or_default(&s))
+                .unwrap_or_default(),
+            bands_off_layout: cc
+                .storage
+                .and_then(|s| s.get_string("bands_off_layout"))
+                .map(|s| BandsOffLayout::from_storage(&s))
                 .unwrap_or_default(),
             pending_card_move: None,
             hidden_curves: std::collections::HashSet::new(),
@@ -1270,6 +1277,10 @@ impl eframe::App for GuiApp {
         if let Ok(j) = serde_json::to_string(&self.hidden_panes) {
             storage.set_string("hidden_panes", j);
         }
+        storage.set_string(
+            "bands_off_layout",
+            self.bands_off_layout.as_storage().to_string(),
+        );
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

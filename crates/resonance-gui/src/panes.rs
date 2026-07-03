@@ -65,6 +65,36 @@ pub(crate) fn hidden_from_json_or_default(s: &str) -> HashSet<PaneId> {
     serde_json::from_str::<HashSet<PaneId>>(s).unwrap_or_default()
 }
 
+/// How the live lower area lays out when EQ bands is hidden.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum BandsOffLayout {
+    /// Cards render in their Left/Right columns side by side (two equal columns
+    /// when both are populated; one fills the width when only one is).
+    #[default]
+    Columns,
+    /// All visible cards stack in a single full-width column.
+    Stacked,
+}
+
+impl BandsOffLayout {
+    /// Parse the persisted value; anything unrecognised falls back to the
+    /// default (`Columns`).
+    pub(crate) fn from_storage(s: &str) -> Self {
+        match s {
+            "stacked" => Self::Stacked,
+            _ => Self::Columns,
+        }
+    }
+
+    /// The stable string written to storage.
+    pub(crate) fn as_storage(self) -> &'static str {
+        match self {
+            Self::Columns => "columns",
+            Self::Stacked => "stacked",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,6 +128,22 @@ mod tests {
         assert!(hidden_from_json_or_default("garbage").is_empty());
         // One unknown variant fails the whole parse → empty (all visible).
         assert!(hidden_from_json_or_default(r#"["Effects","Nope"]"#).is_empty());
+    }
+
+    #[test]
+    fn bands_off_layout_storage_round_trip() {
+        for v in [BandsOffLayout::Columns, BandsOffLayout::Stacked] {
+            assert_eq!(BandsOffLayout::from_storage(v.as_storage()), v);
+        }
+    }
+
+    #[test]
+    fn bands_off_layout_defaults_to_columns() {
+        assert_eq!(BandsOffLayout::default(), BandsOffLayout::Columns);
+        assert_eq!(
+            BandsOffLayout::from_storage("garbage"),
+            BandsOffLayout::Columns
+        );
     }
 
     #[test]
