@@ -4,6 +4,7 @@
 
 use crate::app::{GuiApp, ServiceAction, ServiceFn};
 use crate::card_layout::{CardCol, CardId, CardLayout};
+use crate::panes::PaneId;
 use crate::ui::kit;
 use crate::ui::widgets::{padded_scroll, section, section_hint};
 use eframe::egui;
@@ -122,13 +123,17 @@ impl GuiApp {
                 // controls strip ~40%, with only a usability floor — no upper cap,
                 // so a tall/maximised window honours the ratio instead of pinning
                 // the controls at a fixed height (and `reset_layout` lands here).
-                let controls_h = (ui.available_height() * 0.4).max(150.0);
-                egui::Panel::bottom("controls_panel")
-                    .resizable(true)
-                    .default_size(controls_h)
-                    .min_size(80.0)
-                    .show_separator_line(false)
-                    .show_inside(ui, |ui| self.lower_columns(ui, state.as_ref()));
+                // Drop the whole controls strip when every lower pane is hidden
+                // (and we're not arranging), so the hero graph fills the window.
+                if self.layout_edit || self.lower_has_content() {
+                    let controls_h = (ui.available_height() * 0.4).max(150.0);
+                    egui::Panel::bottom("controls_panel")
+                        .resizable(true)
+                        .default_size(controls_h)
+                        .min_size(80.0)
+                        .show_separator_line(false)
+                        .show_inside(ui, |ui| self.lower_columns(ui, state.as_ref()));
+                }
                 // The hero card is the CentralPanel itself (so it fills): a card
                 // frame holds the head, plot, readout AND the reference bar as
                 // nested panels (mockup — the reference bar lives inside the graph
@@ -156,27 +161,46 @@ impl GuiApp {
             // the accordion of sections scrolls in the central area below — open
             // sections fill it; the splitter trades graph height for controls.
             LayoutMode::Narrow => {
-                let gh = (ui.available_height() * 0.5).max(180.0);
-                egui::Panel::top("graph_narrow")
-                    .resizable(true)
-                    .default_size(gh)
-                    .min_size(150.0)
-                    .show_separator_line(false)
-                    .show_inside(ui, |ui| {
+                let ref_visible = self.pane_visible(PaneId::ReferenceBar);
+                if self.lower_has_content() {
+                    let gh = (ui.available_height() * 0.5).max(180.0);
+                    egui::Panel::top("graph_narrow")
+                        .resizable(true)
+                        .default_size(gh)
+                        .min_size(150.0)
+                        .show_separator_line(false)
+                        .show_inside(ui, |ui| {
+                            if let Some(s) = &state {
+                                self.eq_curve(ui, s);
+                            }
+                        });
+                    if ref_visible {
+                        egui::Panel::top("reference_bar_narrow")
+                            .resizable(false)
+                            .show_separator_line(false)
+                            .show_inside(ui, |ui| self.reference_bar(ui));
+                    }
+                    egui::CentralPanel::default().show_inside(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("controls_scroll")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| self.accordion_stack(ui, state.as_ref()));
+                    });
+                } else {
+                    // Nothing below the graph: let it fill, with the reference bar
+                    // (if shown) pinned under it.
+                    if ref_visible {
+                        egui::Panel::bottom("reference_bar_narrow")
+                            .resizable(false)
+                            .show_separator_line(false)
+                            .show_inside(ui, |ui| self.reference_bar(ui));
+                    }
+                    egui::CentralPanel::default().show_inside(ui, |ui| {
                         if let Some(s) = &state {
                             self.eq_curve(ui, s);
                         }
                     });
-                egui::Panel::top("reference_bar_narrow")
-                    .resizable(false)
-                    .show_separator_line(false)
-                    .show_inside(ui, |ui| self.reference_bar(ui));
-                egui::CentralPanel::default().show_inside(ui, |ui| {
-                    egui::ScrollArea::vertical()
-                        .id_salt("controls_scroll")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| self.accordion_stack(ui, state.as_ref()));
-                });
+                }
             }
         }
     }
@@ -185,6 +209,9 @@ impl GuiApp {
     /// if it drew anything — absent Applications/Outputs cards draw nothing and
     /// return false, so the caller can skip their inter-card spacing.
     fn render_card(&mut self, ui: &mut egui::Ui, s: &DaemonState, id: CardId) -> bool {
+        if !self.pane_visible(PaneId::from_card(id)) {
+            return false;
+        }
         match id {
             CardId::Effects => {
                 section_hint(ui, "Effects", "DSP sound effects", |ui| {
@@ -331,16 +358,41 @@ impl GuiApp {
                         }
                         if ui.button("Reset").clicked() {
                             self.layout = CardLayout::default();
+                            self.hidden_panes.clear();
                         }
                     });
                 });
             });
     }
 
+    /// Visible cards in a column, honouring the hidden-panes set. Used to decide
+    /// whether a side panel has anything to show (so an all-hidden column drops
+    /// its panel entirely) and to drive the stacked fallback when bands is hidden.
+    fn visible_cards(&self, col: CardCol) -> Vec<CardId> {
+        self.layout
+            .column(col)
+            .iter()
+            .copied()
+            .filter(|&id| self.pane_visible(PaneId::from_card(id)))
+            .collect()
+    }
+
+    /// True when at least one lower pane (any control card or the EQ bands) is
+    /// visible. When false the wide layout drops the whole controls strip and the
+    /// narrow layout lets the graph fill, so the FR graph is the entire UI.
+    fn lower_has_content(&self) -> bool {
+        self.pane_visible(PaneId::Bands)
+            || CardId::ALL
+                .iter()
+                .any(|&id| self.pane_visible(PaneId::from_card(id)))
+    }
+
     /// Wide layout: three columns — Effects | EQ bands (flexible centre) |
     /// Devices/Profiles — that FILL the width like a native desktop app's panes
     /// (thin splitter rules between them). EQ bands takes all the slack so its
-    /// table grows into the space rather than leaving a centred island.
+    /// table grows into the space rather than leaving a centred island. Side
+    /// panels drop when the user has hidden every card in them; when EQ bands is
+    /// hidden the remaining cards stack full-width instead.
     fn lower_columns(&mut self, ui: &mut egui::Ui, state: Option<&DaemonState>) {
         // Edit-mode banner spans the top of the controls strip.
         if self.layout_edit {
@@ -349,51 +401,84 @@ impl GuiApp {
                 .show_separator_line(false)
                 .show_inside(ui, |ui| self.layout_edit_banner(ui));
         }
-        // Frame::NONE on every column so they share one top inset (the panels'
-        // default frames differ — that's why EQ bands sat lower than its
-        // neighbours) and no separator lines, so the three cards float on the body
-        // background with plain gaps between them (mockup `.controls`), instead of
-        // egui's panel-boundary grid lines.
-        egui::Panel::left("effects_col")
-            .resizable(false)
-            .exact_size(EFFECTS_W)
-            .frame(egui::Frame::NONE)
-            .show_separator_line(false)
-            .show_inside(ui, |ui| {
-                if let Some(s) = state {
-                    padded_scroll(ui, "effects_scroll", |ui| {
-                        self.render_lower_column(ui, s, CardCol::Left);
+
+        // Arrange mode always shows the full 3-column arranger (both side columns
+        // + the live bands centre), ignoring the hidden-panes set — arranging is
+        // about placement, not visibility.
+        let bands_visible = self.layout_edit || self.pane_visible(PaneId::Bands);
+        let left_cards = self.visible_cards(CardCol::Left);
+        let right_cards = self.visible_cards(CardCol::Right);
+
+        if bands_visible {
+            // Three-column layout. Frame::NONE on every column so they share one
+            // top inset (the panels' default frames differ — that's why EQ bands
+            // sat lower than its neighbours) and no separator lines, so the cards
+            // float on the body background with plain gaps between them (mockup
+            // `.controls`), instead of egui's panel-boundary grid lines. A side
+            // panel shows in edit mode, or when it holds at least one visible card.
+            if self.layout_edit || !left_cards.is_empty() {
+                egui::Panel::left("effects_col")
+                    .resizable(false)
+                    .exact_size(EFFECTS_W)
+                    .frame(egui::Frame::NONE)
+                    .show_separator_line(false)
+                    .show_inside(ui, |ui| {
+                        if let Some(s) = state {
+                            padded_scroll(ui, "effects_scroll", |ui| {
+                                self.render_lower_column(ui, s, CardCol::Left);
+                            });
+                        }
                     });
-                }
-            });
-        egui::Panel::right("devices_col")
-            .resizable(false)
-            .exact_size(DEVICES_W)
-            .frame(egui::Frame::NONE)
-            .show_separator_line(false)
-            .show_inside(ui, |ui| {
-                if let Some(s) = state {
-                    padded_scroll(ui, "side", |ui| {
-                        self.render_lower_column(ui, s, CardCol::Right);
+            }
+            if self.layout_edit || !right_cards.is_empty() {
+                egui::Panel::right("devices_col")
+                    .resizable(false)
+                    .exact_size(DEVICES_W)
+                    .frame(egui::Frame::NONE)
+                    .show_separator_line(false)
+                    .show_inside(ui, |ui| {
+                        if let Some(s) = state {
+                            padded_scroll(ui, "side", |ui| {
+                                self.render_lower_column(ui, s, CardCol::Right);
+                            });
+                        }
                     });
-                }
-            });
-        // The centre column IS the bands card: a card-styled CentralPanel (so it
-        // fills the column height), with the gutter as its outer margin. Its body
-        // (head/table/footer nested panels) lives in `bands_card`.
-        let t = kit::tokens(ui);
-        let card_frame = egui::Frame::default()
-            .fill(ui.visuals().faint_bg_color)
-            .stroke(egui::Stroke::new(1.0, t.line))
-            .corner_radius(egui::CornerRadius::same(kit::R_CARD as u8))
-            .outer_margin(egui::Margin::symmetric(8, 10));
-        egui::CentralPanel::default()
-            .frame(card_frame)
-            .show_inside(ui, |ui| {
-                if let Some(s) = state {
-                    self.bands_card(ui, s);
-                }
-            });
+            }
+            // The centre column IS the bands card: a card-styled CentralPanel (so
+            // it fills whatever the side panels leave — full width if both are
+            // gone), with the gutter as its outer margin. Its body (head/table/
+            // footer nested panels) lives in `bands_card`.
+            let t = kit::tokens(ui);
+            let card_frame = egui::Frame::default()
+                .fill(ui.visuals().faint_bg_color)
+                .stroke(egui::Stroke::new(1.0, t.line))
+                .corner_radius(egui::CornerRadius::same(kit::R_CARD as u8))
+                .outer_margin(egui::Margin::symmetric(8, 10));
+            egui::CentralPanel::default()
+                .frame(card_frame)
+                .show_inside(ui, |ui| {
+                    if let Some(s) = state {
+                        self.bands_card(ui, s);
+                    }
+                });
+        } else {
+            // Bands hidden (and not arranging): no side panels — the remaining
+            // visible cards stack full-width in a scroll area (the same card
+            // widget the narrow accordion uses).
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show_inside(ui, |ui| {
+                    if let Some(s) = state {
+                        padded_scroll(ui, "stacked_cards", |ui| {
+                            for id in left_cards.iter().chain(&right_cards) {
+                                if self.render_card(ui, s, *id) {
+                                    ui.add_space(12.0);
+                                }
+                            }
+                        });
+                    }
+                });
+        }
         // Apply a card move requested by a drop this frame, now that both columns
         // have finished rendering (never mutate the lists mid-iteration).
         if let Some((id, col, idx)) = self.pending_card_move.take() {
@@ -418,8 +503,10 @@ impl GuiApp {
                             ui.add_space(GAP);
                         }
                     }
-                    section(ui, "EQ bands", |ui| self.bands_section(ui, s));
-                    ui.add_space(GAP);
+                    if self.pane_visible(PaneId::Bands) {
+                        section(ui, "EQ bands", |ui| self.bands_section(ui, s));
+                        ui.add_space(GAP);
+                    }
                     for id in self.layout.right.clone() {
                         if self.render_card(ui, s, id) {
                             ui.add_space(GAP);

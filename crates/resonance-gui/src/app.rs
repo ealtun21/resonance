@@ -8,6 +8,7 @@
 use crate::card_layout::{CardCol, CardId, CardLayout};
 use crate::curve;
 use crate::ipc::IpcClient;
+use crate::panes::{PaneId, hidden_from_json_or_default};
 use crate::state::{Confirm, Dialog, Snapshot};
 use crate::theme::{Palette, Theme};
 use crate::ui::kit;
@@ -350,6 +351,9 @@ pub struct GuiApp {
     /// Session-only "arrange the layout" mode: shows draggable card tiles + drop
     /// zones instead of the live cards. Never persisted.
     pub(crate) layout_edit: bool,
+    /// Panes the user has hidden via Settings → Panes (persisted). Empty ⇒ every
+    /// pane is shown. The FR graph itself is never in this set.
+    pub(crate) hidden_panes: std::collections::HashSet<PaneId>,
     /// A card move requested this frame by a drop, applied after the columns
     /// finish rendering (so the lists aren't mutated mid-iteration).
     pub(crate) pending_card_move: Option<(CardId, CardCol, usize)>,
@@ -715,6 +719,11 @@ impl GuiApp {
                 .map(|s| CardLayout::from_json_or_default(&s))
                 .unwrap_or_default(),
             layout_edit: std::env::var("RESONANCE_EDIT_LAYOUT").is_ok(),
+            hidden_panes: cc
+                .storage
+                .and_then(|s| s.get_string("hidden_panes"))
+                .map(|s| hidden_from_json_or_default(&s))
+                .unwrap_or_default(),
             pending_card_move: None,
             hidden_curves: std::collections::HashSet::new(),
             demo: std::env::var("RESONANCE_DEMO").is_ok(),
@@ -734,11 +743,12 @@ impl GuiApp {
         if self.demo {
             self.populate_demo_state();
         }
-        // `RESONANCE_OPEN=manage|browse` opens that dialog at startup so the
-        // screenshot harness can capture it.
+        // `RESONANCE_OPEN=manage|browse|settings` opens that dialog at startup so
+        // the screenshot harness can capture it.
         match std::env::var("RESONANCE_OPEN").as_deref() {
             Ok("manage") => self.reference.show_manage = true,
             Ok("browse") => self.reference.show_browser = true,
+            Ok("settings") => self.dialog = Dialog::Settings,
             _ => {}
         }
         if let Ok(mode) = std::env::var("RESONANCE_DEMO_REF") {
@@ -1257,6 +1267,9 @@ impl eframe::App for GuiApp {
         if let Ok(j) = serde_json::to_string(&self.layout) {
             storage.set_string("card_layout", j);
         }
+        if let Ok(j) = serde_json::to_string(&self.hidden_panes) {
+            storage.set_string("hidden_panes", j);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1467,6 +1480,11 @@ impl GuiApp {
 // ── UI sections ─────────────────────────────────────────────────────────────
 
 impl GuiApp {
+    /// Whether a pane is currently shown (not in the hidden set).
+    pub(crate) fn pane_visible(&self, pane: PaneId) -> bool {
+        !self.hidden_panes.contains(&pane)
+    }
+
     /// Clear the persisted panel sizes so the resizable panels fall back to
     /// their defaults next frame.
     pub(crate) fn reset_layout(&mut self, ctx: &egui::Context) {
@@ -1479,6 +1497,7 @@ impl GuiApp {
             d.remove::<PanelState>(egui::Id::new("graph_narrow"));
         });
         self.layout = CardLayout::default();
+        self.hidden_panes.clear();
         self.set_status("layout reset");
     }
 

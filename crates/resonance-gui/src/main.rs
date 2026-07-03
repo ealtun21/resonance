@@ -10,6 +10,7 @@ mod card_layout;
 mod curve;
 mod icon;
 mod ipc;
+mod panes;
 mod state;
 mod theme;
 mod ui;
