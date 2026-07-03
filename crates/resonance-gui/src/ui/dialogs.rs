@@ -1,7 +1,7 @@
 //! Modal dialogs: the help overlay, the preset-load browser, the export
 //! save-as dialog, the confirm modal, and their shared navigation header.
 
-use crate::app::GuiApp;
+use crate::app::{GuiApp, ServiceAction, ServiceFn};
 use crate::browser::{Browser, Item};
 use crate::state::{Confirm, Dialog};
 use crate::theme::Theme;
@@ -10,6 +10,28 @@ use crate::ui::kit;
 use crate::ui::widgets::dialog_window;
 use eframe::egui;
 use resonance_ipc::Command;
+
+// ── Tray service-worker fns ──────────────────────────────────────────────
+//
+// `ServiceFn` is a plain non-capturing `fn() -> io::Result<()>` pointer (see
+// `app.rs`), not a boxed closure, so state to act on (start vs stop, on vs
+// off) is selected by picking one of these fns rather than by capturing it.
+
+fn tray_start() -> std::io::Result<()> {
+    resonance_ipc::tray::control::start()
+}
+
+fn tray_stop() -> std::io::Result<()> {
+    resonance_ipc::tray::control::stop().map(|_| ())
+}
+
+fn tray_autostart_on() -> std::io::Result<()> {
+    resonance_ipc::tray::autostart::enable()
+}
+
+fn tray_autostart_off() -> std::io::Result<()> {
+    resonance_ipc::tray::autostart::disable()
+}
 
 impl GuiApp {
     /// Modal listing every FR-graph gesture and keyboard shortcut, for users
@@ -229,6 +251,87 @@ impl GuiApp {
                         ));
                     } else {
                         ui.weak("Connect the daemon to change the EQ phase mode.");
+                    }
+
+                    // ── Tray ──────────────────────────────────────────────────
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("Tray").strong());
+                    {
+                        let mut cfg = resonance_ipc::tray::TrayConfig::load();
+                        let running = resonance_ipc::tray::control::is_running();
+                        let autostart = resonance_ipc::tray::autostart::is_enabled();
+
+                        ui.horizontal(|ui| {
+                            let dot = if running {
+                                "\u{25cf} running"
+                            } else {
+                                "\u{25cb} stopped"
+                            };
+                            ui.label(dot);
+                            let label = if running { "Stop tray" } else { "Start tray" };
+                            if ui.button(label).clicked() {
+                                let f: ServiceFn = if running { tray_stop } else { tray_start };
+                                let _ = self
+                                    .service_tx
+                                    .send(ServiceAction::Run { label: "tray", f });
+                            }
+                        });
+
+                        let mut auto = autostart;
+                        if ui.checkbox(&mut auto, "Start tray at login").changed() {
+                            let f: ServiceFn = if auto {
+                                tray_autostart_on
+                            } else {
+                                tray_autostart_off
+                            };
+                            let _ = self.service_tx.send(ServiceAction::Run {
+                                label: "tray-autostart",
+                                f,
+                            });
+                        }
+
+                        let mut changed = false;
+                        changed |= ui
+                            .checkbox(
+                                &mut cfg.close_gui_to_tray,
+                                "Close window to tray (keep running)",
+                            )
+                            .changed();
+                        egui::ComboBox::from_label("Left click")
+                            .selected_text(match cfg.left_click {
+                                resonance_ipc::tray::LeftClick::ToggleUi => "Toggle window",
+                                resonance_ipc::tray::LeftClick::Menu => "Open menu",
+                            })
+                            .show_ui(ui, |ui| {
+                                changed |= ui
+                                    .selectable_value(
+                                        &mut cfg.left_click,
+                                        resonance_ipc::tray::LeftClick::ToggleUi,
+                                        "Toggle window",
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .selectable_value(
+                                        &mut cfg.left_click,
+                                        resonance_ipc::tray::LeftClick::Menu,
+                                        "Open menu",
+                                    )
+                                    .changed();
+                            });
+                        changed |= ui
+                            .add(egui::Slider::new(&mut cfg.poll_secs, 1..=30).text("Poll (s)"))
+                            .changed();
+                        changed |= ui
+                            .add(
+                                egui::Slider::new(&mut cfg.recent_count, 0..=20)
+                                    .text("Recent presets"),
+                            )
+                            .changed();
+                        if changed {
+                            let _ = cfg.save();
+                        }
                     }
                 });
             });

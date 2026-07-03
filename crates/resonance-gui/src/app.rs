@@ -331,6 +331,10 @@ pub struct GuiApp {
     /// Brief grace window to let a queued "Save & Quit" reach the daemon before
     /// the window actually closes.
     pub(crate) quit_deadline: Option<Instant>,
+    /// Window is hidden to the tray (close-to-tray) rather than closed. The
+    /// process — and all its state — keeps running; the tray's "Open UI" (or a
+    /// second launch of the GUI) un-hides it via the cross-process raise flag.
+    pub(crate) hidden: bool,
     /// Opt-in: reveal per-band channel targeting even on ≤2-channel devices
     /// (the per-band `Ch` column is otherwise hidden until >2ch, progressive
     /// disclosure). Lets stereo users do per-channel (L/R) EQ. Persisted.
@@ -692,6 +696,7 @@ impl GuiApp {
             quit_save_name: String::new(),
             allow_close: false,
             quit_deadline: None,
+            hidden: false,
             per_channel_eq: cc
                 .storage
                 .and_then(|s| s.get_string("per_channel_eq"))
@@ -1289,6 +1294,7 @@ impl eframe::App for GuiApp {
         self.pull_shared();
 
         self.handle_quit_guard(ui.ctx());
+        self.poll_raise(ui.ctx());
         self.run_window_migration(ui.ctx());
         #[cfg(target_os = "windows")]
         self.apply_native_titlebar();
@@ -1300,8 +1306,13 @@ impl eframe::App for GuiApp {
         let ctx = ui.ctx().clone();
         self.render_dialogs(&ctx);
 
-        // Drive ~144 fps repaint so spectrum/curve stay smooth.
-        ctx.request_repaint_after(FRAME_INTERVAL);
+        // Drive ~144 fps repaint so spectrum/curve stay smooth. Skipped while
+        // hidden to the tray: `request_repaint_after` keeps only the smallest
+        // requested duration, so this would otherwise clobber the slow tick
+        // `poll_raise` scheduled and needlessly repaint a window nobody can see.
+        if !self.hidden {
+            ctx.request_repaint_after(FRAME_INTERVAL);
+        }
     }
 }
 
@@ -1311,6 +1322,19 @@ impl GuiApp {
     /// first; once a "Save & Quit" has had a moment to flush to the daemon,
     /// actually close the window.
     fn handle_quit_guard(&mut self, ctx: &egui::Context) {
+        // Close-to-tray takes precedence over the unsaved-edits guard: hiding
+        // the window loses nothing (the process — and its state — keeps
+        // running), so there's nothing to prompt-save. Only applies when a
+        // tray is actually there to bring the window back.
+        if ctx.input(|i| i.viewport().close_requested()) {
+            let cfg = resonance_ipc::tray::TrayConfig::load();
+            if cfg.close_gui_to_tray && resonance_ipc::tray::control::is_running() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.hidden = true;
+                return;
+            }
+        }
         if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close && self.dirty {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             if !self.pending_quit {
@@ -1327,6 +1351,24 @@ impl GuiApp {
                 self.quit_deadline = None;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
+        }
+    }
+
+    /// Cross-process "raise": a second GUI launch, or the tray's "Open UI",
+    /// touches the raise flag to bring this window to the front (un-hiding it
+    /// first if it was hidden to the tray). Keeps repainting on a slow tick
+    /// while hidden so a pending raise is still observed even though the
+    /// window itself isn't drawing anything the user can see.
+    fn poll_raise(&mut self, ctx: &egui::Context) {
+        if resonance_ipc::singleton::take_raise("resonance-gui") {
+            if self.hidden {
+                self.hidden = false;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        if self.hidden {
+            ctx.request_repaint_after(Duration::from_millis(400));
         }
     }
 

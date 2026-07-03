@@ -40,6 +40,29 @@ fn main() -> eframe::Result<()> {
         return run_icon_gallery();
     }
 
+    // Single-instance: a second launch raises the running window and exits
+    // instead of opening a duplicate window against the same daemon.
+    let _gui_guard = match resonance_ipc::singleton::acquire("resonance-gui") {
+        Ok(Some(g)) => g,
+        Ok(None) => {
+            let _ = resonance_ipc::singleton::request_raise("resonance-gui");
+            return Ok(());
+        }
+        Err(e) => {
+            eprintln!("GUI: singleton check failed ({e}); continuing without it");
+            // Better to open a (possibly duplicate) window than to wedge the
+            // user out of the app because the lock file was unwritable.
+            return run_native_app();
+        }
+    };
+    run_native_app()
+}
+
+/// Spawn the daemon-supervisor thread and run the eframe event loop. Shared by
+/// the normal (singleton-guarded) startup path and the error-fallback path in
+/// `main` (guard check itself failed) — either way, once we've decided to open
+/// a window it's bootstrapped the same way.
+fn run_native_app() -> eframe::Result<()> {
     // If the user launched the GUI without a daemon (which is the default
     // when launching the .app bundle from Launchpad / Spotlight), spawn
     // one in the BACKGROUND so the window comes up instantly. The UI
