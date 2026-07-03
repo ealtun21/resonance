@@ -1209,6 +1209,34 @@ pub(crate) fn icon_btn_enabled(
     clicked
 }
 
+/// An icon button that shows an `active` (accent-filled) state — for toggles like
+/// per-band solo where the pressed state must read at a glance.
+pub(crate) fn icon_btn_active(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    size: f32,
+    active: bool,
+    tip: &str,
+) -> bool {
+    let t = tokens(ui);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    let (bg, fg) = if resp.hovered() {
+        (lerp_color(t.well, t.accent, 0.30), egui::Color32::WHITE)
+    } else if active {
+        (t.accent, egui::Color32::WHITE)
+    } else {
+        (t.well, t.text)
+    };
+    ui.painter().rect_filled(rect, 5.0, bg);
+    let g = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(size * 0.64));
+    icons::draw(ui.painter(), icon, g, fg);
+    let clicked = resp.clicked();
+    if !tip.is_empty() {
+        resp.on_hover_text(tip);
+    }
+    clicked
+}
+
 /// A button with a leading vector icon then a label — for primary actions that
 /// keep their text (Auto-EQ, Customize, Add band, Save). `accent` fills it.
 fn icon_text_draw(

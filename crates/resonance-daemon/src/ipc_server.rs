@@ -132,6 +132,11 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
             | Command::LoadProfile { .. }
             | Command::RecallSlot { .. }
     );
+    // A band-table change invalidates any active solo (index shift, replaced
+    // table). Clear it up front so the audition never outlives the edit.
+    if band_mutating {
+        clear_solo_if_active(state);
+    }
     let response = dispatch_inner(cmd, state).await;
     if band_mutating && !matches!(response, Response::Error(_)) {
         re_render_eq_fir(state);
@@ -199,6 +204,7 @@ async fn dispatch_inner(cmd: Command, state: &SharedState) -> Response {
             handle_set_band_dynamics(state, index, dynamics)
         }
         Command::SetPhaseMode { linear } => handle_set_phase_mode(state, linear),
+        Command::SetBandSolo { index } => handle_set_band_solo(state, index),
         Command::SetBandChannels { index, channels } => {
             handle_set_band_channels(state, index, channels)
         }
@@ -743,6 +749,40 @@ fn handle_set_phase_mode(state: &SharedState, linear: bool) -> Response {
         if linear { "linear" } else { "minimum" }
     );
     Response::Ok
+}
+
+/// Transiently solo (audition) a single EQ band, bypassing every other. `None`
+/// clears. Out-of-range indices are rejected so a stray command can't silently
+/// mute all bands. Never persisted; solo suspends linear-phase while active.
+fn handle_set_band_solo(state: &SharedState, index: Option<usize>) -> Response {
+    if let Some(i) = index {
+        let n = state.0.lock().unwrap().chain.filters.len();
+        if i >= n {
+            return Response::Error(format!("band index {i} out of range (have {n})"));
+        }
+    }
+    state.send(AudioCommand::SetBandSolo(index), move |chain| {
+        chain.set_solo(index);
+    });
+    if let Some(i) = index {
+        info!("band solo: {i}");
+    } else {
+        info!("band solo cleared");
+    }
+    Response::Ok
+}
+
+/// Stuck-audio guard: clear an active solo before any command that mutates the
+/// band table runs, so an audition never survives a band add/remove/edit or a
+/// profile load (a stale solo index could otherwise mute or mis-target audio).
+/// No-op when nothing is soloed, so the common path adds no RT traffic.
+fn clear_solo_if_active(state: &SharedState) {
+    let active = state.0.lock().unwrap().chain.solo.is_some();
+    if active {
+        state.send(AudioCommand::SetBandSolo(None), |chain| {
+            chain.set_solo(None);
+        });
+    }
 }
 
 /// Re-render the linear-phase FIR from the shadow band table and swap it in
