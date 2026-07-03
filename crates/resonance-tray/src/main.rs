@@ -4,6 +4,7 @@
 
 use resonance_ipc::tray::Ui;
 
+mod daemon;
 mod icons;
 mod menu;
 
