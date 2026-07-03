@@ -165,7 +165,7 @@ pub fn default_channel_layout(channels: usize) -> Vec<String> {
         .collect()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
     /// Load preset from file path (.fac or APO .txt, detected by extension)
     LoadPreset { path: String },
@@ -769,7 +769,7 @@ pub struct Meters {
     pub dsp_frame_us: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BandState {
     pub band_type: BandType,
     pub freq: f64,
@@ -885,7 +885,7 @@ pub struct SinkVolume {
     pub muted: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct EffectsState {
     pub fidelity_intensity: f64,
     pub fidelity_enabled: bool,

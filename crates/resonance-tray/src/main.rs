@@ -5,6 +5,7 @@
 use resonance_ipc::tray::Ui;
 
 mod icons;
+mod menu;
 
 /// The tray is an add-on to a UI; without any interface installed there is
 /// nothing to "Open" and the tray must not run as an orphan.
