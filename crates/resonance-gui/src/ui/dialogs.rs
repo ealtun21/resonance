@@ -295,14 +295,26 @@ impl GuiApp {
                         let mut changed = false;
                         changed |= ui
                             .checkbox(
-                                &mut cfg.quit_stops_daemon,
-                                "Quit closes everything (stop the daemon too)",
+                                &mut cfg.start_tray_with_gui,
+                                "Start the tray when the GUI launches",
                             )
                             .on_hover_text(
-                                "On: closing the window (or the tray's \"Quit \
-                                 Resonance\") also stops the daemon, so nothing \
-                                 keeps running. Off: quit only closes the window; \
-                                 the daemon (and tray) stay up.",
+                                "On: launching the GUI also starts the tray, unless \
+                                 it is already running (e.g. from autostart) — no \
+                                 duplicate. Off: the GUI never starts the tray.",
+                            )
+                            .changed();
+                        changed |= ui
+                            .checkbox(
+                                &mut cfg.quit_stops_daemon,
+                                "Tray \"Quit Resonance\" stops the daemon too",
+                            )
+                            .on_hover_text(
+                                "Governs the tray's \"Quit Resonance\" item only. \
+                                 On: it also stops the daemon, so nothing keeps \
+                                 running. Off: it exits just the tray. Closing \
+                                 this window never stops the daemon either way — \
+                                 the daemon is a background service.",
                             )
                             .changed();
                         egui::ComboBox::from_label("Left click")

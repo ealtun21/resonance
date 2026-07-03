@@ -25,14 +25,18 @@ pub const RECENT_ALL: usize = usize::MAX;
 pub struct TrayConfig {
     pub left_click: LeftClick,
     pub poll_secs: u64,
-    /// When set, quitting a UI (the GUI window close, or the tray's quit item)
-    /// also stops the daemon — quit closes *everything*. On by default. When
-    /// cleared, each quit only closes the thing you quit, leaving the daemon
-    /// (and the rest of the stack) running.
+    /// When set, the tray's "Quit Resonance" item also stops the daemon — that
+    /// quit closes *everything*. On by default. When cleared, it exits just the
+    /// tray, leaving the daemon (and the rest of the stack) running. Closing a
+    /// UI window never stops the daemon regardless of this flag.
     pub quit_stops_daemon: bool,
     /// Number of recent presets to list in the tray menu. [`RECENT_ALL`] =
     /// unlimited (show every one).
     pub recent_count: usize,
+    /// When set, launching the GUI also starts the tray (unless it is already
+    /// running — e.g. from autostart). On by default. GUI-scoped: this
+    /// start-tray-with-GUI behaviour only applies to the GUI process.
+    pub start_tray_with_gui: bool,
 }
 
 impl Default for TrayConfig {
@@ -42,6 +46,7 @@ impl Default for TrayConfig {
             poll_secs: 3,
             quit_stops_daemon: true,
             recent_count: 8,
+            start_tray_with_gui: true,
         }
     }
 }
@@ -89,6 +94,10 @@ mod tests {
         assert_eq!(c.poll_secs, 3);
         assert!(c.quit_stops_daemon, "quit closes everything by default");
         assert_eq!(c.recent_count, 8);
+        assert!(
+            c.start_tray_with_gui,
+            "GUI starts the tray by default (idempotent — no-op if already up)"
+        );
     }
 
     #[test]
@@ -98,6 +107,7 @@ mod tests {
             poll_secs: 5,
             quit_stops_daemon: true,
             recent_count: RECENT_ALL,
+            start_tray_with_gui: false,
         };
         let text = toml::to_string(&c).unwrap();
         let back: TrayConfig = toml::from_str(&text).unwrap();

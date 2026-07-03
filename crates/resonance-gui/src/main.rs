@@ -73,7 +73,10 @@ fn run_native_app() -> eframe::Result<()> {
     // screen), so we don't block the main thread waiting for the socket.
     std::thread::Builder::new()
         .name("resonance-daemon-spawner".into())
-        .spawn(ensure_daemon_running)
+        .spawn(|| {
+            ensure_daemon_running();
+            maybe_start_tray();
+        })
         .expect("spawn daemon supervisor thread");
 
     // Native OS window decorations on every platform. The Windows native title
@@ -160,6 +163,17 @@ fn ensure_daemon_running() {
 
     // No service manager: spawn directly (cargo-run / container path).
     spawn_daemon_detached();
+}
+
+/// Start the tray alongside the GUI when `TrayConfig::start_tray_with_gui` is set
+/// (the default). `control::start()` is idempotent — it no-ops when a tray is
+/// already running (e.g. launched from autostart), so this never spawns a
+/// duplicate. Best-effort: a failed spawn (e.g. no tray binary in a minimal
+/// build) is ignored and must not disturb the GUI.
+fn maybe_start_tray() {
+    if resonance_ipc::tray::TrayConfig::load().start_tray_with_gui {
+        let _ = resonance_ipc::tray::control::start();
+    }
 }
 
 /// Block (briefly) until the daemon is reachable, or until `timeout`.
