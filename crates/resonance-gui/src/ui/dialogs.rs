@@ -155,26 +155,46 @@ impl GuiApp {
                         // and sends the toggle. Not routed through `queue_edit` —
                         // the undo snapshot doesn't cover the phase mode (it is
                         // preserved across `ApplyState`, like dither and the IR).
+                        //
+                        // The delay figure is always LIVE: the daemon-reported
+                        // latency while the mode is on, else predicted from the
+                        // live rate with the same formula the daemon uses
+                        // (engine block + half the FIR kernel).
+                        let rate = s.sample_rate.max(1.0);
+                        let frames = if s.phase_mode_linear && s.eq_fir_latency_frames > 0 {
+                            s.eq_fir_latency_frames
+                        } else {
+                            resonance_dsp::convolution::BLOCK
+                                + resonance_dsp::linphase::grid_len(rate) / 2
+                        };
+                        let ms = frames as f64 / rate * 1000.0;
                         ui.horizontal(|ui| {
                             let mut linear = s.phase_mode_linear;
                             if ui
                                 .checkbox(&mut linear, "Linear phase")
-                                .on_hover_text(
-                                    "Render the static EQ bands to an FIR — no phase \
-                                     rotation, but adds latency (~171 ms at 48 kHz). \
-                                     Mid/Side-scoped and dynamic bands stay \
-                                     minimum-phase.",
-                                )
+                                .on_hover_text(format!(
+                                    "Off — minimum phase: reacts like a real \
+                                     headphone would, with no delay. \
+                                     Recommended.\n\nOn — linear phase: exactly \
+                                     the same tone, but attacks soften slightly \
+                                     (filters ring before each hit, which no \
+                                     physical speaker does) and playback lags by \
+                                     {ms:.0} ms. Mid/Side and dynamic bands stay \
+                                     minimum-phase either way.",
+                                ))
                                 .changed()
                             {
                                 self.queue(Command::SetPhaseMode { linear });
                             }
-                            if s.phase_mode_linear && s.eq_fir_latency_frames > 0 {
-                                let ms = s.eq_fir_latency_frames as f64 / s.sample_rate.max(1.0)
-                                    * 1000.0;
+                            if s.phase_mode_linear {
                                 ui.weak(format!("(+{ms:.1} ms)"));
                             }
                         });
+                        ui.weak(format!(
+                            "Both modes produce the same tone. Off is truest to a \
+                             physically tuned headphone; On trades {ms:.0} ms of \
+                             delay and softer attacks for zero phase rotation.",
+                        ));
                     } else {
                         ui.weak("Connect the daemon to change the EQ phase mode.");
                     }
