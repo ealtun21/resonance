@@ -5,10 +5,10 @@
 //! authoritative `DaemonState` is re-fetched immediately afterwards (and on a
 //! periodic poll) so widgets always reflect the daemon.
 
-use crate::card_layout::{CardCol, CardId, CardLayout};
+use crate::card_layout::CardLayout;
 use crate::curve;
 use crate::ipc::IpcClient;
-use crate::panes::{BandsOffLayout, PaneId, hidden_from_json_or_default};
+use crate::panes::{BandsOffLayout, PaneAction, PaneId, hidden_from_json_or_default};
 use crate::state::{Confirm, Dialog, Snapshot};
 use crate::theme::{Palette, Theme};
 use crate::ui::kit;
@@ -356,9 +356,10 @@ pub struct GuiApp {
     pub(crate) hidden_panes: std::collections::HashSet<PaneId>,
     /// Live lower-area layout when EQ bands is hidden (persisted).
     pub(crate) bands_off_layout: BandsOffLayout,
-    /// A card move requested this frame by a drop, applied after the columns
-    /// finish rendering (so the lists aren't mutated mid-iteration).
-    pub(crate) pending_card_move: Option<(CardId, CardCol, usize)>,
+    /// A pending arrange-mode action (from a drop or an × / ＋ button), applied
+    /// after the frame renders (so the column / tray lists aren't mutated
+    /// mid-iteration).
+    pub(crate) pending_pane_action: Option<PaneAction>,
     /// Graph series the user has hidden via the legend's eye toggles (keyed by
     /// the legend label, e.g. "FL"/"Result FR"/"Target"). Session-only.
     pub(crate) hidden_curves: std::collections::HashSet<String>,
@@ -731,7 +732,7 @@ impl GuiApp {
                 .and_then(|s| s.get_string("bands_off_layout"))
                 .map(|s| BandsOffLayout::from_storage(&s))
                 .unwrap_or_default(),
-            pending_card_move: None,
+            pending_pane_action: None,
             hidden_curves: std::collections::HashSet::new(),
             demo: std::env::var("RESONANCE_DEMO").is_ok(),
             open_customizer: std::env::var("RESONANCE_OPEN").as_deref() == Ok("customize"),
@@ -1494,6 +1495,22 @@ impl GuiApp {
     /// Whether a pane is currently shown (not in the hidden set).
     pub(crate) fn pane_visible(&self, pane: PaneId) -> bool {
         !self.hidden_panes.contains(&pane)
+    }
+
+    /// Apply one arrange-mode action to the layout / hidden set.
+    pub(crate) fn apply_pane_action(&mut self, action: PaneAction) {
+        match action {
+            PaneAction::PlaceCard { card, col, idx } => {
+                self.hidden_panes.remove(&PaneId::from_card(card));
+                self.layout.move_card(card, col, idx);
+            }
+            PaneAction::Show(pane) => {
+                self.hidden_panes.remove(&pane);
+            }
+            PaneAction::Hide(pane) => {
+                self.hidden_panes.insert(pane);
+            }
+        }
     }
 
     /// Clear the persisted panel sizes so the resizable panels fall back to

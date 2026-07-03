@@ -4,7 +4,7 @@
 
 use crate::app::{GuiApp, ServiceAction, ServiceFn};
 use crate::card_layout::{CardCol, CardId, CardLayout};
-use crate::panes::{BandsOffLayout, PaneId};
+use crate::panes::{BandsOffLayout, PaneAction, PaneId};
 use crate::ui::kit;
 use crate::ui::widgets::{padded_scroll, section, section_hint};
 use eframe::egui;
@@ -276,7 +276,7 @@ impl GuiApp {
             // mode stays uncluttered. Hidden cards are omitted (WYSIWYG); drop
             // indices stay ABSOLUTE (into the full column) so `move_card` places
             // dropped cards correctly even with hidden cards interleaved.
-            let dragging = egui::DragAndDrop::has_payload_of_type::<CardId>(ui.ctx());
+            let dragging = egui::DragAndDrop::has_payload_of_type::<PaneId>(ui.ctx());
             let mut shown = 0;
             for (idx, id) in ids.iter().enumerate() {
                 if !self.pane_visible(PaneId::from_card(*id)) {
@@ -303,24 +303,63 @@ impl GuiApp {
         }
     }
 
-    /// A compact draggable tile (grip + card name) shown in edit mode. The whole
-    /// tile is the drag source carrying the card's `CardId`.
-    // `&mut self` matches its sibling edit-mode helpers (`drop_gap`,
-    // `layout_edit_banner`) that DO mutate state; kept as a method for a
-    // consistent `self.card_tile(...)` call shape at the render_lower_column
-    // call site rather than a one-off associated function.
-    #[allow(clippy::unused_self)]
+    /// A compact arrange-mode tile for a card: the grip + name is the drag source
+    /// (carrying its `PaneId`, so it can be dropped into a column or the Hidden
+    /// tray), and a trailing × removes it to the tray.
     fn card_tile(&mut self, ui: &mut egui::Ui, id: CardId) {
-        ui.dnd_drag_source(egui::Id::new(("card_tile", id)), id, |ui| {
-            let t = kit::tokens(ui);
-            egui::Frame::default()
-                .fill(ui.visuals().faint_bg_color)
-                .stroke(egui::Stroke::new(1.0, t.line))
-                .corner_radius(egui::CornerRadius::same(kit::R_CARD as u8))
-                .inner_margin(egui::Margin::symmetric(10, 8))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.set_width(ui.available_width());
+        let t = kit::tokens(ui);
+        egui::Frame::default()
+            .fill(ui.visuals().faint_bg_color)
+            .stroke(egui::Stroke::new(1.0, t.line))
+            .corner_radius(egui::CornerRadius::same(kit::R_CARD as u8))
+            .inner_margin(egui::Margin::symmetric(10, 8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.set_width(ui.available_width());
+                    ui.dnd_drag_source(
+                        egui::Id::new(("card_tile", id)),
+                        PaneId::from_card(id),
+                        |ui| {
+                            let (r, _) = ui
+                                .allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+                            crate::ui::icons::draw(
+                                ui.painter(),
+                                crate::ui::icons::Icon::Grip,
+                                r,
+                                t.dim,
+                            );
+                            ui.add_space(6.0);
+                            ui.label(id.title());
+                        },
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if kit::icon_btn(
+                            ui,
+                            crate::ui::icons::Icon::Close,
+                            kit::CTRL_H,
+                            "Hide this pane",
+                        ) {
+                            self.pending_pane_action =
+                                Some(PaneAction::Hide(PaneId::from_card(id)));
+                        }
+                    });
+                });
+            });
+    }
+
+    /// A tile in the Hidden tray: the grip + name is a drag source (drop it into
+    /// a column / centre / reference row to restore), and a trailing ＋ restores
+    /// it to its home.
+    fn tray_tile(&mut self, ui: &mut egui::Ui, pane: PaneId) {
+        let t = kit::tokens(ui);
+        egui::Frame::default()
+            .fill(ui.visuals().faint_bg_color)
+            .stroke(egui::Stroke::new(1.0, t.line))
+            .corner_radius(egui::CornerRadius::same(kit::R_CARD as u8))
+            .inner_margin(egui::Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.dnd_drag_source(egui::Id::new(("tray_tile", pane)), pane, |ui| {
                         let (r, _) =
                             ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
                         crate::ui::icons::draw(
@@ -330,24 +369,60 @@ impl GuiApp {
                             t.dim,
                         );
                         ui.add_space(6.0);
-                        ui.label(id.title());
+                        ui.label(pane.title());
                     });
+                    if kit::icon_btn(
+                        ui,
+                        crate::ui::icons::Icon::Plus,
+                        kit::CTRL_H,
+                        "Show this pane",
+                    ) {
+                        self.pending_pane_action = Some(PaneAction::Show(pane));
+                    }
                 });
+            });
+    }
+
+    /// The Hidden tray: a labelled strip of every hidden pane, and itself a drop
+    /// zone — drop a pane here to remove it.
+    fn hidden_tray(&mut self, ui: &mut egui::Ui) {
+        let hidden: Vec<PaneId> = PaneId::ALL
+            .iter()
+            .copied()
+            .filter(|p| self.hidden_panes.contains(p))
+            .collect();
+        let frame = egui::Frame::default().inner_margin(egui::Margin::symmetric(8, 6));
+        let (_, payload) = ui.dnd_drop_zone::<PaneId, _>(frame, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new("Hidden:").strong());
+                if hidden.is_empty() {
+                    ui.weak("nothing hidden — drag a pane here to remove it");
+                }
+                for pane in hidden {
+                    self.tray_tile(ui, pane);
+                }
+            });
         });
+        if let Some(p) = payload {
+            self.pending_pane_action = Some(PaneAction::Hide(*p));
+        }
     }
 
     /// A thin full-width drop target between/around card tiles in edit mode. When
     /// a card is released over it, records the pending move to `(col, idx)`.
     fn drop_gap(&mut self, ui: &mut egui::Ui, col: CardCol, idx: usize) {
         let frame = egui::Frame::default().inner_margin(egui::Margin::symmetric(0, 3));
-        let (_, payload) = ui.dnd_drop_zone::<CardId, _>(frame, |ui| {
+        let (_, payload) = ui.dnd_drop_zone::<PaneId, _>(frame, |ui| {
             ui.allocate_exact_size(
                 egui::vec2(ui.available_width().max(1.0), 8.0),
                 egui::Sense::hover(),
             );
         });
         if let Some(p) = payload {
-            self.pending_card_move = Some((*p, col, idx));
+            // Only cards live in columns; a bands/reference payload here is a no-op.
+            if let Some(card) = p.card() {
+                self.pending_pane_action = Some(PaneAction::PlaceCard { card, col, idx });
+            }
         }
     }
 
@@ -373,7 +448,8 @@ impl GuiApp {
                         }
                         ui.separator();
                         // Bands-off layout preference (applies to the live view).
-                        ui.label("EQ bands off:");
+                        // Right-to-left layout: add the combo first so the "EQ
+                        // bands off:" label sits to its left.
                         let mut pref = self.bands_off_layout;
                         egui::ComboBox::from_id_salt("bands_off_layout")
                             .selected_text(match pref {
@@ -385,6 +461,7 @@ impl GuiApp {
                                 ui.selectable_value(&mut pref, BandsOffLayout::Stacked, "Stack");
                             });
                         self.bands_off_layout = pref;
+                        ui.label("EQ bands off:");
                     });
                 });
             });
@@ -434,6 +511,11 @@ impl GuiApp {
             .frame(egui::Frame::NONE)
             .show_separator_line(false)
             .show_inside(ui, |ui| self.layout_edit_banner(ui));
+        // Hidden tray pinned to the bottom of the controls strip (under the columns).
+        egui::Panel::bottom("hidden_tray")
+            .frame(egui::Frame::NONE)
+            .show_separator_line(true)
+            .show_inside(ui, |ui| self.hidden_tray(ui));
         egui::Panel::left("effects_col")
             .resizable(false)
             .exact_size(EFFECTS_W)
@@ -470,10 +552,10 @@ impl GuiApp {
                     ui.weak("EQ bands hidden — show it in Settings → Panes.");
                 }
             });
-        // Apply a card move requested by a drop this frame, now that both columns
-        // have finished rendering (never mutate the lists mid-iteration).
-        if let Some((id, col, idx)) = self.pending_card_move.take() {
-            self.layout.move_card(id, col, idx);
+        // Apply a pending arrange action now that both columns have finished
+        // rendering (never mutate the lists mid-iteration).
+        if let Some(action) = self.pending_pane_action.take() {
+            self.apply_pane_action(action);
         }
     }
 

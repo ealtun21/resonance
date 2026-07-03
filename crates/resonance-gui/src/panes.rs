@@ -3,7 +3,7 @@
 //! FR graph itself is never hideable — it fills the window when everything else
 //! is hidden.
 
-use crate::card_layout::CardId;
+use crate::card_layout::{CardCol, CardId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -56,6 +56,35 @@ impl PaneId {
             CardId::Profiles => PaneId::Profiles,
         }
     }
+
+    /// The movable card this pane corresponds to, or `None` for the two fixed
+    /// anchors (`Bands`, `ReferenceBar`). Inverse of [`from_card`](Self::from_card).
+    pub(crate) fn card(self) -> Option<CardId> {
+        Some(match self {
+            PaneId::Effects => CardId::Effects,
+            PaneId::Applications => CardId::Applications,
+            PaneId::Outputs => CardId::Outputs,
+            PaneId::DeviceMap => CardId::DeviceMap,
+            PaneId::Profiles => CardId::Profiles,
+            PaneId::Bands | PaneId::ReferenceBar => return None,
+        })
+    }
+}
+
+/// A pending arrange-mode mutation, applied once after the frame renders (so the
+/// column / tray lists are never mutated mid-iteration).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PaneAction {
+    /// Place a card into `col` at absolute index `idx` (and unhide it).
+    PlaceCard {
+        card: CardId,
+        col: CardCol,
+        idx: usize,
+    },
+    /// Show a pane in its home (remove from the hidden set).
+    Show(PaneId),
+    /// Hide a pane (add to the hidden set; a card keeps its column slot).
+    Hide(PaneId),
 }
 
 /// Parse the persisted hidden-panes set (a JSON array of `PaneId`). Any parse
@@ -114,6 +143,15 @@ mod tests {
         // The two fixed anchors are never produced by a card mapping.
         assert!(!mapped.contains(&PaneId::Bands));
         assert!(!mapped.contains(&PaneId::ReferenceBar));
+    }
+
+    #[test]
+    fn card_round_trips_and_anchors_have_no_card() {
+        for c in CardId::ALL {
+            assert_eq!(PaneId::from_card(c).card(), Some(c));
+        }
+        assert_eq!(PaneId::Bands.card(), None);
+        assert_eq!(PaneId::ReferenceBar.card(), None);
     }
 
     #[test]
