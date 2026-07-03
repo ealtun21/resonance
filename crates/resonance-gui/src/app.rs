@@ -5,9 +5,10 @@
 //! authoritative `DaemonState` is re-fetched immediately afterwards (and on a
 //! periodic poll) so widgets always reflect the daemon.
 
-use crate::card_layout::{CardCol, CardId, CardLayout};
+use crate::card_layout::CardLayout;
 use crate::curve;
 use crate::ipc::IpcClient;
+use crate::panes::{BandsOffLayout, PaneAction, PaneId, hidden_from_json_or_default};
 use crate::state::{Confirm, Dialog, Snapshot};
 use crate::theme::{Palette, Theme};
 use crate::ui::kit;
@@ -350,9 +351,15 @@ pub struct GuiApp {
     /// Session-only "arrange the layout" mode: shows draggable card tiles + drop
     /// zones instead of the live cards. Never persisted.
     pub(crate) layout_edit: bool,
-    /// A card move requested this frame by a drop, applied after the columns
-    /// finish rendering (so the lists aren't mutated mid-iteration).
-    pub(crate) pending_card_move: Option<(CardId, CardCol, usize)>,
+    /// Panes the user has hidden via Settings → Panes (persisted). Empty ⇒ every
+    /// pane is shown. The FR graph itself is never in this set.
+    pub(crate) hidden_panes: std::collections::HashSet<PaneId>,
+    /// Live lower-area layout when EQ bands is hidden (persisted).
+    pub(crate) bands_off_layout: BandsOffLayout,
+    /// A pending arrange-mode action (from a drop or an × / ＋ button), applied
+    /// after the frame renders (so the column / tray lists aren't mutated
+    /// mid-iteration).
+    pub(crate) pending_pane_action: Option<PaneAction>,
     /// Graph series the user has hidden via the legend's eye toggles (keyed by
     /// the legend label, e.g. "FL"/"Result FR"/"Target"). Session-only.
     pub(crate) hidden_curves: std::collections::HashSet<String>,
@@ -715,7 +722,17 @@ impl GuiApp {
                 .map(|s| CardLayout::from_json_or_default(&s))
                 .unwrap_or_default(),
             layout_edit: std::env::var("RESONANCE_EDIT_LAYOUT").is_ok(),
-            pending_card_move: None,
+            hidden_panes: cc
+                .storage
+                .and_then(|s| s.get_string("hidden_panes"))
+                .map(|s| hidden_from_json_or_default(&s))
+                .unwrap_or_default(),
+            bands_off_layout: cc
+                .storage
+                .and_then(|s| s.get_string("bands_off_layout"))
+                .map(|s| BandsOffLayout::from_storage(&s))
+                .unwrap_or_default(),
+            pending_pane_action: None,
             hidden_curves: std::collections::HashSet::new(),
             demo: std::env::var("RESONANCE_DEMO").is_ok(),
             open_customizer: std::env::var("RESONANCE_OPEN").as_deref() == Ok("customize"),
@@ -734,11 +751,12 @@ impl GuiApp {
         if self.demo {
             self.populate_demo_state();
         }
-        // `RESONANCE_OPEN=manage|browse` opens that dialog at startup so the
-        // screenshot harness can capture it.
+        // `RESONANCE_OPEN=manage|browse|settings` opens that dialog at startup so
+        // the screenshot harness can capture it.
         match std::env::var("RESONANCE_OPEN").as_deref() {
             Ok("manage") => self.reference.show_manage = true,
             Ok("browse") => self.reference.show_browser = true,
+            Ok("settings") => self.dialog = Dialog::Settings,
             _ => {}
         }
         if let Ok(mode) = std::env::var("RESONANCE_DEMO_REF") {
@@ -1257,6 +1275,13 @@ impl eframe::App for GuiApp {
         if let Ok(j) = serde_json::to_string(&self.layout) {
             storage.set_string("card_layout", j);
         }
+        if let Ok(j) = serde_json::to_string(&self.hidden_panes) {
+            storage.set_string("hidden_panes", j);
+        }
+        storage.set_string(
+            "bands_off_layout",
+            self.bands_off_layout.as_storage().to_string(),
+        );
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1467,6 +1492,27 @@ impl GuiApp {
 // ── UI sections ─────────────────────────────────────────────────────────────
 
 impl GuiApp {
+    /// Whether a pane is currently shown (not in the hidden set).
+    pub(crate) fn pane_visible(&self, pane: PaneId) -> bool {
+        !self.hidden_panes.contains(&pane)
+    }
+
+    /// Apply one arrange-mode action to the layout / hidden set.
+    pub(crate) fn apply_pane_action(&mut self, action: PaneAction) {
+        match action {
+            PaneAction::PlaceCard { card, col, idx } => {
+                self.hidden_panes.remove(&PaneId::from_card(card));
+                self.layout.move_card(card, col, idx);
+            }
+            PaneAction::Show(pane) => {
+                self.hidden_panes.remove(&pane);
+            }
+            PaneAction::Hide(pane) => {
+                self.hidden_panes.insert(pane);
+            }
+        }
+    }
+
     /// Clear the persisted panel sizes so the resizable panels fall back to
     /// their defaults next frame.
     pub(crate) fn reset_layout(&mut self, ctx: &egui::Context) {
@@ -1479,6 +1525,7 @@ impl GuiApp {
             d.remove::<PanelState>(egui::Id::new("graph_narrow"));
         });
         self.layout = CardLayout::default();
+        self.hidden_panes.clear();
         self.set_status("layout reset");
     }
 

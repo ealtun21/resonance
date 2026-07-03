@@ -3,6 +3,7 @@
 
 use crate::app::GuiApp;
 use crate::curve;
+use crate::panes::{PaneAction, PaneId};
 use crate::state::{GAIN_LIMIT, Q_LIMIT};
 use crate::ui::kit;
 use crate::ui::widgets::{contrast_color, gain_color, lerp_color};
@@ -89,33 +90,95 @@ impl GuiApp {
     pub(crate) fn hero(&mut self, ui: &mut egui::Ui, state: &DaemonState) {
         // No head bar — the plot runs to the card top (FabFilter-style). The
         // gesture legend lives in the readout line below (right-aligned).
-        // Reference bar pinned to the very bottom (its own top rule).
-        egui::Panel::bottom("hero_refbar")
-            .frame(egui::Frame::NONE)
-            .show_separator_line(false)
-            .show_inside(ui, |ui| {
-                let line = kit::tokens(ui).line;
-                let (lr, _) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), 1.0),
-                    egui::Sense::hover(),
-                );
-                // Draw the rule at the allocated rect's *centre*, not its top edge:
-                // a 1px stroke centred on the panel's top clip boundary loses its
-                // upper half to the clip, and the surviving ~0.5px rounds to
-                // visible-or-not as the layout resizes (the flicker). Centring keeps
-                // the full stroke inside the clip rect so it's always drawn.
-                ui.painter()
-                    .hline(lr.x_range(), lr.center().y, egui::Stroke::new(1.0, line));
-                // Inset the pills from the card edges (the rule stays full-bleed).
-                egui::Frame::default()
-                    .inner_margin(egui::Margin {
-                        left: kit::CARD_PAD_X as i8,
-                        right: kit::CARD_PAD_X as i8,
-                        top: 0,
-                        bottom: kit::SP_XS as i8,
-                    })
-                    .show(ui, |ui| self.reference_bar(ui));
-            });
+        // Arrange mode: the reference bar becomes a compact "reference row" — a
+        // draggable tile with an × when shown, or a drop zone when hidden — so it
+        // can be added/removed like the other panes.
+        if self.layout_edit {
+            egui::Panel::bottom("hero_refbar")
+                .frame(egui::Frame::NONE)
+                .show_separator_line(true)
+                .show_inside(ui, |ui| {
+                    if self.pane_visible(PaneId::ReferenceBar) {
+                        let t = kit::tokens(ui);
+                        ui.horizontal(|ui| {
+                            ui.dnd_drag_source(
+                                egui::Id::new("ref_tile"),
+                                PaneId::ReferenceBar,
+                                |ui| {
+                                    let (r, _) = ui.allocate_exact_size(
+                                        egui::vec2(16.0, 16.0),
+                                        egui::Sense::hover(),
+                                    );
+                                    crate::ui::icons::draw(
+                                        ui.painter(),
+                                        crate::ui::icons::Icon::Grip,
+                                        r,
+                                        t.dim,
+                                    );
+                                    ui.add_space(6.0);
+                                    ui.label(PaneId::ReferenceBar.title());
+                                },
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if kit::icon_btn(
+                                        ui,
+                                        crate::ui::icons::Icon::Close,
+                                        kit::CTRL_H,
+                                        "Hide reference bar",
+                                    ) {
+                                        self.pending_pane_action =
+                                            Some(PaneAction::Hide(PaneId::ReferenceBar));
+                                    }
+                                },
+                            );
+                        });
+                    } else {
+                        let (_, payload) = ui.dnd_drop_zone::<PaneId, _>(egui::Frame::NONE, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.add_space(kit::CARD_PAD_X);
+                                ui.weak("drop Reference bar here to show it");
+                            });
+                        });
+                        if let Some(p) = payload {
+                            if *p == PaneId::ReferenceBar {
+                                self.pending_pane_action =
+                                    Some(PaneAction::Show(PaneId::ReferenceBar));
+                            }
+                        }
+                    }
+                });
+        } else if self.pane_visible(PaneId::ReferenceBar) {
+            // Live: the reference bar pinned to the very bottom (its own top rule).
+            egui::Panel::bottom("hero_refbar")
+                .frame(egui::Frame::NONE)
+                .show_separator_line(false)
+                .show_inside(ui, |ui| {
+                    let line = kit::tokens(ui).line;
+                    let (lr, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 1.0),
+                        egui::Sense::hover(),
+                    );
+                    // Draw the rule at the allocated rect's *centre*, not its top
+                    // edge: a 1px stroke centred on the panel's top clip boundary
+                    // loses its upper half to the clip, and the surviving ~0.5px
+                    // rounds to visible-or-not as the layout resizes (the flicker).
+                    // Centring keeps the full stroke inside the clip rect so it's
+                    // always drawn.
+                    ui.painter()
+                        .hline(lr.x_range(), lr.center().y, egui::Stroke::new(1.0, line));
+                    // Inset the pills from the card edges (the rule stays full-bleed).
+                    egui::Frame::default()
+                        .inner_margin(egui::Margin {
+                            left: kit::CARD_PAD_X as i8,
+                            right: kit::CARD_PAD_X as i8,
+                            top: 0,
+                            bottom: kit::SP_XS as i8,
+                        })
+                        .show(ui, |ui| self.reference_bar(ui));
+                });
+        }
         // Readout line above the reference bar (draws its own top rule).
         egui::Panel::bottom("hero_readout")
             .frame(egui::Frame::NONE)

@@ -127,6 +127,37 @@ impl GuiApp {
             .open(&mut open)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    // ── Theme ─────────────────────────────────────────────────
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("Theme").strong());
+                    let cctx = ui.ctx().clone();
+                    for t in Theme::ALL {
+                        if ui.selectable_label(self.theme == t, t.label()).clicked() {
+                            self.set_theme(&cctx, t);
+                        }
+                    }
+
+                    // Pane show/hide lives in arrange mode now (☰ → Edit layout):
+                    // its Hidden tray is the single place to add/remove panes.
+
+                    // ── Channels ──────────────────────────────────────────────
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("Channels").strong());
+                    if let Some(s) = &state {
+                        if s.channels >= 2 {
+                            self.channels_section(ui, s);
+                        } else {
+                            ui.weak("Stereo or multichannel output required.");
+                        }
+                    } else {
+                        ui.weak("Connect the daemon to configure channels.");
+                    }
+
+                    // ── Advanced features ─────────────────────────────────────
+                    ui.add_space(8.0);
+                    ui.separator();
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new("Advanced features").strong());
                     ui.weak("Hidden by default to keep the main view clean.");
@@ -146,6 +177,7 @@ impl GuiApp {
                         "Convolution section (WAV impulse response)",
                     );
 
+                    // ── EQ phase ──────────────────────────────────────────────
                     ui.add_space(8.0);
                     ui.separator();
                     ui.add_space(4.0);
@@ -197,31 +229,6 @@ impl GuiApp {
                         ));
                     } else {
                         ui.weak("Connect the daemon to change the EQ phase mode.");
-                    }
-
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new("Channels").strong());
-                    if let Some(s) = &state {
-                        if s.channels >= 2 {
-                            self.channels_section(ui, s);
-                        } else {
-                            ui.weak("Stereo or multichannel output required.");
-                        }
-                    } else {
-                        ui.weak("Connect the daemon to configure channels.");
-                    }
-
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new("Theme").strong());
-                    let cctx = ui.ctx().clone();
-                    for t in Theme::ALL {
-                        if ui.selectable_label(self.theme == t, t.label()).clicked() {
-                            self.set_theme(&cctx, t);
-                        }
                     }
                 });
             });
