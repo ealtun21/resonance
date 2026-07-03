@@ -42,19 +42,22 @@ fn main() -> eframe::Result<()> {
 
     // Single-instance: a second launch raises the running window and exits
     // instead of opening a duplicate window against the same daemon.
-    let _gui_guard = match resonance_ipc::singleton::acquire("resonance-gui") {
-        Ok(Some(g)) => g,
-        Ok(None) => {
-            let _ = resonance_ipc::singleton::request_raise("resonance-gui");
-            return Ok(());
-        }
-        Err(e) => {
-            eprintln!("GUI: singleton check failed ({e}); continuing without it");
-            // Better to open a (possibly duplicate) window than to wedge the
-            // user out of the app because the lock file was unwritable.
-            return run_native_app();
-        }
-    };
+    let _gui_guard =
+        match resonance_ipc::singleton::acquire(resonance_ipc::tray::control::GUI_INSTANCE) {
+            Ok(Some(g)) => g,
+            Ok(None) => {
+                let _ = resonance_ipc::singleton::request_raise(
+                    resonance_ipc::tray::control::GUI_INSTANCE,
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("GUI: singleton check failed ({e}); continuing without it");
+                // Better to open a (possibly duplicate) window than to wedge the
+                // user out of the app because the lock file was unwritable.
+                return run_native_app();
+            }
+        };
     run_native_app()
 }
 

@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 
 pub const TRAY_INSTANCE: &str = "resonance-tray";
 pub const GUI_INSTANCE: &str = "resonance-gui";
+pub const TUI_INSTANCE: &str = "resonance-tui";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrayStatus {

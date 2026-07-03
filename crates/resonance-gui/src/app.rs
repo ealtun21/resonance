@@ -1361,7 +1361,7 @@ impl GuiApp {
     /// while hidden so a pending raise is still observed even though the
     /// window itself isn't drawing anything the user can see.
     fn poll_raise(&mut self, ctx: &egui::Context) {
-        if resonance_ipc::singleton::take_raise("resonance-gui") {
+        if resonance_ipc::singleton::take_raise(resonance_ipc::tray::control::GUI_INSTANCE) {
             if self.hidden {
                 self.hidden = false;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));

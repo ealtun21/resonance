@@ -60,7 +60,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, fps_override: Option<u64>) -> Re
     let mut app = App::new();
     // Best-effort: record this TUI so tray status can see it. Multiple TUIs are
     // allowed, so a lost race is fine — just skip recording.
-    let _tui_guard = resonance_ipc::singleton::acquire("resonance-tui")
+    let _tui_guard = resonance_ipc::singleton::acquire(resonance_ipc::tray::control::TUI_INSTANCE)
         .ok()
         .flatten();
     app.connect();

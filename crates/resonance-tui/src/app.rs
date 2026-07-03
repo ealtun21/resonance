@@ -2138,7 +2138,7 @@ impl App {
             TextPurpose::TrayPoll => {
                 if let Ok(n) = buf.trim().parse::<u64>() {
                     let mut cfg = resonance_ipc::tray::TrayConfig::load();
-                    cfg.poll_secs = n.clamp(1, 30);
+                    cfg.poll_secs = n.clamp(1, 60);
                     let _ = cfg.save();
                 }
                 if let InputMode::Settings(s) = &mut self.mode {

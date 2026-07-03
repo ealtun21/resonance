@@ -991,9 +991,10 @@ fn run_tray_config(key: Option<&str>, value: Option<&str>) -> Result<()> {
             };
         }
         "poll" => {
-            cfg.poll_secs = value
+            let secs: u64 = value
                 .parse()
                 .map_err(|_| anyhow::anyhow!("poll must be an integer (seconds)"))?;
+            cfg.poll_secs = secs.clamp(1, 60);
         }
         "close-to-tray" => cfg.close_gui_to_tray = parse_bool(value)?,
         "recent" => {

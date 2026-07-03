@@ -321,7 +321,7 @@ impl GuiApp {
                                     .changed();
                             });
                         changed |= ui
-                            .add(egui::Slider::new(&mut cfg.poll_secs, 1..=30).text("Poll (s)"))
+                            .add(egui::Slider::new(&mut cfg.poll_secs, 1..=60).text("Poll (s)"))
                             .changed();
                         changed |= ui
                             .add(
