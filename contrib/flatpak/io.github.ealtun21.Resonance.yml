@@ -46,6 +46,7 @@ modules:
       - install -Dm755 target/release/resonance-tui /app/bin/resonance-tui
       - install -Dm755 target/release/resonance /app/bin/resonance
       - install -Dm755 target/release/resonanced /app/bin/resonanced
+      - install -Dm755 target/release/resonance-tray /app/bin/resonance-tray
       - install -Dm644 contrib/io.github.ealtun21.Resonance.desktop
           /app/share/applications/io.github.ealtun21.Resonance.desktop
       - install -Dm644 contrib/io.github.ealtun21.Resonance.svg

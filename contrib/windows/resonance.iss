@@ -40,6 +40,7 @@ Source: "..\..\target\release\resonanced.exe";    DestDir: "{app}"; Flags: ignor
 Source: "..\..\target\release\resonance.exe";      DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\target\release\resonance-tui.exe";  DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\target\release\resonance-gui.exe";  DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\target\release\resonance-tray.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; The APO DLL is loaded by audiodg.exe from this fixed path (see InprocServer32).
 Source: "..\..\target\release\resonance_apo.dll";  DestDir: "{app}"; Flags: ignoreversion
 Source: "resonance.ico";                           DestDir: "{app}"; Flags: ignoreversion

@@ -36,22 +36,25 @@ if [[ -z "${SIGN_IDENTITY:-}" ]]; then
     fi
 fi
 
-echo ">> building release binaries (daemon + GUI + TUI + CLI)"
-# All four binaries land in the bundle — the GUI is the user-facing
+echo ">> building release binaries (daemon + GUI + TUI + CLI + tray)"
+# All five binaries land in the bundle — the GUI is the user-facing
 # entry point, the CLI + TUI are symlinked into ~/.local/bin by
-# install.sh, and the daemon is what launchd spawns. Building them all
-# together is faster than -p per crate (single cargo run, shared deps).
+# install.sh, the tray is an optional background controller co-located
+# alongside them, and the daemon is what launchd spawns. Building them
+# all together is faster than -p per crate (single cargo run, shared deps).
 (cd "$REPO_DIR" && cargo build --release \
     -p resonance-daemon \
     -p resonance-gui \
     -p resonance-tui \
-    -p resonance-cli)
+    -p resonance-cli \
+    -p resonance-tray)
 
 BIN="$REPO_DIR/target/release/resonanced"
 GUI="$REPO_DIR/target/release/resonance-gui"
 for b in "$BIN" "$GUI" \
     "$REPO_DIR/target/release/resonance" \
-    "$REPO_DIR/target/release/resonance-tui"; do
+    "$REPO_DIR/target/release/resonance-tui" \
+    "$REPO_DIR/target/release/resonance-tray"; do
     [[ -x "$b" ]] || { echo "missing $b — build failed?" >&2; exit 1; }
 done
 
@@ -96,10 +99,10 @@ else
     fi
 fi
 
-# Co-locate the CLI/TUI/GUI binaries inside the bundle so a single bundle
-# install lays down the whole toolset. They aren't needed for TCC but make
-# the bundle self-contained for distribution.
-for extra in resonance resonance-tui resonance-gui; do
+# Co-locate the CLI/TUI/GUI/tray binaries inside the bundle so a single
+# bundle install lays down the whole toolset. They aren't needed for TCC but
+# make the bundle self-contained for distribution.
+for extra in resonance resonance-tui resonance-gui resonance-tray; do
     src="$REPO_DIR/target/release/$extra"
     if [[ -x "$src" ]]; then
         cp "$src" "$APP_OUT/Contents/MacOS/$extra"
@@ -125,9 +128,9 @@ echo ">> codesigning with identity: $SIGN_IDENTITY (entitlements: $ENT)"
 # the requirement's *anchor* stable but NOT the identifier; both must be pinned.
 # These identifiers match the bundle's first-grant identities so the existing
 # grant survives every subsequent rebuild/reinstall.
-# Sign the embedded TUI + CLI (no TCC entitlements, but must be signed so the
-# bundle's seal is valid).
-for extra in resonance resonance-tui; do
+# Sign the embedded TUI + CLI + tray (no TCC entitlements, but must be
+# signed so the bundle's seal is valid).
+for extra in resonance resonance-tui resonance-tray; do
     bin="$APP_OUT/Contents/MacOS/$extra"
     [[ -x "$bin" ]] && codesign --force --sign "$SIGN_IDENTITY" --identifier "$extra" "$bin"
 done

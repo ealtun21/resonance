@@ -41,7 +41,7 @@ jobs:
         run: cargo test --all --target x86_64-pc-windows-msvc -- --test-threads=1
 
       - name: Build release binaries
-        run: cargo build --release --target x86_64-pc-windows-msvc -p resonance-daemon -p resonance-cli -p resonance-tui -p resonance-gui
+        run: cargo build --release --target x86_64-pc-windows-msvc -p resonance-daemon -p resonance-cli -p resonance-tui -p resonance-gui -p resonance-tray
 
       - name: Build APO DLL (Rust engine staticlib + C++ COM shell)
         shell: pwsh
@@ -55,6 +55,7 @@ jobs:
           Copy-Item target\x86_64-pc-windows-msvc\release\resonance.exe       target\release\
           Copy-Item target\x86_64-pc-windows-msvc\release\resonance-tui.exe   target\release\
           Copy-Item target\x86_64-pc-windows-msvc\release\resonance-gui.exe   target\release\
+          Copy-Item target\x86_64-pc-windows-msvc\release\resonance-tray.exe  target\release\
           Copy-Item target\apo\resonance_apo.dll                              target\release\
 
       - name: Generate icon (.ico)
