@@ -166,9 +166,16 @@ impl App {
         let show_menu_on_left_click = menu_on_left_click(&self.model);
         if let Some(tray) = &self.tray {
             tray.set_menu(Some(Box::new(menu)));
-            // `_with_as_template` is a no-op flag on Windows; on macOS it
-            // keeps the icon marked as a template so the OS re-tints it.
-            let _ = tray.set_icon_with_as_template(Some(icon), cfg!(target_os = "macos"));
+            // `set_icon_with_as_template` is a COMPLETE no-op on Windows in
+            // tray-icon 0.19.3 (it discards both args and never applies the
+            // icon), so the icon update is dropped there, not just the
+            // template flag. Use the plain setter on Windows and the
+            // template-aware one on macOS, where it keeps the icon marked as
+            // a template so the OS re-tints it.
+            #[cfg(target_os = "macos")]
+            let _ = tray.set_icon_with_as_template(Some(icon), true);
+            #[cfg(target_os = "windows")]
+            let _ = tray.set_icon(Some(icon));
             let _ = tray.set_tooltip(Some(&self.model.tooltip));
             tray.set_show_menu_on_left_click(show_menu_on_left_click);
         }
