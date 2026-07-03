@@ -4227,6 +4227,7 @@ dependencies = [
  "resonance-dsp",
  "serde",
  "thiserror 2.0.18",
+ "toml",
  "windows-sys 0.59.0",
 ]
 

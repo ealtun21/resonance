@@ -9,6 +9,7 @@ pub mod paths;
 pub mod service;
 pub mod singleton;
 pub mod transport;
+pub mod tray;
 
 pub const SOCKET_PATH_ENV: &str = "RESONANCE_SOCKET";
 pub const DEFAULT_SOCKET_FILENAME: &str = "resonance.sock";

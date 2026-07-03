@@ -12,6 +12,7 @@ resonance-dsp = { path = "../resonance-dsp" }
 serde = { workspace = true }
 postcard = { workspace = true }
 thiserror = { workspace = true }
+toml = { workspace = true }
 
 # uid lookup (macOS launchd backend) + SIGTERM to the daemon pidfile
 # (Linux XDG-autostart fallback backend).
