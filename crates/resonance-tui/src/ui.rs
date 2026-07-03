@@ -2871,7 +2871,7 @@ mod tests {
             sinks: vec![],
             dither_bits: None,
             convolution: None,
-            solo_band: None,
+            audition: None,
         }
     }
 

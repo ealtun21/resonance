@@ -303,12 +303,29 @@ pub enum Command {
     /// default) and linear phase (static stereo bands rendered to a symmetric
     /// FIR; adds `eq_fir_latency_frames` of delay, no phase rotation).
     SetPhaseMode { linear: bool },
-    /// Transiently solo (audition) a single EQ band, bypassing every other band
-    /// so you hear only what that one band does. `Some(index)` solos that band
-    /// (index into `DaemonState::bands`); `None` clears. Never persisted to a
-    /// profile — solo suspends linear-phase while active. The daemon clears any
-    /// active solo on any other band-mutating command as a stuck-audio guard.
-    SetBandSolo { index: Option<usize> },
+    /// Transiently audition a single EQ band. `Some(index)` auditions that band
+    /// in `mode` (Solo = bypass others; Listen = band-pass the band's region);
+    /// `None` clears. Never persisted; suspends linear-phase while active. The
+    /// daemon clears any active audition on any band-mutating command as a
+    /// stuck-audio guard.
+    SetBandAudition {
+        index: Option<usize>,
+        mode: AuditionMode,
+    },
+}
+
+/// Per-band audition mode (mirrors `resonance_dsp::chain::AuditionMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AuditionMode {
+    Solo,
+    Listen,
+}
+
+/// A transient single-band audition (mirrors `resonance_dsp::chain::BandAudition`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BandAudition {
+    pub band: usize,
+    pub mode: AuditionMode,
 }
 
 /// One of the two in-memory comparison slots for quick A/B auditioning.
@@ -674,12 +691,11 @@ pub struct DaemonState {
     /// `serde` default, same compatibility note as `apps`/`sinks`.
     #[serde(default)]
     pub convolution: Option<ConvolutionState>,
-    /// Transiently soloed EQ band index (`None` = no solo). Transient runtime
-    /// state — never persisted to a profile; published so clients render the
-    /// active toggle and can surface it prominently. Appended LAST + `serde`
-    /// default, same compatibility note as `apps`/`sinks`.
+    /// Transient per-band audition (`None` = none). Runtime-only — never
+    /// persisted; published so clients render the active toggle + mode. Appended
+    /// LAST + `serde` default, same compatibility note as `apps`/`sinks`.
     #[serde(default)]
-    pub solo_band: Option<usize>,
+    pub audition: Option<BandAudition>,
 }
 
 /// Status of the convolution/IR stage, for `status` output and the UIs.
@@ -1166,9 +1182,19 @@ mod tests {
     }
 
     #[test]
-    fn band_solo_command_round_trips() {
-        command_round_trip(&Command::SetBandSolo { index: Some(2) });
-        command_round_trip(&Command::SetBandSolo { index: None });
+    fn band_audition_command_round_trips() {
+        command_round_trip(&Command::SetBandAudition {
+            index: Some(2),
+            mode: AuditionMode::Solo,
+        });
+        command_round_trip(&Command::SetBandAudition {
+            index: Some(2),
+            mode: AuditionMode::Listen,
+        });
+        command_round_trip(&Command::SetBandAudition {
+            index: None,
+            mode: AuditionMode::Solo,
+        });
     }
 
     #[test]
@@ -1283,7 +1309,10 @@ mod tests {
                 latency_frames: 256,
                 enabled: true,
             }),
-            solo_band: Some(1),
+            audition: Some(BandAudition {
+                band: 1,
+                mode: AuditionMode::Listen,
+            }),
         };
         let bytes = to_stdvec(&Response::State(st)).expect("encode");
         let _: Response = from_bytes(&bytes).expect("decode");

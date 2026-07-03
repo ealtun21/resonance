@@ -135,7 +135,7 @@ async fn dispatch(cmd: Command, state: &SharedState) -> Response {
     // A band-table change invalidates any active solo (index shift, replaced
     // table). Clear it up front so the audition never outlives the edit.
     if band_mutating {
-        clear_solo_if_active(state);
+        clear_audition_if_active(state);
     }
     let response = dispatch_inner(cmd, state).await;
     if band_mutating && !matches!(response, Response::Error(_)) {
@@ -204,7 +204,7 @@ async fn dispatch_inner(cmd: Command, state: &SharedState) -> Response {
             handle_set_band_dynamics(state, index, dynamics)
         }
         Command::SetPhaseMode { linear } => handle_set_phase_mode(state, linear),
-        Command::SetBandSolo { index } => handle_set_band_solo(state, index),
+        Command::SetBandAudition { index, mode } => handle_set_band_audition(state, index, mode),
         Command::SetBandChannels { index, channels } => {
             handle_set_band_channels(state, index, channels)
         }
@@ -751,36 +751,47 @@ fn handle_set_phase_mode(state: &SharedState, linear: bool) -> Response {
     Response::Ok
 }
 
-/// Transiently solo (audition) a single EQ band, bypassing every other. `None`
-/// clears. Out-of-range indices are rejected so a stray command can't silently
-/// mute all bands. Never persisted; solo suspends linear-phase while active.
-fn handle_set_band_solo(state: &SharedState, index: Option<usize>) -> Response {
-    if let Some(i) = index {
-        let n = state.0.lock().unwrap().chain.filters.len();
-        if i >= n {
-            return Response::Error(format!("band index {i} out of range (have {n})"));
+/// Transiently audition a single EQ band (Solo or Listen), or clear. Out-of-range
+/// indices are rejected so a stray command can't silently mute all bands. Never
+/// persisted; suspends linear-phase while active.
+fn handle_set_band_audition(
+    state: &SharedState,
+    index: Option<usize>,
+    mode: resonance_ipc::AuditionMode,
+) -> Response {
+    let audition = match index {
+        Some(i) => {
+            let n = state.0.lock().unwrap().chain.filters.len();
+            if i >= n {
+                return Response::Error(format!("band index {i} out of range (have {n})"));
+            }
+            Some(crate::state::dsp_audition(resonance_ipc::BandAudition {
+                band: i,
+                mode,
+            }))
         }
-    }
-    state.send(AudioCommand::SetBandSolo(index), move |chain| {
-        chain.set_solo(index);
+        None => None,
+    };
+    state.send(AudioCommand::SetBandAudition(audition), move |chain| {
+        chain.set_audition(audition);
     });
-    if let Some(i) = index {
-        info!("band solo: {i}");
-    } else {
-        info!("band solo cleared");
+    match (index, mode) {
+        (Some(i), resonance_ipc::AuditionMode::Solo) => info!("band audition: solo {i}"),
+        (Some(i), resonance_ipc::AuditionMode::Listen) => info!("band audition: listen {i}"),
+        (None, _) => info!("band audition cleared"),
     }
     Response::Ok
 }
 
-/// Stuck-audio guard: clear an active solo before any command that mutates the
+/// Stuck-audio guard: clear an active audition before any command that mutates the
 /// band table runs, so an audition never survives a band add/remove/edit or a
-/// profile load (a stale solo index could otherwise mute or mis-target audio).
-/// No-op when nothing is soloed, so the common path adds no RT traffic.
-fn clear_solo_if_active(state: &SharedState) {
-    let active = state.0.lock().unwrap().chain.solo.is_some();
+/// profile load (a stale index could otherwise mute or mis-target audio). No-op
+/// when nothing is auditioned, so the common path adds no RT traffic.
+fn clear_audition_if_active(state: &SharedState) {
+    let active = state.0.lock().unwrap().chain.audition.is_some();
     if active {
-        state.send(AudioCommand::SetBandSolo(None), |chain| {
-            chain.set_solo(None);
+        state.send(AudioCommand::SetBandAudition(None), |chain| {
+            chain.set_audition(None);
         });
     }
 }

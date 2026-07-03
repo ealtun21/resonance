@@ -2,13 +2,35 @@ use crate::meters::AtomicMeters;
 use resonance_dsp::channel::{ChannelMask, ChannelMatrix};
 use resonance_dsp::{chain::FxEffect, chain::ProcessorChain};
 use resonance_ipc::{
-    AppStream, BandDynamics, BandScope, BandState, BandType, ConvolutionState, DaemonState,
-    EffectsState, FxEffectId, RoutingMatrix, SinkVolume, default_channel_layout,
+    AppStream, BandAudition, BandDynamics, BandScope, BandState, BandType, ConvolutionState,
+    DaemonState, EffectsState, FxEffectId, RoutingMatrix, SinkVolume, default_channel_layout,
 };
 use rtrb::Producer;
 use std::sync::{Arc, Mutex};
 
 pub const SPECTRUM_BINS: usize = 64;
+
+/// Map an IPC audition to the DSP chain's audition type.
+pub(crate) fn dsp_audition(a: BandAudition) -> resonance_dsp::chain::BandAudition {
+    resonance_dsp::chain::BandAudition {
+        band: a.band,
+        mode: match a.mode {
+            resonance_ipc::AuditionMode::Solo => resonance_dsp::chain::AuditionMode::Solo,
+            resonance_ipc::AuditionMode::Listen => resonance_dsp::chain::AuditionMode::Listen,
+        },
+    }
+}
+
+/// Map a DSP-chain audition back to the IPC type for the snapshot.
+fn ipc_audition(a: resonance_dsp::chain::BandAudition) -> BandAudition {
+    BandAudition {
+        band: a.band,
+        mode: match a.mode {
+            resonance_dsp::chain::AuditionMode::Solo => resonance_ipc::AuditionMode::Solo,
+            resonance_dsp::chain::AuditionMode::Listen => resonance_ipc::AuditionMode::Listen,
+        },
+    }
+}
 
 /// Rolling post-DSP capture depth in mono samples (~5.5 s at 48 kHz, 1 MiB).
 /// Serves `Command::CaptureOutput` for the `resonance verify` harness.
@@ -74,10 +96,10 @@ pub enum AudioCommand {
     },
     /// Switch the EQ phase behaviour (minimum ↔ linear).
     SetPhaseMode(resonance_dsp::chain::PhaseMode),
-    /// Transiently solo a single EQ band (`Some(index)`) or clear (`None`).
-    /// Never persisted — the shadow chain carries it only so snapshots and the
-    /// APO mirror reflect the live solo.
-    SetBandSolo(Option<usize>),
+    /// Transiently audition a single EQ band (`Some`) or clear (`None`). Never
+    /// persisted — the shadow chain carries it only so snapshots and the APO
+    /// mirror reflect the live audition.
+    SetBandAudition(Option<resonance_dsp::chain::BandAudition>),
     /// Swap in a freshly rendered linear-phase FIR kernel (prepared on the
     /// IPC thread at the live rate — the RT thread only installs it).
     SetEqFir(Box<resonance_dsp::convolution::ConvolutionEngine>),
@@ -369,7 +391,7 @@ impl SharedState {
                 latency_frames: i.latency_frames,
                 enabled: chain.convolution.enabled(),
             }),
-            solo_band: chain.solo,
+            audition: chain.audition.map(ipc_audition),
         }
     }
 
