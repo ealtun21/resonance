@@ -41,6 +41,7 @@ pub(crate) enum Icon {
     Power,
     Help,
     Grip,
+    Solo,
 }
 
 /// Every icon with a label — drives the dev gallery (`RESONANCE_ICON_GALLERY=1`).
@@ -70,6 +71,7 @@ pub(crate) const ALL: &[(Icon, &str)] = &[
     (Icon::Power, "Power"),
     (Icon::Help, "Help"),
     (Icon::Grip, "Grip"),
+    (Icon::Solo, "Solo"),
 ];
 
 /// Draw `icon` centred in `rect`, tinted `color`. Stroke weight scales with the
@@ -214,7 +216,17 @@ fn paths(p: &Pen, icon: Icon) {
         Icon::Power => draw_power(p),
         Icon::Help => draw_help(p),
         Icon::Grip => draw_grip(p),
+        Icon::Solo => draw_solo(p),
     }
+}
+
+/// Headphones (the "listen/solo" affordance): a headband arc over two ear cups.
+fn draw_solo(p: &Pen) {
+    // Headband: top half-arc.
+    p.arc(0.50, 0.58, 0.30, 180.0, 360.0);
+    // Ear cups: a small rounded bar at each band end.
+    p.poly(&[(0.16, 0.55), (0.28, 0.55), (0.28, 0.76), (0.16, 0.76)]);
+    p.poly(&[(0.72, 0.55), (0.84, 0.55), (0.84, 0.76), (0.72, 0.76)]);
 }
 
 /// Three stacked horizontal bars (hamburger).

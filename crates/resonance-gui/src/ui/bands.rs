@@ -19,6 +19,9 @@ const GAIN_W: f32 = 54.0;
 const Q_W: f32 = 50.0;
 const CH_W: f32 = 64.0;
 const X_W: f32 = 24.0;
+/// Width reserved for the trailing solo (audition) icon button; like [`X_W`] it
+/// has no header caption and always shows.
+const SOLO_W: f32 = 24.0;
 /// Width of the abbreviated coloured Type badge (PK/LS/HS…). Compact + scannable;
 /// the full names live in its dropdown menu.
 const TYPE_W: f32 = 50.0;
@@ -103,6 +106,7 @@ impl BandColumns {
             + GAIN_W
             + Q_W
             + if show_ch { CH_W } else { 0.0 }
+            + SOLO_W
             + X_W;
         let graph_w = (avail - fixed - gap * (n_cols as f32 - 1.0)).max(60.0);
         Self {
@@ -412,6 +416,20 @@ impl GuiApp {
 
         if cols.show_graph {
             gain_bar(ui, cols.graph_w, b.gain_db, &self.palette);
+        }
+
+        // Solo (audition) toggle — transient (queue, not queue_edit) so it never
+        // dirties the EQ or the undo stack. Accent-lit while this band is soloed.
+        let soloed = state.solo_band == Some(i);
+        let tip = if soloed {
+            "Stop auditioning this band"
+        } else {
+            "Solo: audition only this band"
+        };
+        if kit::icon_btn_active(ui, Icon::Solo, 24.0, soloed, tip) {
+            self.queue(Command::SetBandSolo {
+                index: if soloed { None } else { Some(i) },
+            });
         }
 
         if kit::icon_btn(ui, Icon::Close, 24.0, "Remove this band") {

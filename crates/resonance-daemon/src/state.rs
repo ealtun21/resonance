@@ -74,6 +74,10 @@ pub enum AudioCommand {
     },
     /// Switch the EQ phase behaviour (minimum ↔ linear).
     SetPhaseMode(resonance_dsp::chain::PhaseMode),
+    /// Transiently solo a single EQ band (`Some(index)`) or clear (`None`).
+    /// Never persisted — the shadow chain carries it only so snapshots and the
+    /// APO mirror reflect the live solo.
+    SetBandSolo(Option<usize>),
     /// Swap in a freshly rendered linear-phase FIR kernel (prepared on the
     /// IPC thread at the live rate — the RT thread only installs it).
     SetEqFir(Box<resonance_dsp::convolution::ConvolutionEngine>),
@@ -365,6 +369,7 @@ impl SharedState {
                 latency_frames: i.latency_frames,
                 enabled: chain.convolution.enabled(),
             }),
+            solo_band: chain.solo,
         }
     }
 

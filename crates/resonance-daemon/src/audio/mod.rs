@@ -249,6 +249,7 @@ pub fn apply_command(chain: &mut ProcessorChain, cmd: AudioCommand) {
         AudioCommand::SetConvolutionEnabled(on) => chain.convolution.set_enabled(on),
         AudioCommand::ClearConvolution => chain.convolution.clear(),
         AudioCommand::SetPhaseMode(mode) => chain.set_phase_mode(mode),
+        AudioCommand::SetBandSolo(index) => chain.set_solo(index),
         AudioCommand::SetEqFir(engine) => {
             chain.eq_fir = *engine;
             // Prepared at the rate/width the IPC thread believed was live;

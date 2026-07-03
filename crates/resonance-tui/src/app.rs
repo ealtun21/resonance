@@ -1060,6 +1060,28 @@ impl App {
         self.refresh_state();
     }
 
+    /// Solo (audition) the selected band (`L` key): bypass every other band so
+    /// only this one is heard. Pressing it on the already-soloed band clears the
+    /// solo. Transient — no undo entry, never saved; suspends linear-phase while
+    /// active. The daemon also auto-clears it on any band-table edit.
+    pub fn toggle_band_solo(&mut self) {
+        if !matches!(self.focus, Panel::Bands | Panel::Graph) {
+            return;
+        }
+        let Some(state) = &self.state else { return };
+        let idx = self.band_cursor;
+        if idx >= state.bands.len() {
+            return;
+        }
+        let index = if state.solo_band == Some(idx) {
+            None
+        } else {
+            Some(idx)
+        };
+        self.send(Command::SetBandSolo { index });
+        self.refresh_state();
+    }
+
     pub fn remove_band(&mut self) {
         let Some(state) = &self.state else { return };
         if state.bands.is_empty() {

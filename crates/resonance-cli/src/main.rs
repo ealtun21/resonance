@@ -177,6 +177,12 @@ enum Sub {
         /// linear | minimum (min)
         mode: String,
     },
+    /// Solo (audition) one EQ band, bypassing every other band. Transient —
+    /// never saved; suspends linear-phase while active. `off` clears the solo.
+    BandSolo {
+        /// Band index (1-based, as shown in `status`), or `off` to clear
+        target: String,
+    },
     /// Reset to defaults: flat EQ, all effects off, 0 dB preamp
     Reset,
     /// Export the current EQ to an `EqualizerAPO` .txt file
@@ -599,6 +605,23 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
             "minimum" | "min" => Ok(Command::SetPhaseMode { linear: false }),
             other => bail!("phase must be linear or minimum, got {other}"),
         },
+        Sub::BandSolo { target } => {
+            if matches!(
+                target.to_ascii_lowercase().as_str(),
+                "off" | "none" | "clear"
+            ) {
+                return Ok(Command::SetBandSolo { index: None });
+            }
+            let index: usize = target
+                .parse()
+                .map_err(|_| anyhow::anyhow!("band index must be a 1-based number or `off`"))?;
+            if index == 0 {
+                bail!("band index is 1-based (see `status`)");
+            }
+            Ok(Command::SetBandSolo {
+                index: Some(index - 1),
+            })
+        }
         Sub::Reset => Ok(Command::Reset),
         Sub::Export { path } => Ok(Command::ExportApo {
             path: absolutize(path),
@@ -1109,8 +1132,12 @@ fn print_state(p: &Paint, s: &resonance_ipc::DaemonState) {
     // EQ bands
     if !s.bands.is_empty() {
         println!();
+        let solo_note = match s.solo_band {
+            Some(i) => format!("  {}", p.yellow(&format!("SOLO band {}", i + 1))),
+            None => String::new(),
+        };
         println!(
-            "{} {}",
+            "{} {}{solo_note}",
             p.bold("bands"),
             p.dim(&format!("({})", s.bands.len()))
         );
@@ -1145,7 +1172,12 @@ fn print_state(p: &Paint, s: &resonance_ipc::DaemonState) {
                     p.dim(&format!("dyn {:+.0}@{:.0}", d.range_db, d.threshold_db))
                 )
             });
-            let tail = format!("{slope_tail}{scope_tail}{dyn_tail}{ch_tail}");
+            let solo_tail = if s.solo_band == Some(i) {
+                format!("  {}", p.yellow("◀ solo"))
+            } else {
+                String::new()
+            };
+            let tail = format!("{slope_tail}{scope_tail}{dyn_tail}{ch_tail}{solo_tail}");
             println!(
                 "  {:>2}  {}  {:>8.1} Hz  {:+5.1} dB  Q {:>4.2}  {state}{tail}",
                 i + 1,
@@ -1269,6 +1301,9 @@ impl Paint {
     }
     fn magenta_bold(&self, s: &str) -> String {
         self.wrap("1;35", s)
+    }
+    fn yellow(&self, s: &str) -> String {
+        self.wrap("1;33", s)
     }
 }
 
@@ -1508,6 +1543,24 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn band_solo_parses_index_off_and_rejects_bad_input() {
+        // 1-based index → 0-based command index.
+        assert!(matches!(
+            to_ipc_command(Sub::BandSolo { target: "3".into() }).unwrap(),
+            Command::SetBandSolo { index: Some(2) }
+        ));
+        for off in ["off", "none", "clear", "OFF"] {
+            assert!(matches!(
+                to_ipc_command(Sub::BandSolo { target: off.into() }).unwrap(),
+                Command::SetBandSolo { index: None }
+            ));
+        }
+        // 0 (1-based) and non-numeric bail.
+        assert!(to_ipc_command(Sub::BandSolo { target: "0".into() }).is_err());
+        assert!(to_ipc_command(Sub::BandSolo { target: "x".into() }).is_err());
     }
 
     #[test]

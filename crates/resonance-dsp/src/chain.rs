@@ -103,6 +103,16 @@ pub struct ProcessorChain {
     /// permutation, duplication, drop, up/downmix. `None` (or a square identity)
     /// is a zero-cost passthrough — see [`ProcessorChain::route`].
     pub routing: Option<ChannelMatrix>,
+    /// Transient per-band solo: while `Some(i)`, only filter band `i` runs and
+    /// every other band is bypassed, so you audition exactly what that one band
+    /// does (a soloed but `enabled==false` band is temporarily audible — the
+    /// point of auditioning). Runtime-only: not part of the builder, never
+    /// persisted to a `Profile`, cleared on release. Solo also forces the IIR
+    /// path (suspends linear-phase for the duration) so the cascade skip
+    /// isolates the band directly instead of it being baked into the FIR kernel.
+    /// Effects/convolution/crossfeed/dither still run — solo isolates only among
+    /// the EQ bands.
+    pub solo: Option<usize>,
 }
 
 impl ProcessorChain {
@@ -127,7 +137,11 @@ impl ProcessorChain {
         }
 
         // Linear phase engages only with a loaded kernel (see `eq_fir` docs).
+        // A soloed band forces the IIR path so the cascade skip below isolates
+        // it directly — linear-phase is suspended for the solo's duration and
+        // fades back in (kernel retained) when solo clears.
         let fir_want = self.phase_mode == PhaseMode::Linear
+            && self.solo.is_none()
             && self.eq_fir.enabled()
             && self.eq_fir.source().is_some();
         let kernel_id = self
@@ -169,7 +183,16 @@ impl ProcessorChain {
         // keeps a single filter's coefficients+state hot per pass — measurably
         // faster than a sample-major inner loop that cycles every band's state
         // on each sample once the band count grows.
-        for filter in &mut self.filters {
+        let solo = self.solo;
+        for (idx, filter) in self.filters.iter_mut().enumerate() {
+            // Transient solo: audition one band by bypassing every other. Solo
+            // forces the IIR path (fir_active is false), so this skip fully
+            // isolates the band regardless of phase mode.
+            if let Some(s) = solo {
+                if idx != s {
+                    continue;
+                }
+            }
             // Bands realised by the FIR kernel skip the IIR pass; Mid/Side and
             // dynamic bands are not linearizable and stay here (hybrid mode).
             if fir_active && crate::linphase::is_linearizable(filter) {
@@ -303,6 +326,14 @@ impl ProcessorChain {
     /// Set (or clear) the output dither target bit depth. `None` = off.
     pub fn set_dither(&mut self, bits: Option<u32>) {
         self.dither.set_bits(bits);
+    }
+
+    /// Solo (audition) a single EQ band, bypassing all others. `None` clears.
+    /// Out-of-range indices are accepted verbatim (they simply mute every band
+    /// until cleared); callers validate against the live band count. Transient —
+    /// never persisted.
+    pub fn set_solo(&mut self, index: Option<usize>) {
+        self.solo = index;
     }
 
     /// Switch the EQ phase behaviour. The audible change rides a short fade
@@ -570,6 +601,7 @@ impl ProcessorChainBuilder {
             crossfeed: CrossfeedEffect::new(channels, sr),
             dither: DitherStage::new(channels),
             routing: None,
+            solo: None,
         }
     }
 }
@@ -632,6 +664,89 @@ mod tests {
         // No-op when unchanged.
         chain.rebind_sample_rate(44_100.0);
         assert_eq!(chain.sample_rate, 44_100.0);
+    }
+
+    #[test]
+    fn solo_isolates_a_single_band() {
+        use crate::filter::FilterType;
+        // Two well-separated +12 dB peaks. Soloing one must leave the *other*
+        // band's frequency untouched (~unity) while the soloed band's own
+        // frequency stays boosted.
+        let mk = || {
+            ProcessorChain::builder()
+                .channels(1)
+                .sample_rate(48_000.0)
+                .add_filter(band(FilterType::Peaking, 200.0, 12.0, 1.0))
+                .add_filter(band(FilterType::Peaking, 5_000.0, 12.0, 1.0))
+                .build()
+        };
+
+        // Steady-state RMS gain of a pure sine through the chain.
+        let gain_at = |chain: &mut ProcessorChain, hz: f64| -> f64 {
+            let n = 8_192usize;
+            let w = 2.0 * std::f64::consts::PI * hz / 48_000.0;
+            #[allow(clippy::cast_precision_loss)]
+            let mut buf: Vec<f64> = (0..n).map(|i| (w * i as f64).sin() * 0.5).collect();
+            let input = buf.clone();
+            chain.process(&mut buf);
+            // Skip the biquad warm-up transient.
+            let rms = |s: &[f64]| (s.iter().map(|x| x * x).sum::<f64>() / s.len() as f64).sqrt();
+            rms(&buf[2_048..]) / rms(&input[2_048..])
+        };
+
+        // Solo band 0 (200 Hz): 200 Hz boosted, 5 kHz ~unity.
+        let mut c = mk();
+        c.set_solo(Some(0));
+        assert!(
+            gain_at(&mut c, 200.0) > 3.0,
+            "soloed 200 Hz band lost its boost"
+        );
+        let off = gain_at(&mut c, 5_000.0);
+        assert!(
+            (off - 1.0).abs() < 0.15,
+            "5 kHz leaked while band 0 soloed: {off}"
+        );
+
+        // Solo band 1 (5 kHz): mirror.
+        let mut c = mk();
+        c.set_solo(Some(1));
+        assert!(
+            gain_at(&mut c, 5_000.0) > 3.0,
+            "soloed 5 kHz band lost its boost"
+        );
+        let off = gain_at(&mut c, 200.0);
+        assert!(
+            (off - 1.0).abs() < 0.15,
+            "200 Hz leaked while band 1 soloed: {off}"
+        );
+
+        // No solo: both bands active — each frequency is boosted.
+        let mut c = mk();
+        assert!(gain_at(&mut c, 200.0) > 3.0);
+        assert!(gain_at(&mut c, 5_000.0) > 3.0);
+
+        // Clearing solo restores the full cascade.
+        let mut c = mk();
+        c.set_solo(Some(0));
+        assert!((gain_at(&mut c, 5_000.0) - 1.0).abs() < 0.15);
+        c.set_solo(None);
+        assert!(
+            gain_at(&mut c, 5_000.0) > 3.0,
+            "clearing solo did not restore band 1"
+        );
+    }
+
+    fn band(ft: crate::filter::FilterType, f: f64, g: f64, q: f64) -> crate::filter::ApoFilter {
+        crate::filter::ApoFilter::builder()
+            .filter_type(ft)
+            .freq(f)
+            .gain_db(g)
+            .q(q)
+            .enabled(true)
+            .channels(1)
+            .sample_rate(48_000.0)
+            .build()
+            .unwrap()
     }
 
     #[test]

@@ -9,12 +9,11 @@ angle so it can be picked up directly.
 
 ## High value
 
-- **Per-app EQ** — a *different EQ curve per application* (not just per-app
-  volume, which is done). SoundSource/Boom3D's headline feature and the biggest
-  remaining differentiator. Angle: this is "Plan B" of per-app processing; the
-  macOS per-app tap-mixer already sums per-app streams, so per-app filter banks
-  slot in there. Linux: per-stream target routing or per-app filter graphs.
-  Model/IPC needs a per-app band set (relates to backlog item 16's `BandScope`).
+_(Per-app EQ — a different EQ curve per application — was dropped: it cannot reach
+full three-platform parity. Windows' APO is an endpoint-level effect with no
+per-audio-session DSP hook, so per-app EQ would be macOS + Linux only. The
+parity-first rule keeps it off the backlog until a Windows per-session path
+exists.)_
 
 ## Medium value
 
@@ -23,8 +22,10 @@ angle so it can be picked up directly.
 
 ## Lower / niche
 
-- **Per-band solo/listen** — audition one band in isolation while tuning. Small
-  DSP + a UI affordance. ( Add eye icon or listen ear icon )
+- **Per-band listen/bandpass** — the richer follow-up to per-band solo: hear
+  *only the frequency region a band covers* (a band-pass audition,
+  FabFilter-style), rather than the whole signal with the other bands bypassed.
+  Needs a temporary band-pass around the soloed band's centre/width in the DSP.
 
 ## Where Resonance is already ahead
 
@@ -44,5 +45,9 @@ release, band-passed sidechain, zero added latency; peaking bands, shipped
 2026-07-02); and a **linear-phase EQ mode** (static bands rendered to a
 symmetric FIR through the partitioned engine — no phase rotation, ~171 ms
 added latency at 48 kHz, hybrid with M/S + dynamic bands staying IIR; shipped
-2026-07-03 — closes backlog item 8 entirely). Most competitors do a subset of
-these on a single OS.
+2026-07-03 — closes backlog item 8 entirely); and **per-band solo** (audition
+one EQ band in isolation while tuning — a transient chain flag that bypasses
+every other band, never persisted, suspends linear-phase while active; CLI
+`band-solo`, GUI ear toggle, TUI `L`; all three platforms via the shared
+`ProcessorChain` + APO snapshot v8; shipped 2026-07-03). Most competitors do a
+subset of these on a single OS.
