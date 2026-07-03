@@ -457,6 +457,10 @@ impl GuiApp {
                         // Right-to-left layout: add the combo first so the "EQ
                         // bands off:" label sits to its left.
                         let mut pref = self.bands_off_layout;
+                        let tip = "When the EQ bands pane is removed, how the control \
+                                   cards fill the freed space:\n\nColumns — side by side \
+                                   in two columns.\nStack — one full-width column.\n\nNo \
+                                   effect while EQ bands is shown.";
                         egui::ComboBox::from_id_salt("bands_off_layout")
                             .selected_text(match pref {
                                 BandsOffLayout::Columns => "Columns",
@@ -465,9 +469,11 @@ impl GuiApp {
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(&mut pref, BandsOffLayout::Columns, "Columns");
                                 ui.selectable_value(&mut pref, BandsOffLayout::Stacked, "Stack");
-                            });
+                            })
+                            .response
+                            .on_hover_text(tip);
                         self.bands_off_layout = pref;
-                        ui.label("EQ bands off:");
+                        ui.label("EQ bands off:").on_hover_text(tip);
                     });
                 });
             });
