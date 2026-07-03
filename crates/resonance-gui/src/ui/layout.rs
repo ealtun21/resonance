@@ -156,6 +156,12 @@ impl GuiApp {
                             self.hero(ui, s);
                         }
                     });
+                // Apply any arrange-mode action queued this frame — from the
+                // controls strip (tray / columns / bands) or the hero's reference
+                // row — now that both panels have rendered.
+                if let Some(action) = self.pending_pane_action.take() {
+                    self.apply_pane_action(action);
+                }
             }
             // Narrow: graph on top (resizable, with a floor so it stays usable),
             // the accordion of sections scrolls in the central area below — open
@@ -540,23 +546,55 @@ impl GuiApp {
                     });
                 }
             });
+        let _ = state; // arrange centre shows a compact bands tile, not the table
         egui::CentralPanel::default()
             .frame(bands_card_frame(ui))
             .show_inside(ui, |ui| {
                 if self.pane_visible(PaneId::Bands) {
-                    if let Some(s) = state {
-                        self.bands_card(ui, s);
-                    }
+                    // Compact draggable "EQ bands" tile with an × to remove.
+                    ui.horizontal(|ui| {
+                        ui.set_width(ui.available_width());
+                        let t = kit::tokens(ui);
+                        ui.dnd_drag_source(egui::Id::new("bands_tile"), PaneId::Bands, |ui| {
+                            let (r, _) = ui
+                                .allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+                            crate::ui::icons::draw(
+                                ui.painter(),
+                                crate::ui::icons::Icon::Grip,
+                                r,
+                                t.dim,
+                            );
+                            ui.add_space(6.0);
+                            ui.label(PaneId::Bands.title());
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if kit::icon_btn(
+                                ui,
+                                crate::ui::icons::Icon::Close,
+                                kit::CTRL_H,
+                                "Hide EQ bands",
+                            ) {
+                                self.pending_pane_action = Some(PaneAction::Hide(PaneId::Bands));
+                            }
+                        });
+                    });
                 } else {
-                    ui.add_space(8.0);
-                    ui.weak("EQ bands hidden — show it in Settings → Panes.");
+                    // Drop zone filling the centre to restore the bands table.
+                    let (_, payload) = ui.dnd_drop_zone::<PaneId, _>(egui::Frame::NONE, |ui| {
+                        ui.set_min_size(ui.available_size());
+                        ui.centered_and_justified(|ui| {
+                            ui.weak("drop EQ bands here to show it");
+                        });
+                    });
+                    if let Some(p) = payload {
+                        if *p == PaneId::Bands {
+                            self.pending_pane_action = Some(PaneAction::Show(PaneId::Bands));
+                        }
+                    }
                 }
             });
-        // Apply a pending arrange action now that both columns have finished
-        // rendering (never mutate the lists mid-iteration).
-        if let Some(action) = self.pending_pane_action.take() {
-            self.apply_pane_action(action);
-        }
+        // The pending action set here (or in `hero`'s reference row) is applied at
+        // the end of `shell`'s wide branch, after the hero renders.
     }
 
     /// Live (non-edit) layout: three columns — Effects | EQ bands (flexible
