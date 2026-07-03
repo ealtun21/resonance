@@ -41,7 +41,7 @@ pub const STATE_MAGIC: u32 = 0x4F50_4152;
 /// v6: + per-band dynamic EQ (enabled flag + threshold/range/attack/release).
 /// v7: + linear-phase EQ mode flag.
 /// v8: + transient per-band solo (audition one band; `SOLO_NONE` = off).
-/// v9: + audition mode (solo/listen) beside the solo_band index.
+/// v9: + audition mode (solo/listen) beside the `solo_band` index.
 pub const STATE_VERSION: u32 = 9;
 
 /// `solo_band` sentinel meaning "no band soloed" (the field is a fixed `u32`, so
@@ -325,9 +325,9 @@ impl ChainSnapshot {
             solo_band: chain
                 .audition
                 .map_or(SOLO_NONE, |a| audition_index_encode(a.band)),
-            audition_mode: chain
-                .audition
-                .map_or(0, |a| u32::from(a.mode == resonance_dsp::chain::AuditionMode::Listen)),
+            audition_mode: chain.audition.map_or(0, |a| {
+                u32::from(a.mode == resonance_dsp::chain::AuditionMode::Listen)
+            }),
             _pad_audition: 0,
             filters,
             route_channels,

@@ -1445,7 +1445,11 @@ fn render_band_row(
     let idx = BandColumnIndices::resolve(cols.len(), show_ch);
     let bar_rect = cols[idx.bar];
 
-    let audition = app.state.as_ref().and_then(|s| s.audition).filter(|a| a.band == i);
+    let audition = app
+        .state
+        .as_ref()
+        .and_then(|s| s.audition)
+        .filter(|a| a.band == i);
 
     // Row background: an auditioned band gets a warm tint (it overrides
     // everything else this frame, so it must never read as silently active);

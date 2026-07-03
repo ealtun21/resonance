@@ -424,10 +424,14 @@ impl GuiApp {
         // tooltip name the current mode.
         let cur = state.audition.filter(|a| a.band == i).map(|a| a.mode);
         let (icon, tip) = match cur {
-            None => (Icon::Solo, "Solo: audition only this band (click again → Listen)"),
-            Some(resonance_ipc::AuditionMode::Solo) => {
-                (Icon::Solo, "Solo (click → Listen: band-pass this band's region)")
-            }
+            None => (
+                Icon::Solo,
+                "Solo: audition only this band (click again → Listen)",
+            ),
+            Some(resonance_ipc::AuditionMode::Solo) => (
+                Icon::Solo,
+                "Solo (click → Listen: band-pass this band's region)",
+            ),
             Some(resonance_ipc::AuditionMode::Listen) => {
                 (Icon::Listen, "Listen: band-pass region (click → off)")
             }
@@ -435,7 +439,9 @@ impl GuiApp {
         if kit::icon_btn_active(ui, icon, 24.0, cur.is_some(), tip) {
             let next = match cur {
                 None => Some(resonance_ipc::AuditionMode::Solo),
-                Some(resonance_ipc::AuditionMode::Solo) => Some(resonance_ipc::AuditionMode::Listen),
+                Some(resonance_ipc::AuditionMode::Solo) => {
+                    Some(resonance_ipc::AuditionMode::Listen)
+                }
                 Some(resonance_ipc::AuditionMode::Listen) => None,
             };
             self.queue(Command::SetBandAudition {

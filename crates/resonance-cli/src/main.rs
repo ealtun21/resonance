@@ -624,7 +624,12 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
             if index == 0 {
                 bail!("band index is 1-based (see `status`)");
             }
-            let mode = match mode.as_deref().unwrap_or("solo").to_ascii_lowercase().as_str() {
+            let mode = match mode
+                .as_deref()
+                .unwrap_or("solo")
+                .to_ascii_lowercase()
+                .as_str()
+            {
                 "solo" | "s" => resonance_ipc::AuditionMode::Solo,
                 "listen" | "l" => resonance_ipc::AuditionMode::Listen,
                 other => bail!("mode must be solo or listen, got {other}"),

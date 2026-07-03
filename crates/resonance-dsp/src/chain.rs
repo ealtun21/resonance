@@ -854,8 +854,14 @@ mod tests {
             mode: AuditionMode::Listen,
         }));
         // In-band passes ~unity; far out-of-band is strongly attenuated by the BP.
-        assert!(gain_at(&mut c, 1_000.0) > 0.5, "1 kHz should pass in Listen");
-        assert!(gain_at(&mut c, 100.0) < 0.2, "100 Hz should be cut by the BP");
+        assert!(
+            gain_at(&mut c, 1_000.0) > 0.5,
+            "1 kHz should pass in Listen"
+        );
+        assert!(
+            gain_at(&mut c, 100.0) < 0.2,
+            "100 Hz should be cut by the BP"
+        );
         assert!(
             gain_at(&mut c, 10_000.0) < 0.2,
             "10 kHz should be cut by the BP"
@@ -884,7 +890,10 @@ mod tests {
             band: 0,
             mode: AuditionMode::Listen,
         }));
-        assert!(gain_at(&mut c, 100.0) > 0.7, "low shelf → LP: 100 Hz passes");
+        assert!(
+            gain_at(&mut c, 100.0) > 0.7,
+            "low shelf → LP: 100 Hz passes"
+        );
         assert!(gain_at(&mut c, 8_000.0) < 0.2, "low shelf → LP: 8 kHz cut");
     }
 
