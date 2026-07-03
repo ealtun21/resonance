@@ -121,14 +121,20 @@ mod tests {
 
     #[test]
     fn found_binary_is_reported_and_missing_is_not() {
+        // Held for the whole test body: serializes against every other
+        // env-mutating test in the crate (paths.rs, tray/autostart.rs) so a
+        // sibling's set_var/remove_var can't interleave with this PATH mutation.
+        let _env = crate::test_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Point PATH at a temp dir holding a fake `resonance-gui` and nothing else.
         let dir = std::env::temp_dir().join(format!("res-tray-uitest-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let gui = dir.join(Ui::Gui.bin_name());
         std::fs::write(&gui, b"#!/bin/sh\n").unwrap();
-        // SAFETY: single-threaded test mutating PATH for the duration of the
-        // call, restoring it before returning; no other test in this crate
-        // reads or writes PATH.
+        // SAFETY: this test mutates PATH for the duration of the call and
+        // restores it before returning; the env lock above prevents any other
+        // test in this crate from observing PATH mid-mutation.
         let saved = std::env::var_os("PATH");
         unsafe {
             std::env::set_var("PATH", &dir);

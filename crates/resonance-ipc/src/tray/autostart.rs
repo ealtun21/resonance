@@ -116,6 +116,11 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     use super::{PathBuf, io};
+    // The tray is `#![windows_subsystem = "windows"]` too, so plain
+    // `Command::new("reg")` would flash an empty console window on every call
+    // (same issue `service/windows.rs`'s `hidden()` was written to fix — reuse
+    // it here rather than duplicating the `CREATE_NO_WINDOW` flag).
+    use crate::service::windows::hidden;
 
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
     const VALUE: &str = "ResonanceTray";
@@ -125,7 +130,7 @@ mod imp {
     }
 
     pub fn is_enabled() -> bool {
-        std::process::Command::new("reg")
+        hidden("reg")
             .args(["query", &format!(r"HKCU\{RUN_KEY}"), "/v", VALUE])
             .output()
             .map(|o| o.status.success())
@@ -134,7 +139,7 @@ mod imp {
 
     pub fn enable() -> io::Result<()> {
         let exec = crate::tray::tray_bin();
-        let status = std::process::Command::new("reg")
+        let status = hidden("reg")
             .args([
                 "add",
                 &format!(r"HKCU\{RUN_KEY}"),
@@ -156,7 +161,7 @@ mod imp {
 
     pub fn disable() -> io::Result<()> {
         // Deleting a missing value returns nonzero; treat that as already-disabled.
-        let _ = std::process::Command::new("reg")
+        let _ = hidden("reg")
             .args(["delete", &format!(r"HKCU\{RUN_KEY}"), "/v", VALUE, "/f"])
             .output()?;
         Ok(())
@@ -180,7 +185,11 @@ mod imp {
     }
 
     pub fn disable() -> io::Result<()> {
-        Ok(())
+        // Matches `enable`'s error rather than a bare `Ok(())` (which would trip
+        // `clippy::unnecessary_wraps` under pedantic -D warnings) — see
+        // `service/stub.rs`'s convention of a shared `unsupported()` error for
+        // every operation on a platform with no real backend.
+        Err(io::Error::other("autostart unsupported on this platform"))
     }
 }
 
@@ -220,6 +229,13 @@ mod tests {
 
     #[test]
     fn enable_writes_autostart_desktop_then_disable_removes_it() {
+        // Held for the whole test body: serializes against every other
+        // env-mutating test in the crate (paths.rs config-dir/socket tests,
+        // tray.rs PATH test) so a sibling's set_var/remove_var can't fire
+        // mid-way through this one and leak into the real $HOME/.config.
+        let _env = crate::test_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Isolate XDG_CONFIG_HOME so we don't touch the real autostart dir.
         let tmp = std::env::temp_dir().join(format!("res-tray-autostart-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();

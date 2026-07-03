@@ -25,7 +25,11 @@ use std::process::Command;
 /// console window that flashes open/closed — the reported "cmd windows flashing
 /// under the resonance-gui icon" was the status poll spawning `tasklist`/`reg`
 /// here every ~1.5 s.
-fn hidden(program: &str) -> Command {
+///
+/// `pub(crate)` so `tray::autostart`'s windows backend (also
+/// `#![windows_subsystem = "windows"]`) can reuse it for its own `reg` calls
+/// instead of duplicating the flag.
+pub(crate) fn hidden(program: &str) -> Command {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut c = Command::new(program);

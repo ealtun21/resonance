@@ -14,6 +14,20 @@ pub mod tray;
 pub const SOCKET_PATH_ENV: &str = "RESONANCE_SOCKET";
 pub const DEFAULT_SOCKET_FILENAME: &str = "resonance.sock";
 
+/// Serializes every test in this crate that mutates process-global env vars
+/// (`XDG_CONFIG_HOME`, `RESONANCE_SOCKET`, `PATH`, …). `cargo test` runs
+/// `#[test]`s on parallel threads within a crate, and env vars are process-
+/// global, so two such tests running concurrently can race: one test's
+/// `set_var`/`remove_var` can fire mid-way through another's read, making it
+/// observe the real environment instead of its isolated override. Every test
+/// that touches an env var must acquire this lock for its entire body (bind
+/// the guard, don't drop it early) before mutating anything.
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
+    static L: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    L.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 /// Serializable channel-targeting bitset — the wire/disk mirror of
 /// `resonance_dsp::channel::ChannelMask` (kept here so resonance-dsp stays
 /// serde-free, exactly as [`BandType`] mirrors the DSP `FilterType`).

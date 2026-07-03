@@ -287,7 +287,12 @@ mod tests {
         // Both assertions live in ONE test so the `RESONANCE_SOCKET` mutation
         // can't race a sibling test reading the default — env is process-global
         // and the harness runs #[test]s on parallel threads. Assert the default
-        // first (env unset), then the override.
+        // first (env unset), then the override. The crate-wide env lock also
+        // guards against every OTHER env-mutating test in this crate (paths.rs,
+        // tray/autostart.rs, tray.rs) running concurrently.
+        let _env = crate::test_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let p = default_socket_path();
         assert_eq!(
             p.file_name().and_then(|s| s.to_str()),
@@ -311,7 +316,12 @@ mod tests {
     #[test]
     fn macos_config_dir_uses_application_support() {
         // Don't allow $XDG_CONFIG_HOME to perturb this — clear it for the
-        // duration of the call. Other tests don't read this either.
+        // duration of the call. The crate-wide env lock (held for the whole
+        // test body) serializes this against every other env-mutating test in
+        // the crate, so no concurrent test can observe or clobber it mid-flight.
+        let _env = crate::test_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let saved = std::env::var_os("XDG_CONFIG_HOME");
         unsafe {
             std::env::remove_var("XDG_CONFIG_HOME");
@@ -332,6 +342,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_config_dir_uses_dot_config() {
+        // Held for the whole test body — see the env-lock note above.
+        let _env = crate::test_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let saved = std::env::var_os("XDG_CONFIG_HOME");
         unsafe {
             std::env::remove_var("XDG_CONFIG_HOME");
