@@ -1322,11 +1322,12 @@ impl GuiApp {
     /// first; once a "Save & Quit" has had a moment to flush to the daemon,
     /// actually close the window.
     fn handle_quit_guard(&mut self, ctx: &egui::Context) {
+        let close_requested = ctx.input(|i| i.viewport().close_requested());
         // Close-to-tray takes precedence over the unsaved-edits guard: hiding
         // the window loses nothing (the process — and its state — keeps
         // running), so there's nothing to prompt-save. Only applies when a
         // tray is actually there to bring the window back.
-        if ctx.input(|i| i.viewport().close_requested()) {
+        if close_requested {
             let cfg = resonance_ipc::tray::TrayConfig::load();
             if cfg.close_gui_to_tray && resonance_ipc::tray::control::is_running() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -1335,7 +1336,7 @@ impl GuiApp {
                 return;
             }
         }
-        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close && self.dirty {
+        if close_requested && !self.allow_close && self.dirty {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             if !self.pending_quit {
                 self.pending_quit = true;
