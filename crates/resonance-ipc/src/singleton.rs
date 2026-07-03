@@ -20,17 +20,44 @@ fn raise_path(name: &str) -> PathBuf {
 }
 
 /// Held for the process lifetime. Dropping it removes the pidfile; on Unix the
-/// kernel drops the `flock` when the inner file closes.
+/// kernel drops the `flock` when the inner file closes. On Windows, dropping
+/// also removes this instance's entry from the in-process held-set (`held_set`)
+/// so a later `acquire` of the same name from the same process can succeed
+/// again.
 pub struct InstanceGuard {
     #[cfg(unix)]
     _file: std::fs::File,
+    #[cfg(windows)]
+    name: String,
     pid_path: PathBuf,
 }
 
 impl Drop for InstanceGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.pid_path);
+        #[cfg(windows)]
+        {
+            held_set()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&self.name);
+        }
     }
+}
+
+/// Process-global set of names currently held by *this* process on Windows.
+///
+/// `running_pid`-based liveness only tells us a live PID owns `name`; it
+/// cannot distinguish "another process holds it" from "this same process
+/// already holds it" (both read back our own PID). This set closes that gap
+/// so a second same-process `acquire` correctly loses, matching the Unix
+/// `flock` contract (an `flock` cannot be re-acquired exclusively by the same
+/// process either).
+#[cfg(windows)]
+fn held_set() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static HELD: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    HELD.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
 }
 
 /// Try to become the single live instance named `name`.
@@ -63,10 +90,24 @@ pub fn acquire(name: &str) -> std::io::Result<Option<InstanceGuard>> {
     }))
 }
 
+/// Try to become the single live instance named `name`.
+///
+/// Cross-process exclusion uses a pidfile liveness check (`running_pid`);
+/// same-process reentrancy is rejected via the in-process held-set
+/// (`held_set`), since a repeat `acquire` from the very process that already
+/// holds `name` would otherwise read back its own PID and be mistaken for the
+/// lock being free.
+///
 /// # Errors
 /// Returns an error if the pidfile cannot be written.
 #[cfg(windows)]
 pub fn acquire(name: &str) -> std::io::Result<Option<InstanceGuard>> {
+    let mut held = held_set()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if held.contains(name) {
+        return Ok(None);
+    }
     if let Some(pid) = running_pid(name) {
         if pid != std::process::id() {
             return Ok(None);
@@ -74,7 +115,11 @@ pub fn acquire(name: &str) -> std::io::Result<Option<InstanceGuard>> {
     }
     let pid_path = pid_path(name);
     std::fs::write(&pid_path, std::process::id().to_string())?;
-    Ok(Some(InstanceGuard { pid_path }))
+    held.insert(name.to_string());
+    Ok(Some(InstanceGuard {
+        name: name.to_string(),
+        pid_path,
+    }))
 }
 
 /// The live PID recorded for `name`, if the process is still alive.
