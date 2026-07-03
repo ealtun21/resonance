@@ -4,6 +4,7 @@
 
 pub mod autostart;
 pub mod config;
+pub mod control;
 
 pub use config::{LeftClick, TrayConfig};
 
