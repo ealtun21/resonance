@@ -24,6 +24,8 @@ finish-args:
   - --filesystem=xdg-run/pipewire-0
   - --socket=wayland
   - --socket=fallback-x11
+  # resonance-tray registers a StatusNotifier item on the session bus.
+  - --socket=session-bus
   - --device=dri
   # AutoEq corrections are downloaded over HTTPS.
   - --share=network

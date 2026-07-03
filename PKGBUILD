@@ -9,7 +9,9 @@ pkgdesc="Terminal EQ daemon for Linux/PipeWire with FxSound .fac and EqualizerAP
 arch=('x86_64')
 url="https://github.com/ealtun21/resonance"
 license=('GPL-3.0-or-later')
-depends=('pipewire' 'libpipewire')
+# dbus: the resonance-tray StatusNotifier tray (ksni) links libdbus at build
+# and talks to the session bus at runtime.
+depends=('pipewire' 'libpipewire' 'dbus')
 makedepends=('cargo' 'pkgconf')
 provides=('resonanced')
 conflicts=('resonance-eq-git')
