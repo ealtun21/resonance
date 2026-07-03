@@ -2112,7 +2112,7 @@ fn render_settings(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect) 
 }
 
 fn settings_footer_hint(s: &SettingsState) -> String {
-    let base = " [Tab/←→/1-6] switch  [↑↓] select  [Esc] close";
+    let base = " [Tab/←→/1-7] switch  [↑↓] select  [Esc] close";
     let ctx = match s.tab {
         0 => "  •  [Enter] load  [n] save  [e] export  [r] rename  [d] delete",
         1 => "  •  [m] map  [d] unmap",
@@ -2120,6 +2120,7 @@ fn settings_footer_hint(s: &SettingsState) -> String {
         3 => "  •  [Enter/Space] edit/toggle",
         4 => "  •  [Enter] run action",
         5 => "  •  [Enter] act  [+/-] customizer",
+        6 => "  •  [Enter] run action / cycle / edit",
         _ => "",
     };
     format!("{base}{ctx}")
@@ -2154,6 +2155,7 @@ fn render_settings_content(s: &SettingsState, app: &App, frame: &mut Frame, area
         3 => render_tab_prefs(s, app, frame, area),
         4 => render_tab_daemon(s, app, frame, area),
         5 => render_tab_reference(s, app, frame, area),
+        6 => render_tab_tray(s, frame, area),
         _ => {}
     }
 }
@@ -2635,6 +2637,99 @@ fn render_tab_daemon(s: &SettingsState, app: &App, frame: &mut Frame, area: Rect
         let line = Line::from(vec![
             Span::styled(format!("{marker} {label:<26}"), label_style),
             Span::styled(format!("  {desc}"), Style::default().fg(Color::DarkGray)),
+        ]);
+        frame.render_widget(Paragraph::new(line), row);
+    }
+}
+
+/// Tray tab: live tray process/autostart status plus the editable
+/// `tray.toml` fields, full parity with the GUI settings dialog's Tray
+/// section and the CLI's `resonance tray` / `resonance tray config`.
+/// Config is re-read from disk every frame (cheap; mirrors the GUI, which
+/// also reloads it on every dialog frame rather than caching it in app state).
+fn render_tab_tray(s: &SettingsState, frame: &mut Frame, area: Rect) {
+    use resonance_ipc::tray::{LeftClick, TrayConfig, autostart, control};
+
+    let cfg = TrayConfig::load();
+    let running = control::is_running();
+    let autostart_on = autostart::is_enabled();
+
+    let left_click = match cfg.left_click {
+        LeftClick::ToggleUi => "toggle",
+        LeftClick::Menu => "menu",
+    };
+
+    let items: [(&str, String, &str); 6] = [
+        (
+            "Tray",
+            if running { "running" } else { "stopped" }.to_string(),
+            "(Enter starts/stops resonance-tray)",
+        ),
+        (
+            "Autostart",
+            if autostart_on { "on" } else { "off" }.to_string(),
+            "(Enter toggles tray-at-login)",
+        ),
+        (
+            "Close-to-tray",
+            cfg.close_gui_to_tray.to_string(),
+            "(Enter toggles; GUI close hides to tray instead of quitting)",
+        ),
+        (
+            "Left-click",
+            left_click.to_string(),
+            "(Enter cycles toggle-ui/menu)",
+        ),
+        (
+            "Poll",
+            format!("{}s", cfg.poll_secs),
+            "(Enter edits; tray daemon-status poll interval)",
+        ),
+        (
+            "Recent",
+            cfg.recent_count.to_string(),
+            "(Enter edits; recent-presets count in the tray menu)",
+        ),
+    ];
+
+    for (i, (label, value, desc)) in items.iter().enumerate() {
+        let y = area.y + i as u16;
+        if y >= area.y + area.height {
+            break;
+        }
+        let row = Rect::new(area.x, y, area.width, 1);
+        let selected = s.cursor == i;
+        let editing = selected && s.text_input.is_some();
+
+        let value_display = if editing {
+            if let Some(ti) = &s.text_input {
+                let mut buf = ti.buf.clone();
+                buf.insert(ti.cursor, '█');
+                buf
+            } else {
+                value.clone()
+            }
+        } else {
+            value.clone()
+        };
+
+        let marker = if selected { "▶" } else { " " };
+        let label_style = if selected {
+            Style::default().fg(Color::Yellow).bold()
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let val_style = if editing {
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        let desc_style = Style::default().fg(Color::DarkGray);
+
+        let line = Line::from(vec![
+            Span::styled(format!("{marker} {label:<14}  "), label_style),
+            Span::styled(value_display, val_style),
+            Span::styled(format!("  {desc}"), desc_style),
         ]);
         frame.render_widget(Paragraph::new(line), row);
     }

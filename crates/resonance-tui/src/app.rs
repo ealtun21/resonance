@@ -2135,6 +2135,26 @@ impl App {
                     s.text_input = None;
                 }
             }
+            TextPurpose::TrayPoll => {
+                if let Ok(n) = buf.trim().parse::<u64>() {
+                    let mut cfg = resonance_ipc::tray::TrayConfig::load();
+                    cfg.poll_secs = n.clamp(1, 30);
+                    let _ = cfg.save();
+                }
+                if let InputMode::Settings(s) = &mut self.mode {
+                    s.text_input = None;
+                }
+            }
+            TextPurpose::TrayRecent => {
+                if let Ok(n) = buf.trim().parse::<usize>() {
+                    let mut cfg = resonance_ipc::tray::TrayConfig::load();
+                    cfg.recent_count = n.clamp(0, 20);
+                    let _ = cfg.save();
+                }
+                if let InputMode::Settings(s) = &mut self.mode {
+                    s.text_input = None;
+                }
+            }
         }
     }
 
@@ -2202,6 +2222,7 @@ impl App {
             3 => self.settings_pref_activate(),
             4 => self.settings_daemon_activate(),
             5 => self.settings_reference_activate(),
+            6 => self.settings_tray_activate(),
             // Tab 1 has no enter action; the wildcard covers it (and any other tab).
             _ => {}
         }
@@ -2279,6 +2300,84 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Tray tab actions: start/stop, toggle autostart, toggle close-to-tray,
+    /// cycle left-click, edit poll/recent (numeric — opens a `TextInput`).
+    /// Full parity with the GUI settings dialog's Tray section and the CLI's
+    /// `resonance tray` / `resonance tray config` subcommands.
+    fn settings_tray_activate(&mut self) {
+        use crate::settings::{TextInput, TextPurpose};
+        use resonance_ipc::tray::{LeftClick, TrayConfig, autostart, control};
+        let cursor = match &self.mode {
+            InputMode::Settings(s) => s.cursor,
+            _ => return,
+        };
+        match cursor {
+            0 => {
+                let r = if control::is_running() {
+                    control::stop().map(|_| ())
+                } else {
+                    control::start()
+                };
+                self.tray_action("tray", r);
+            }
+            1 => {
+                let r = if autostart::is_enabled() {
+                    autostart::disable()
+                } else {
+                    autostart::enable()
+                };
+                self.tray_action("tray autostart", r);
+            }
+            2 => {
+                let mut cfg = TrayConfig::load();
+                cfg.close_gui_to_tray = !cfg.close_gui_to_tray;
+                let r = cfg.save();
+                self.tray_action("close-to-tray", r);
+            }
+            3 => {
+                let mut cfg = TrayConfig::load();
+                cfg.left_click = match cfg.left_click {
+                    LeftClick::ToggleUi => LeftClick::Menu,
+                    LeftClick::Menu => LeftClick::ToggleUi,
+                };
+                let r = cfg.save();
+                self.tray_action("left-click", r);
+            }
+            4 => {
+                let v = TrayConfig::load().poll_secs.to_string();
+                if let InputMode::Settings(s) = &mut self.mode {
+                    s.text_input = Some(TextInput::new(
+                        v,
+                        TextPurpose::TrayPoll,
+                        "Poll seconds (1-30)",
+                    ));
+                }
+            }
+            5 => {
+                let v = TrayConfig::load().recent_count.to_string();
+                if let InputMode::Settings(s) = &mut self.mode {
+                    s.text_input = Some(TextInput::new(
+                        v,
+                        TextPurpose::TrayRecent,
+                        "Recent presets (0-20)",
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Run a tray control/config action and surface the result in the status
+    /// line (mirrors `daemon_action`, minus the daemon-connect follow-up which
+    /// doesn't apply to the tray process).
+    fn tray_action(&mut self, label: &str, r: std::io::Result<()>) {
+        let msg = match r {
+            Ok(()) => format!("{label}: ok"),
+            Err(e) => format!("{label}: failed: {e}"),
+        };
+        self.set_status(msg);
     }
 
     fn settings_load_profile(&mut self) {

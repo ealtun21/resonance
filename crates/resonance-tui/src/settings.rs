@@ -1,10 +1,11 @@
-pub const TABS: [&str; 6] = [
+pub const TABS: [&str; 7] = [
     "Profiles",
     "Mappings",
     "Devices",
     "Preferences",
     "Daemon",
     "Reference",
+    "Tray",
 ];
 
 #[derive(Debug, Clone)]
@@ -37,6 +38,8 @@ pub enum TextPurpose {
     PrefFps,
     PrefRefreshMs,
     PrefBandQ,
+    TrayPoll,
+    TrayRecent,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +130,8 @@ impl SettingsState {
             // Reference: on / target / measurement / browse-online / autoeq /
             // show-meas / normalize / bounds / tilt / bass / ear / treble / reset.
             5 => 12,
+            // Tray: running / autostart / close-to-tray / left-click / poll / recent.
+            6 => 5,
             _ => 0,
         }
     }

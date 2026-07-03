@@ -58,6 +58,11 @@ fn parse_fps_override() -> Option<u64> {
 
 fn run(terminal: &mut ratatui::DefaultTerminal, fps_override: Option<u64>) -> Result<()> {
     let mut app = App::new();
+    // Best-effort: record this TUI so tray status can see it. Multiple TUIs are
+    // allowed, so a lost race is fine — just skip recording.
+    let _tui_guard = resonance_ipc::singleton::acquire("resonance-tui")
+        .ok()
+        .flatten();
     app.connect();
     app.refresh_state();
 
@@ -341,6 +346,7 @@ fn handle_settings(app: &mut App, key: KeyEvent) {
         KeyCode::Char('4') => app.settings_set_tab(3),
         KeyCode::Char('5') => app.settings_set_tab(4),
         KeyCode::Char('6') => app.settings_set_tab(5),
+        KeyCode::Char('7') => app.settings_set_tab(6),
         KeyCode::Up | KeyCode::Char('k') => app.settings_move(-1),
         KeyCode::Down | KeyCode::Char('j') => app.settings_move(1),
         KeyCode::Enter | KeyCode::Char(' ') => app.settings_enter(),
