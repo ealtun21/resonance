@@ -68,18 +68,19 @@ impl ksni::Tray for TrayApp {
             .into(),
         );
 
-        // Presets submenu. The currently loaded preset (if any) is checked.
-        if m.daemon_up && !m.presets.is_empty() {
+        // Presets submenu — the saved profiles (what the GUI quick-loads). The
+        // currently loaded one (if any) is checked.
+        if m.daemon_up && !m.profiles.is_empty() {
             let sub: Vec<MenuItem<Self>> = m
-                .presets
+                .profiles
                 .iter()
                 .map(|p| {
-                    let path = p.clone();
+                    let name = p.clone();
                     let is_current = m.current.as_deref() == Some(p.as_str());
                     StandardItem {
-                        label: check_label(&basename(p), is_current),
+                        label: check_label(p, is_current),
                         activate: Box::new(move |t: &mut Self| {
-                            t.emit(MenuAction::LoadPreset(path.clone()));
+                            t.emit(MenuAction::LoadProfile(name.clone()));
                         }),
                         ..Default::default()
                     }
@@ -191,13 +192,6 @@ fn check_label(text: &str, on: bool) -> String {
     }
 }
 
-/// Human-readable preset name: the file stem, falling back to the full path.
-fn basename(path: &str) -> String {
-    std::path::Path::new(path)
-        .file_stem()
-        .map_or_else(|| path.to_string(), |s| s.to_string_lossy().into_owned())
-}
-
 /// ksni wants ARGB32 (network byte order); `image` gives RGBA8.
 fn rgba_to_argb(rgba: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(rgba.len());
@@ -245,12 +239,6 @@ mod tests {
         assert!(check_label("Power", true).starts_with('\u{2713}'));
         assert!(!check_label("Power", false).contains('\u{2713}'));
         assert!(check_label("Power", false).contains("Power"));
-    }
-
-    #[test]
-    fn basename_strips_dir_and_extension() {
-        assert_eq!(basename("/x/y/rock.fac"), "rock");
-        assert_eq!(basename("flat.txt"), "flat");
     }
 
     #[test]

@@ -9,7 +9,7 @@ use resonance_ipc::{Command, DaemonState};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuAction {
     TogglePower,
-    LoadPreset(String),
+    LoadProfile(String),
     DaemonStart,
     DaemonStop,
     DaemonRestart,
@@ -29,7 +29,10 @@ pub struct MenuModel {
     pub power: bool,
     pub status: String,
     pub tooltip: String,
-    pub presets: Vec<String>,
+    /// Quick-load list shown in the menu: profile names (the saved `.toml`
+    /// configs), mirroring the GUI's `LoadProfile` quick-load — NOT the on-disk
+    /// `.fac`/`.txt` preset files.
+    pub profiles: Vec<String>,
     pub current: Option<String>,
     pub uis: Vec<Ui>,
     pub gui_running: bool,
@@ -48,7 +51,7 @@ pub fn build_model(
     state: Option<&DaemonState>,
     cfg: &TrayConfig,
     uis: &[Ui],
-    presets: &[String],
+    profiles: &[String],
     tray_autostart: bool,
     daemon_autostart: bool,
     gui_running: bool,
@@ -80,14 +83,14 @@ pub fn build_model(
             None,
         ),
     };
-    let mut presets = presets.to_vec();
-    presets.truncate(cfg.recent_count);
+    let mut profiles = profiles.to_vec();
+    profiles.truncate(cfg.recent_count);
     MenuModel {
         daemon_up,
         power,
         status,
         tooltip,
-        presets,
+        profiles,
         current,
         uis: uis.to_vec(),
         gui_running,
@@ -119,7 +122,7 @@ pub fn plan_command(action: &MenuAction, state: Option<&DaemonState>) -> Option<
             let enabled = state.is_none_or(|s| s.enabled);
             Some(Command::SetPower { enabled: !enabled })
         }
-        MenuAction::LoadPreset(path) => Some(Command::LoadPreset { path: path.clone() }),
+        MenuAction::LoadProfile(name) => Some(Command::LoadProfile { name: name.clone() }),
         _ => None,
     }
 }
@@ -193,11 +196,11 @@ mod tests {
     }
 
     #[test]
-    fn load_preset_maps_to_load_command() {
+    fn load_profile_maps_to_load_command() {
         assert_eq!(
-            plan_command(&MenuAction::LoadPreset("/x/a.fac".into()), None),
-            Some(Command::LoadPreset {
-                path: "/x/a.fac".into()
+            plan_command(&MenuAction::LoadProfile("Rock".into()), None),
+            Some(Command::LoadProfile {
+                name: "Rock".into()
             })
         );
     }

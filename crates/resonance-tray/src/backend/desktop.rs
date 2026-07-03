@@ -65,13 +65,6 @@ fn menu_on_left_click(model: &MenuModel) -> bool {
     matches!(model.left_click, LeftClick::Menu)
 }
 
-/// Human-readable preset name: the file stem, falling back to the full path.
-fn basename(path: &str) -> String {
-    std::path::Path::new(path)
-        .file_stem()
-        .map_or_else(|| path.to_string(), |s| s.to_string_lossy().into_owned())
-}
-
 struct App {
     tray: Option<TrayIcon>,
     menu_ids: HashMap<MenuId, MenuAction>,
@@ -93,15 +86,16 @@ impl App {
             .insert(power.id().clone(), MenuAction::TogglePower);
         let _ = menu.append(&power);
 
-        // Presets submenu (only when the daemon is up and offers some). The
-        // currently loaded preset (if any) is shown checked.
-        if m.daemon_up && !m.presets.is_empty() {
+        // Presets submenu — the saved profiles (what the GUI quick-loads), shown
+        // only when the daemon is up and offers some. The currently loaded one
+        // (if any) is shown checked.
+        if m.daemon_up && !m.profiles.is_empty() {
             let sub = Submenu::new("Presets", true);
-            for p in &m.presets {
+            for p in &m.profiles {
                 let is_current = m.current.as_deref() == Some(p.as_str());
-                let item = CheckMenuItem::new(basename(p), true, is_current, None);
+                let item = CheckMenuItem::new(p.as_str(), true, is_current, None);
                 self.menu_ids
-                    .insert(item.id().clone(), MenuAction::LoadPreset(p.clone()));
+                    .insert(item.id().clone(), MenuAction::LoadProfile(p.clone()));
                 let _ = sub.append(&item);
             }
             let _ = menu.append(&sub);

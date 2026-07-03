@@ -18,28 +18,28 @@ pub fn poll_state() -> Option<DaemonState> {
     client()?.get_state().ok()
 }
 
-/// Extract up to `limit` preset paths from a `ListPresets` response.
+/// Extract up to `limit` names from a `PresetList` response (the reply type
+/// shared by the profile and preset listings), in order.
 #[must_use]
-pub fn presets_from_response(resp: &Response, limit: usize) -> Vec<String> {
+pub fn names_from_response(resp: &Response, limit: usize) -> Vec<String> {
     if let Response::PresetList(list) = resp {
-        list.iter().take(limit).map(|p| preset_path(p)).collect()
+        list.iter().take(limit).cloned().collect()
     } else {
         Vec::new()
     }
 }
 
-fn preset_path(entry: &str) -> String {
-    entry.to_owned()
-}
-
-/// Fetch preset paths (best-effort; empty when the daemon is down).
+/// Fetch profile names (best-effort; empty when the daemon is down). The tray's
+/// quick-load list mirrors the GUI, which loads *profiles* (the saved `.toml`
+/// configs) via `LoadProfile` — not the on-disk `.fac`/`.txt` preset files that
+/// `ListPresets` returns.
 #[must_use]
-pub fn fetch_presets(limit: usize) -> Vec<String> {
+pub fn fetch_profiles(limit: usize) -> Vec<String> {
     let Some(mut c) = client() else {
         return Vec::new();
     };
-    match c.send_recv(Command::ListPresets { dir: None }) {
-        Ok(resp) => presets_from_response(&resp, limit),
+    match c.send_recv(Command::ListProfiles) {
+        Ok(resp) => names_from_response(&resp, limit),
         Err(_) => Vec::new(),
     }
 }
@@ -53,7 +53,7 @@ pub fn execute(action: &MenuAction) -> anyhow::Result<()> {
     use resonance_ipc::{service, tray};
     // Daemon-facing commands. Only `TogglePower` needs a fresh state (to
     // invert it); fetching it unconditionally would open a second socket
-    // (state poll + send) for every action, including ones like `LoadPreset`
+    // (state poll + send) for every action, including ones like `LoadProfile`
     // that ignore state entirely.
     let state = matches!(action, MenuAction::TogglePower)
         .then(poll_state)
@@ -103,7 +103,7 @@ pub fn execute(action: &MenuAction) -> anyhow::Result<()> {
             std::process::exit(0);
         }
         // Handled by plan_command above.
-        MenuAction::TogglePower | MenuAction::LoadPreset(_) => {}
+        MenuAction::TogglePower | MenuAction::LoadProfile(_) => {}
     }
     Ok(())
 }
@@ -114,15 +114,15 @@ mod tests {
     use resonance_ipc::Response;
 
     #[test]
-    fn preset_list_is_limited_and_extracts_paths() {
-        let resp = Response::PresetList(vec!["a.fac".into(), "b.fac".into(), "c.fac".into()]);
-        let out = presets_from_response(&resp, 2);
-        // Truncated to `limit`, paths extracted in order.
-        assert_eq!(out, vec!["a.fac".to_string(), "b.fac".to_string()]);
+    fn name_list_is_limited_in_order() {
+        let resp = Response::PresetList(vec!["Rock".into(), "Jazz".into(), "Flat".into()]);
+        let out = names_from_response(&resp, 2);
+        // Truncated to `limit`, names in order.
+        assert_eq!(out, vec!["Rock".to_string(), "Jazz".to_string()]);
     }
 
     #[test]
     fn non_list_response_yields_empty() {
-        assert!(presets_from_response(&Response::Ok, 8).is_empty());
+        assert!(names_from_response(&Response::Ok, 8).is_empty());
     }
 }

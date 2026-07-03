@@ -18,18 +18,18 @@ fn should_run(uis: &[Ui]) -> bool {
     !uis.is_empty()
 }
 
-/// Assemble the current display model: fresh config, daemon state, presets,
+/// Assemble the current display model: fresh config, daemon state, profiles,
 /// and the tray/daemon-autostart + GUI-running flags. Called on every poll
 /// tick and after every action so the UI never drifts from live state.
 fn snapshot(uis: &[Ui]) -> MenuModel {
     let cfg = tray::TrayConfig::load();
     let state = daemon::poll_state();
-    let presets = daemon::fetch_presets(cfg.recent_count);
+    let profiles = daemon::fetch_profiles(cfg.recent_count);
     build_model(
         state.as_ref(),
         &cfg,
         uis,
-        &presets,
+        &profiles,
         tray::autostart::is_enabled(),
         resonance_ipc::service::is_enabled(),
         resonance_ipc::singleton::running_pid(GUI_INSTANCE).is_some(),
