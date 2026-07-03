@@ -137,36 +137,8 @@ impl GuiApp {
                         }
                     }
 
-                    // ── Panes ─────────────────────────────────────────────────
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new("Panes").strong());
-                    ui.weak(
-                        "Show or hide panels to declutter the view. Hidden panels \
-                         stop rendering entirely; the graph fills whatever's left.",
-                    );
-                    ui.add_space(4.0);
-                    for pane in crate::panes::PaneId::ALL {
-                        let mut visible = self.pane_visible(pane);
-                        if ui.checkbox(&mut visible, pane.title()).changed() {
-                            if visible {
-                                self.hidden_panes.remove(&pane);
-                            } else {
-                                self.hidden_panes.insert(pane);
-                            }
-                        }
-                    }
-                    ui.add_space(4.0);
-                    if ui
-                        .add_enabled(
-                            !self.hidden_panes.is_empty(),
-                            egui::Button::new("Show all panes"),
-                        )
-                        .clicked()
-                    {
-                        self.hidden_panes.clear();
-                    }
+                    // Pane show/hide lives in arrange mode now (☰ → Edit layout):
+                    // its Hidden tray is the single place to add/remove panes.
 
                     // ── Channels ──────────────────────────────────────────────
                     ui.add_space(8.0);
