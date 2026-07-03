@@ -102,6 +102,15 @@ enum Sub {
         /// Compare against a saved baseline instead of the EQ prediction
         #[arg(long)]
         baseline: Option<String>,
+        /// Save a full-waveform broadband capture for A/B phase comparison
+        #[arg(long)]
+        save_capture: Option<String>,
+        /// Compare a fresh broadband capture against a saved one (phase-audibility)
+        #[arg(long)]
+        compare: Option<String>,
+        /// Broadband stimulus/capture length in seconds (A/B compare)
+        #[arg(long, default_value_t = 2.0)]
+        compare_secs: f64,
         /// Print machine-readable JSON
         #[arg(long)]
         json: bool,
@@ -419,6 +428,9 @@ fn main() -> Result<()> {
         capture_ms,
         save_baseline,
         baseline,
+        save_capture,
+        compare,
+        compare_secs,
         json,
     } = sub
     {
@@ -438,6 +450,9 @@ fn main() -> Result<()> {
             capture_ms: capture_ms.max(100),
             save_baseline,
             baseline,
+            save_capture,
+            compare,
+            compare_secs,
             json,
         });
     }
