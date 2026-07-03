@@ -13,7 +13,7 @@
 
 use crate::icons;
 use crate::menu::{MenuAction, MenuModel};
-use resonance_ipc::tray::Ui;
+use resonance_ipc::tray::{LeftClick, Ui};
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
 use tray_icon::menu::{
@@ -43,6 +43,14 @@ fn to_icon(model: &MenuModel) -> Icon {
         icons::bypassed()
     };
     Icon::from_rgba(i.rgba, i.width, i.height).expect("tray icon rgba is valid")
+}
+
+/// Whether a left click should pop the native context menu, per the
+/// configured [`LeftClick`] mode. `Menu` → yes; `ToggleUi` → no, leaving our
+/// own `MenuAction::LeftClick` → open-UI dispatch as the single action (tray-
+/// icon's own default is `true`, which would otherwise double up with it).
+fn menu_on_left_click(model: &MenuModel) -> bool {
+    matches!(model.left_click, LeftClick::Menu)
 }
 
 /// Human-readable preset name: the file stem, falling back to the full path.
@@ -135,15 +143,18 @@ impl App {
         menu
     }
 
-    /// Push the current model into the live tray (menu, icon, tooltip).
+    /// Push the current model into the live tray (menu, icon, tooltip, and
+    /// the left-click-opens-menu setting, so a config reload takes effect
+    /// without restarting the tray).
     fn refresh_tray(&mut self) {
         let menu = self.rebuild_menu();
         let icon = to_icon(&self.model);
-        let tooltip = self.model.tooltip.clone();
+        let show_menu_on_left_click = menu_on_left_click(&self.model);
         if let Some(tray) = &self.tray {
             tray.set_menu(Some(Box::new(menu)));
             let _ = tray.set_icon(Some(icon));
-            let _ = tray.set_tooltip(Some(&tooltip));
+            let _ = tray.set_tooltip(Some(&self.model.tooltip));
+            tray.set_show_menu_on_left_click(show_menu_on_left_click);
         }
     }
 
@@ -169,6 +180,7 @@ impl ApplicationHandler<UserEvent> for App {
                 .with_menu(Box::new(menu))
                 .with_tooltip(&self.model.tooltip)
                 .with_icon(icon)
+                .with_menu_on_left_click(menu_on_left_click(&self.model))
                 .build()
                 .ok();
         }

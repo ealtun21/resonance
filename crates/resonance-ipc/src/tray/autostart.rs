@@ -133,8 +133,7 @@ mod imp {
         hidden("reg")
             .args(["query", &format!(r"HKCU\{RUN_KEY}"), "/v", VALUE])
             .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+            .is_ok_and(|o| o.status.success())
     }
 
     pub fn enable() -> io::Result<()> {

@@ -9,6 +9,7 @@ fn runtime_dir() -> PathBuf {
     crate::paths::runtime_dir()
 }
 
+#[cfg(unix)]
 fn lock_path(name: &str) -> PathBuf {
     runtime_dir().join(format!("{name}.lock"))
 }
