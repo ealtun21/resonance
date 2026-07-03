@@ -34,7 +34,6 @@ pub fn presets_from_response(resp: &Response, limit: usize) -> Vec<String> {
     }
 }
 
-// Adapt to the actual element type of Response::PresetList.
 fn preset_path(entry: &str) -> String {
     entry.to_owned()
 }
@@ -58,8 +57,14 @@ pub fn fetch_presets(limit: usize) -> Vec<String> {
 /// Returns an error if the underlying IPC send or control operation fails.
 pub fn execute(action: &MenuAction) -> anyhow::Result<()> {
     use resonance_ipc::{service, tray};
-    // Daemon-facing commands (need a fresh state for TogglePower).
-    if let Some(cmd) = plan_command(action, poll_state().as_ref()) {
+    // Daemon-facing commands. Only `TogglePower` needs a fresh state (to
+    // invert it); fetching it unconditionally would open a second socket
+    // (state poll + send) for every action, including ones like `LoadPreset`
+    // that ignore state entirely.
+    let state = matches!(action, MenuAction::TogglePower)
+        .then(poll_state)
+        .flatten();
+    if let Some(cmd) = plan_command(action, state.as_ref()) {
         let mut c = client().ok_or_else(|| anyhow::anyhow!("daemon not reachable"))?;
         c.send(cmd)?;
         return Ok(());
@@ -108,8 +113,10 @@ mod tests {
 
     #[test]
     fn preset_list_is_limited_and_extracts_paths() {
-        let resp = Response::PresetList(vec![]);
-        assert!(presets_from_response(&resp, 8).is_empty());
+        let resp = Response::PresetList(vec!["a.fac".into(), "b.fac".into(), "c.fac".into()]);
+        let out = presets_from_response(&resp, 2);
+        // Truncated to `limit`, paths extracted in order.
+        assert_eq!(out, vec!["a.fac".to_string(), "b.fac".to_string()]);
     }
 
     #[test]
