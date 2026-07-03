@@ -1,11 +1,5 @@
 //! Talks to the running daemon over the existing IPC socket, and dispatches the
 //! non-daemon actions (service lifecycle, UI launch, autostart).
-//!
-//! Backend wiring (calling these from the tray event loop) lands in Task 12;
-//! until then nothing but the inline tests exercises this module, so the
-//! module-level allow keeps that from tripping `-D warnings`.
-// wired in Task 12
-#![allow(dead_code)]
 
 use crate::menu::{MenuAction, plan_command};
 use resonance_ipc::transport::SyncClient;

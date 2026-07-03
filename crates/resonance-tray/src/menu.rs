@@ -1,11 +1,4 @@
 //! Backend-agnostic menu model + the pure action→Command mapping.
-//!
-//! Wiring into the running tray (calling `build_model`/`plan_command` from the
-//! backend event loop) lands in Task 12; until then nothing but the inline
-//! tests exercises this module, so the module-level allow keeps that from
-//! tripping `-D warnings`.
-// wired in Task 12
-#![allow(dead_code)]
 
 use resonance_ipc::tray::{LeftClick, TrayConfig, Ui};
 use resonance_ipc::{Command, DaemonState};

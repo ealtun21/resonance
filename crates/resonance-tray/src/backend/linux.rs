@@ -1,8 +1,4 @@
 //! Linux tray via ksni (`StatusNotifierItem` over D-Bus). No GTK.
-//!
-//! Wired into `main` in Task 12; dead until then.
-// wired in Task 12
-#![allow(dead_code)]
 
 use crate::icons;
 use crate::menu::{MenuAction, MenuModel};
@@ -72,15 +68,16 @@ impl ksni::Tray for TrayApp {
             .into(),
         );
 
-        // Presets submenu.
+        // Presets submenu. The currently loaded preset (if any) is checked.
         if m.daemon_up && !m.presets.is_empty() {
             let sub: Vec<MenuItem<Self>> = m
                 .presets
                 .iter()
                 .map(|p| {
                     let path = p.clone();
+                    let is_current = m.current.as_deref() == Some(p.as_str());
                     StandardItem {
-                        label: basename(p),
+                        label: check_label(&basename(p), is_current),
                         activate: Box::new(move |t: &mut Self| {
                             t.emit(MenuAction::LoadPreset(path.clone()));
                         }),

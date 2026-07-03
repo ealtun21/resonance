@@ -1,11 +1,6 @@
 //! Tray icon pixels. A single committed PNG is decoded to RGBA at startup; the
 //! "bypassed" and macOS "template" variants are derived in-process, so we ship
 //! one asset and carry no runtime SVG rasterizer.
-//!
-//! Backend wiring (calling these from `main`) lands in Task 12; until then
-//! nothing but the inline tests exercises this module, so the module-level
-//! allow keeps that from tripping `-D warnings`.
-#![allow(dead_code)]
 
 const ICON_PNG: &[u8] = include_bytes!("../assets/icon-64.png");
 
@@ -27,12 +22,17 @@ fn decode() -> IconRgba {
     }
 }
 
+/// Windows/Linux only: macOS renders [`template()`] instead (see there for why
+/// the active/bypassed color distinction doesn't apply under a template icon).
+#[cfg(not(target_os = "macos"))]
 #[must_use]
 pub fn active() -> IconRgba {
     decode()
 }
 
-/// Desaturated + dimmed copy (color only; alpha preserved) for the bypassed state.
+/// Desaturated + dimmed copy (color only; alpha preserved) for the bypassed
+/// state. Windows/Linux only — see [`active`].
+#[cfg(not(target_os = "macos"))]
 #[must_use]
 pub fn bypassed() -> IconRgba {
     let mut icon = decode();
@@ -49,7 +49,9 @@ pub fn bypassed() -> IconRgba {
 }
 
 /// macOS template image: pure black, original alpha — the OS tints it for the
-/// current menu-bar appearance.
+/// current menu-bar appearance. macOS-only: the desktop backend is the sole
+/// caller, and only under `cfg(target_os = "macos")`.
+#[cfg(target_os = "macos")]
 #[must_use]
 pub fn template() -> IconRgba {
     let mut icon = decode();
@@ -65,6 +67,7 @@ pub fn template() -> IconRgba {
 mod tests {
     use super::*;
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn active_decodes_to_square_rgba() {
         let a = active();
@@ -76,6 +79,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn bypassed_is_same_size_but_different_pixels() {
         let a = active();
@@ -86,5 +90,19 @@ mod tests {
         let a_alpha: Vec<u8> = a.rgba.iter().skip(3).step_by(4).copied().collect();
         let b_alpha: Vec<u8> = b.rgba.iter().skip(3).step_by(4).copied().collect();
         assert_eq!(a_alpha, b_alpha, "shape (alpha) unchanged");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn template_zeroes_color_but_preserves_alpha() {
+        let plain = decode();
+        let t = template();
+        assert_eq!((plain.width, plain.height), (t.width, t.height));
+        for px in t.rgba.chunks_exact(4) {
+            assert_eq!(&px[..3], &[0, 0, 0], "template color is pure black");
+        }
+        let plain_alpha: Vec<u8> = plain.rgba.iter().skip(3).step_by(4).copied().collect();
+        let t_alpha: Vec<u8> = t.rgba.iter().skip(3).step_by(4).copied().collect();
+        assert_eq!(plain_alpha, t_alpha, "shape (alpha) unchanged");
     }
 }

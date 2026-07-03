@@ -1,11 +1,6 @@
 //! Platform tray backend. One implementation per OS, selected by cfg. The
 //! chosen `run()` consumes `MenuModel` updates and emits `MenuAction`s; it blocks
 //! for the process lifetime (required so macOS can own the main run loop).
-//!
-//! `run` is not called until the process is wired up in Task 12, so the whole
-//! module is dead until then.
-// wired in Task 12
-#![allow(dead_code)]
 
 use crate::menu::{MenuAction, MenuModel};
 use std::sync::mpsc::{Receiver, Sender};

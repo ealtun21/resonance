@@ -6,10 +6,7 @@
 //! threads relay into the loop as [`UserEvent`]s via an `EventLoopProxy`. The
 //! loop sits in [`ControlFlow::Wait`] so it blocks (near-zero CPU) while idle.
 //!
-//! Compiled only on Windows/macOS (see `backend.rs` cfg). Wired into `main` in
-//! Task 12; dead until then.
-// wired in Task 12
-#![allow(dead_code)]
+//! Compiled only on Windows/macOS (see `backend.rs` cfg).
 
 use crate::icons;
 use crate::menu::{MenuAction, MenuModel};
@@ -36,6 +33,21 @@ enum UserEvent {
 }
 
 /// Build the platform icon for the current power state.
+///
+/// **macOS:** renders [`icons::template()`] — a template image, so the OS
+/// tints it to match the current menu-bar appearance (light/dark) instead of
+/// us guessing a fixed color. Template images carry shape via the alpha
+/// channel only; the OS discards RGB, so the active/bypassed color swap the
+/// other platforms use wouldn't be visible here. Power state stays visible
+/// through the checkable "Power" menu item and the tooltip text.
+#[cfg(target_os = "macos")]
+fn to_icon(_model: &MenuModel) -> Icon {
+    let i = icons::template();
+    Icon::from_rgba(i.rgba, i.width, i.height).expect("tray icon rgba is valid")
+}
+
+/// Build the platform icon for the current power state.
+#[cfg(target_os = "windows")]
 fn to_icon(model: &MenuModel) -> Icon {
     let i = if model.power {
         icons::active()
@@ -81,11 +93,13 @@ impl App {
             .insert(power.id().clone(), MenuAction::TogglePower);
         let _ = menu.append(&power);
 
-        // Presets submenu (only when the daemon is up and offers some).
+        // Presets submenu (only when the daemon is up and offers some). The
+        // currently loaded preset (if any) is shown checked.
         if m.daemon_up && !m.presets.is_empty() {
             let sub = Submenu::new("Presets", true);
             for p in &m.presets {
-                let item = MenuItem::new(basename(p), true, None);
+                let is_current = m.current.as_deref() == Some(p.as_str());
+                let item = CheckMenuItem::new(basename(p), true, is_current, None);
                 self.menu_ids
                     .insert(item.id().clone(), MenuAction::LoadPreset(p.clone()));
                 let _ = sub.append(&item);
@@ -152,7 +166,9 @@ impl App {
         let show_menu_on_left_click = menu_on_left_click(&self.model);
         if let Some(tray) = &self.tray {
             tray.set_menu(Some(Box::new(menu)));
-            let _ = tray.set_icon(Some(icon));
+            // `_with_as_template` is a no-op flag on Windows; on macOS it
+            // keeps the icon marked as a template so the OS re-tints it.
+            let _ = tray.set_icon_with_as_template(Some(icon), cfg!(target_os = "macos"));
             let _ = tray.set_tooltip(Some(&self.model.tooltip));
             tray.set_show_menu_on_left_click(show_menu_on_left_click);
         }
@@ -180,6 +196,9 @@ impl ApplicationHandler<UserEvent> for App {
                 .with_menu(Box::new(menu))
                 .with_tooltip(&self.model.tooltip)
                 .with_icon(icon)
+                // No-op on Windows; on macOS marks the icon as a template so
+                // the OS tints it for the current menu-bar appearance.
+                .with_icon_as_template(cfg!(target_os = "macos"))
                 .with_menu_on_left_click(menu_on_left_click(&self.model))
                 .build()
                 .ok();
