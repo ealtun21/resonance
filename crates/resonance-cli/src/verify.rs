@@ -15,6 +15,14 @@
 //!   `--save-baseline`, change one thing, run again with `--baseline` and the
 //!   deviation column shows exactly what that change did to the response.
 //!
+//! A separate **A/B compare** mode (`--save-capture` / `--compare`) plays a
+//! deterministic broadband stimulus and captures the whole waveform, so it can
+//! catch changes the per-tone response can't: run once with `--save-capture`,
+//! change one thing, run again with `--compare` and it reports the per-band
+//! tonal delta, the best-aligned null depth, and a verdict — TONAL / PHASE-ONLY
+//! (tonally identical, only the timing differs, as with minimum vs linear phase)
+//! / identical.
+//!
 //! On Windows the daemon owns no audio path (the APO inside audiodg does), so
 //! instead of `CaptureOutput` the harness plays its tone with a WASAPI output
 //! stream and captures the same endpoint's **loopback** (the engine's rendered
@@ -32,7 +40,20 @@ pub struct Options {
     pub capture_ms: u64,
     pub save_baseline: Option<String>,
     pub baseline: Option<String>,
+    /// Save a full-waveform capture of the broadband stimulus for A/B compare.
+    pub save_capture: Option<String>,
+    /// Compare a fresh stimulus capture against a saved one (phase-audibility).
+    pub compare: Option<String>,
+    /// Length of the broadband stimulus capture, in seconds (compare mode).
+    pub compare_secs: f64,
     pub json: bool,
+}
+
+/// A saved full-waveform capture of the broadband stimulus (A/B compare).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CaptureFile {
+    rate: f64,
+    samples: Vec<f32>,
 }
 
 /// A saved measured response, for A/B (before/after) comparisons.
@@ -78,6 +99,12 @@ pub fn run(o: &Options) -> Result<()> {
     if rate <= 0.0 || rate.is_nan() {
         bail!("daemon reports no live sample rate — is audio running?");
     }
+
+    // A/B compare is a broadband full-waveform path, not the tone-probe loop.
+    if o.save_capture.is_some() || o.compare.is_some() {
+        return run_compare(o, rate);
+    }
+
     for &f in &o.freqs {
         if f <= 0.0 || f.is_nan() || f >= rate / 2.0 {
             bail!(
@@ -302,6 +329,136 @@ fn report(state: &DaemonState, mode: &Mode, rows: &[Row], o: &Options, rate: f64
     }
 }
 
+// ── Broadband A/B compare (issue #57) ────────────────────────────────────────
+
+/// Play a deterministic broadband stimulus, capture the post-DSP waveform, then
+/// either save it (`--save-capture`) or compare it against a saved capture
+/// (`--compare`) reporting per-band tonal delta, null depth, and a verdict.
+fn run_compare(o: &Options, rate: f64) -> Result<()> {
+    let secs = o.compare_secs.clamp(0.25, 30.0);
+
+    // A null test is meaningless if other audio is playing.
+    let pre = ambient_capture(rate, 400)?;
+    if rms_db(&pre) > -45.0 {
+        eprintln!("warning: system audio is playing — A/B compare results will be unreliable");
+    }
+
+    let (cap_rate, cur) = capture_stimulus(rate, secs, o)?;
+    if (cur.len() as f64) < cap_rate * secs * 0.5 {
+        bail!(
+            "captured only {} samples — audio is not routed through Resonance",
+            cur.len()
+        );
+    }
+
+    if let Some(path) = &o.save_capture {
+        let f = CaptureFile {
+            rate: cap_rate,
+            samples: cur.clone(),
+        };
+        std::fs::write(path, serde_json::to_string(&f)?)
+            .with_context(|| format!("write capture '{path}'"))?;
+        if o.compare.is_none() {
+            if o.json {
+                println!(
+                    "{}",
+                    serde_json::json!({"saved": path, "rate": cap_rate, "samples": cur.len()})
+                );
+            } else {
+                println!(
+                    "saved {}-sample capture to {path} @ {cap_rate:.0} Hz",
+                    cur.len()
+                );
+            }
+            return Ok(());
+        }
+    }
+
+    let path = o
+        .compare
+        .as_ref()
+        .expect("run_compare reached comparison without a --compare path");
+    let text = std::fs::read_to_string(path).with_context(|| format!("read capture '{path}'"))?;
+    let base: CaptureFile =
+        serde_json::from_str(&text).with_context(|| format!("parse capture '{path}'"))?;
+    if (base.rate - cap_rate).abs() > 1.0 {
+        bail!(
+            "baseline capture is {:.0} Hz but the live path is {cap_rate:.0} Hz — re-save it",
+            base.rate
+        );
+    }
+
+    let a: Vec<f64> = base.samples.iter().map(|&s| f64::from(s)).collect();
+    let b: Vec<f64> = cur.iter().map(|&s| f64::from(s)).collect();
+    report_compare(&a, &b, cap_rate, o);
+    Ok(())
+}
+
+/// Print the A/B comparison: per-band tonal delta, best-aligned null depth, and
+/// the TONAL / PHASE-ONLY / identical verdict.
+fn report_compare(a: &[f64], b: &[f64], rate: f64, o: &Options) {
+    let bands = band_deltas(a, b, rate);
+    let null = null_depth_db(a, b, rate);
+    // Reuse the FR tolerance as the per-band tonal threshold (floored so a tight
+    // tolerance doesn't flag ordinary measurement noise as a tonal change).
+    let tonal_thresh = o.tolerance_db.max(0.25);
+    let null_floor = -40.0;
+    let v = verdict(&bands, null, tonal_thresh, null_floor);
+
+    if o.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "rate": rate,
+                "null_depth_db": null,
+                "bands": bands.iter().map(|d| serde_json::json!({
+                    "center_hz": d.center_hz, "delta_db": d.delta_db
+                })).collect::<Vec<_>>(),
+                "verdict": match v {
+                    Verdict::Identical => "identical",
+                    Verdict::PhaseOnly => "phase-only",
+                    Verdict::Tonal => "tonal",
+                },
+            })
+        );
+    } else {
+        let mut out = String::new();
+        let _ = writeln!(out, "{:>9}  {:>8}", "band", "delta");
+        for d in &bands {
+            let _ = writeln!(out, "{:>7.0}Hz  {:>+6.2}dB", d.center_hz, d.delta_db);
+        }
+        let _ = writeln!(out, "\nbest-aligned null depth: {null:+.1} dB");
+        let label = match v {
+            Verdict::Identical => "identical (deep null, matched spectrum)",
+            Verdict::PhaseOnly => {
+                "PHASE-ONLY difference (tonally identical, timing differs — \
+                 audible to sensitive listeners)"
+            }
+            Verdict::Tonal => "TONAL difference (the magnitude spectrum moved)",
+        };
+        let _ = writeln!(out, "verdict: {label}");
+        print!("{out}");
+    }
+}
+
+/// Deterministic broadband stimulus (fixed-seed pink-ish noise, faded). Being
+/// bit-identical every run is what makes two captures of it directly comparable.
+fn stimulus_samples(rate: f64, secs: f64, amp: f64) -> Vec<f32> {
+    let n = (rate * secs).max(1.0) as usize;
+    let mut s: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut lp = 0.0f64;
+    let fade = ((rate * 0.02) as usize).max(1); // 20 ms in/out — no clicks
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        s = s.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        let white = ((s >> 33) as f64 / (1u64 << 31) as f64) - 1.0; // [-1, 1)
+        lp += 0.15 * (white - lp); // gentle low tilt, keeps full-band content
+        let env = ((i.min(n.saturating_sub(1) - i)) as f64 / fade as f64).min(1.0);
+        out.push((amp * env * (0.6 * white + 0.4 * lp)) as f32);
+    }
+    out
+}
+
 // ── Platform measurement paths ───────────────────────────────────────────────
 //
 // Unix (Linux/macOS): play the tone with the system player (it routes through
@@ -339,6 +496,30 @@ fn measure_tone(freq: f64, rate: f64, o: &Options) -> Result<(f64, Vec<f32>)> {
 #[cfg(windows)]
 fn measure_tone(freq: f64, _rate: f64, o: &Options) -> Result<(f64, Vec<f32>)> {
     win::tone_and_loopback(freq, o.amp, o.settle_ms, o.capture_ms)
+}
+
+/// Play the broadband stimulus and capture `secs` of the processed output.
+#[cfg(not(windows))]
+fn capture_stimulus(rate: f64, secs: f64, o: &Options) -> Result<(f64, Vec<f32>)> {
+    // A tail past the capture window so the captured region sits fully inside
+    // the stimulus even with player start-up jitter.
+    let stim = stimulus_samples(rate, secs + 1.0, o.amp);
+    let wav = write_samples_wav(&stim, rate)?;
+    let mut child = spawn_player(&wav)?;
+    std::thread::sleep(std::time::Duration::from_millis(
+        o.settle_ms + (secs * 1000.0) as u64,
+    ));
+    let frames = (rate * secs) as u32;
+    let result = capture(frames);
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_file(&wav);
+    result
+}
+
+#[cfg(windows)]
+fn capture_stimulus(_rate: f64, secs: f64, o: &Options) -> Result<(f64, Vec<f32>)> {
+    win::stimulus_and_loopback(o.amp, o.settle_ms, (secs * 1000.0) as u64)
 }
 
 /// Ambient (no tone) capture for the quiet pre-check.
@@ -386,6 +567,24 @@ fn write_tone_wav(freq: f64, rate: f64, amp: f64, dur_ms: u64) -> Result<std::pa
     Ok(path)
 }
 
+/// Write a mono float32 WAV of arbitrary samples (the broadband stimulus).
+#[cfg(not(windows))]
+fn write_samples_wav(samples: &[f32], rate: f64) -> Result<std::path::PathBuf> {
+    let path = std::env::temp_dir().join("resonance-verify-stimulus.wav");
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: rate as u32,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+    let mut w = hound::WavWriter::create(&path, spec).context("write stimulus wav")?;
+    for &s in samples {
+        w.write_sample(s)?;
+    }
+    w.finalize()?;
+    Ok(path)
+}
+
 /// Start the platform's audio player on the file; audio must route through the
 /// system's default output so the daemon processes it like any application.
 #[cfg(not(windows))]
@@ -416,9 +615,19 @@ mod win {
     use anyhow::{Context, Result, bail};
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
+    /// What the render stream plays while we capture the loopback.
+    enum Source {
+        /// Silence (amp 0) — keeps loopback packets flowing for an ambient read.
+        Silence,
+        /// A steady sine (frequency-response probe).
+        Tone(f64, f64),
+        /// The deterministic broadband stimulus at the given amplitude (A/B).
+        Stimulus(f64),
+    }
+
     /// Capture `ms` of the default render endpoint's loopback, mono-averaged.
     pub fn capture_loopback(ms: u64) -> Result<(f64, Vec<f32>)> {
-        run(None, 0, ms)
+        run(&Source::Silence, 0, ms)
     }
 
     /// Play a sine at `freq`/`amp` on the default endpoint, wait `settle_ms`,
@@ -429,10 +638,19 @@ mod win {
         settle_ms: u64,
         capture_ms: u64,
     ) -> Result<(f64, Vec<f32>)> {
-        run(Some((freq, amp)), settle_ms, capture_ms)
+        run(&Source::Tone(freq, amp), settle_ms, capture_ms)
     }
 
-    fn run(tone: Option<(f64, f64)>, settle_ms: u64, capture_ms: u64) -> Result<(f64, Vec<f32>)> {
+    /// Play the broadband stimulus, wait `settle_ms`, then capture `capture_ms`.
+    pub fn stimulus_and_loopback(
+        amp: f64,
+        settle_ms: u64,
+        capture_ms: u64,
+    ) -> Result<(f64, Vec<f32>)> {
+        run(&Source::Stimulus(amp), settle_ms, capture_ms)
+    }
+
+    fn run(source: &Source, settle_ms: u64, capture_ms: u64) -> Result<(f64, Vec<f32>)> {
         let device = cpal::default_host()
             .default_output_device()
             .context("no default output device")?;
@@ -466,16 +684,37 @@ mod win {
         // Render stream — always active: WASAPI loopback only produces packets
         // while something is rendering, so the ambient (no-tone) capture drives
         // the endpoint with silence (amplitude 0) to keep data flowing.
-        let (freq, amp) = tone.unwrap_or((440.0, 0.0));
+        let (freq, amp) = match source {
+            Source::Silence => (440.0, 0.0),
+            Source::Tone(f, a) => (*f, *a),
+            Source::Stimulus(_) => (0.0, 0.0),
+        };
+        // The broadband stimulus is pre-generated at the discovered endpoint rate
+        // and looped from the buffer; tone/silence use the phase oscillator.
+        let stim: Option<Vec<f32>> = match source {
+            Source::Stimulus(a) => {
+                let secs = (settle_ms + capture_ms) as f64 / 1000.0 + 1.0;
+                Some(super::stimulus_samples(rate, secs, *a))
+            }
+            _ => None,
+        };
         let mut phase = 0.0f64;
+        let mut idx = 0usize;
         let step = 2.0 * std::f64::consts::PI * freq / rate;
         let out_stream = device
             .build_output_stream(
                 &stream_config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     for frame in data.chunks_mut(channels) {
-                        let s = (amp * phase.sin()) as f32;
-                        phase = (phase + step) % (2.0 * std::f64::consts::PI);
+                        let s = if let Some(buf) = &stim {
+                            let v = buf[idx % buf.len()];
+                            idx += 1;
+                            v
+                        } else {
+                            let v = (amp * phase.sin()) as f32;
+                            phase = (phase + step) % (2.0 * std::f64::consts::PI);
+                            v
+                        };
                         frame.fill(s);
                     }
                 },
@@ -607,6 +846,241 @@ fn fft_peak_hz(samples: &[f32], rate: f64, probe_hz: f64) -> f64 {
     (peak as f64 + delta) * rate / n as f64
 }
 
+// ── A/B compare analysis (issue #57) ─────────────────────────────────────────
+//
+// Two full-waveform captures of the *same* deterministic broadband stimulus, one
+// per DSP configuration. Because the input is identical, every difference is what
+// the config change did. We report it three ways:
+//   • per-band magnitude delta   → did the TONE change? (phase-invariant)
+//   • best-aligned null depth     → after removing delay+gain, what residual is
+//                                   left? A pure phase/timing difference cannot be
+//                                   nulled, so a shallow null with matched bands is
+//                                   the "sounds different but measures identical"
+//                                   signature (e.g. minimum vs linear phase).
+//   • verdict                     → TONAL / PHASE-ONLY / identical.
+
+/// One octave band's magnitude change of `b` relative to `a`.
+#[derive(Clone, Copy)]
+struct BandDelta {
+    center_hz: f64,
+    delta_db: f64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict {
+    /// Deep null and matched bands: the two captures are the same signal.
+    Identical,
+    /// Bands matched but the residual won't null — a pure phase/timing change,
+    /// tonally identical yet audible to sensitive listeners.
+    PhaseOnly,
+    /// The magnitude spectrum itself moved — an audible tonal change.
+    Tonal,
+}
+
+/// Circular cross-correlation `c[L] = Σ a[i]·b[i+L]` via FFT. Length is the next
+/// power of two ≥ 2·max(len); `c[0]` is lag 0, `c[m-1]` is lag −1 (wrapped).
+fn xcorr_fft(a: &[f64], b: &[f64]) -> Vec<f64> {
+    use rustfft::{FftPlanner, num_complex::Complex};
+    let n = a.len().max(b.len());
+    let m = (2 * n).next_power_of_two();
+    let mut planner = FftPlanner::new();
+    let fwd = planner.plan_fft_forward(m);
+    let inv = planner.plan_fft_inverse(m);
+    let mut fa = vec![Complex::new(0.0, 0.0); m];
+    let mut fb = vec![Complex::new(0.0, 0.0); m];
+    for (dst, &s) in fa.iter_mut().zip(a) {
+        dst.re = s;
+    }
+    for (dst, &s) in fb.iter_mut().zip(b) {
+        dst.re = s;
+    }
+    fwd.process(&mut fa);
+    fwd.process(&mut fb);
+    let mut c: Vec<Complex<f64>> = fa.iter().zip(&fb).map(|(a, b)| a.conj() * b).collect();
+    inv.process(&mut c);
+    c.iter().map(|z| z.re / m as f64).collect()
+}
+
+/// Integer sample lag of `b` relative to `a` (positive = `b` lags `a`), searched
+/// over ±`max_lag`, that maximises their cross-correlation.
+fn best_integer_lag(a: &[f64], b: &[f64], max_lag: usize) -> isize {
+    let c = xcorr_fft(a, b);
+    let m = c.len();
+    let at = |lag: isize| c[(((lag % m as isize) + m as isize) % m as isize) as usize];
+    let range = max_lag.min(m / 2 - 1) as isize;
+    let mut best = 0isize;
+    let mut best_v = f64::NEG_INFINITY;
+    for lag in -range..=range {
+        let v = at(lag);
+        if v > best_v {
+            best_v = v;
+            best = lag;
+        }
+    }
+    best
+}
+
+/// Shift `x` by a fractional number of samples via a frequency-domain phase ramp
+/// (`(Dₐ x)[i] = x[i−d]`), so sub-sample misalignment can be removed.
+fn apply_fractional_delay(x: &[f64], d: f64) -> Vec<f64> {
+    use rustfft::{FftPlanner, num_complex::Complex};
+    let n = x.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut planner = FftPlanner::new();
+    let fwd = planner.plan_fft_forward(n);
+    let inv = planner.plan_fft_inverse(n);
+    let mut buf: Vec<Complex<f64>> = x.iter().map(|&v| Complex::new(v, 0.0)).collect();
+    fwd.process(&mut buf);
+    let two_pi = 2.0 * std::f64::consts::PI;
+    for (k, z) in buf.iter_mut().enumerate() {
+        // Signed frequency bin keeps the spectrum conjugate-symmetric → real out.
+        let kk = if k <= n / 2 {
+            k as f64
+        } else {
+            k as f64 - n as f64
+        };
+        let phase = -two_pi * kk * d / n as f64;
+        *z *= Complex::new(phase.cos(), phase.sin());
+    }
+    inv.process(&mut buf);
+    buf.iter().map(|z| z.re / n as f64).collect()
+}
+
+/// Best-aligned null depth in dB (more negative = closer match): align `b` to `a`
+/// by integer + fractional delay, remove the optimal broadband gain, and compare
+/// the residual RMS to the signal RMS. A frequency-dependent phase difference
+/// cannot be aligned away, so it leaves a shallow (high) null.
+fn null_depth_db(a: &[f64], b: &[f64], rate: f64) -> f64 {
+    let n = a.len().min(b.len());
+    if n < 64 {
+        return 0.0;
+    }
+    let (a, b) = (&a[..n], &b[..n]);
+    // Cover realistic processing latencies (linear-phase EQ ≈ 171 ms @48 k).
+    let max_lag = ((rate * 0.4) as usize).clamp(1, n / 2 - 2);
+    let lag = best_integer_lag(a, b, max_lag);
+    // Correlation at a lag over the overlapping region only (Σ a[i]·b[i+l]).
+    let corr_at = |l: isize| -> f64 {
+        if l >= 0 {
+            let l = l as usize;
+            a[..n - l].iter().zip(&b[l..]).map(|(x, y)| x * y).sum()
+        } else {
+            let l = (-l) as usize;
+            a[l..].iter().zip(&b[..n - l]).map(|(x, y)| x * y).sum()
+        }
+    };
+    // Parabolic vertex of the three correlation points → sub-sample offset.
+    let (ym, y0, yp) = (corr_at(lag - 1), corr_at(lag), corr_at(lag + 1));
+    let denom = ym - 2.0 * y0 + yp;
+    let frac = if denom.abs() > 1e-18 {
+        (0.5 * (ym - yp) / denom).clamp(-0.5, 0.5)
+    } else {
+        0.0
+    };
+
+    // Overlapping regions after integer alignment (b advanced by `lag`).
+    let (a_seg, b_seg): (&[f64], Vec<f64>) = if lag >= 0 {
+        let l = lag as usize;
+        (&a[..n - l], b[l..].to_vec())
+    } else {
+        let l = (-lag) as usize;
+        (&a[l..], b[..n - l].to_vec())
+    };
+    // Advance b by the fractional remainder to line the peak up exactly.
+    let b_frac = apply_fractional_delay(&b_seg, -frac);
+
+    // Drop the ends: fractional delay wraps circularly and the integer-shift
+    // boundary is undefined there.
+    let edge = (b_frac.len() / 16).clamp(1, b_frac.len() / 2);
+    let a_t = &a_seg[edge..a_seg.len() - edge];
+    let b_t = &b_frac[edge..b_frac.len() - edge];
+
+    // Remove the best broadband gain before nulling.
+    let cross: f64 = a_t.iter().zip(b_t).map(|(x, y)| x * y).sum();
+    let energy: f64 = b_t.iter().map(|y| y * y).sum();
+    let g = if energy > 1e-30 { cross / energy } else { 0.0 };
+
+    let sig: f64 = a_t.iter().map(|x| x * x).sum::<f64>() / a_t.len() as f64;
+    let res: f64 = a_t
+        .iter()
+        .zip(b_t)
+        .map(|(x, y)| {
+            let e = x - g * y;
+            e * e
+        })
+        .sum::<f64>()
+        / a_t.len() as f64;
+    (10.0 * (res / sig.max(1e-30)).max(1e-12).log10()).max(-120.0)
+}
+
+/// Per-octave-band magnitude delta of `b` relative to `a`, in dB. Magnitude only
+/// (phase-invariant), so it isolates *tonal* change from timing. Bands with no
+/// meaningful energy in the reference are dropped.
+fn band_deltas(a: &[f64], b: &[f64], rate: f64) -> Vec<BandDelta> {
+    let n = a.len().min(b.len());
+    if n < 64 {
+        return Vec::new();
+    }
+    let pa = power_spectrum(&a[..n]);
+    let pb = power_spectrum(&b[..n]);
+    let total_a: f64 = pa.iter().sum();
+    let bin_hz = rate / n as f64;
+    let half = pa.len();
+    let band_power = |p: &[f64], lo: f64, hi: f64| -> f64 {
+        let lo_k = (lo / bin_hz).ceil() as usize;
+        let hi_k = ((hi / bin_hz).floor() as usize).min(half - 1);
+        (lo_k..=hi_k).filter(|&k| k < half).map(|k| p[k]).sum()
+    };
+    let root2 = std::f64::consts::SQRT_2;
+    let mut out = Vec::new();
+    let mut center = 31.25;
+    while center < rate / 2.0 {
+        let (lo, hi) = (center / root2, center * root2);
+        let sa = band_power(&pa, lo, hi);
+        if sa > total_a * 1e-6 {
+            let sb = band_power(&pb, lo, hi);
+            let delta = 10.0 * (sb / sa).max(1e-12).log10();
+            out.push(BandDelta {
+                center_hz: center,
+                delta_db: delta,
+            });
+        }
+        center *= 2.0;
+    }
+    out
+}
+
+/// Hann-windowed power spectrum (`|X[k]|²`), bins `0..n/2`.
+fn power_spectrum(x: &[f64]) -> Vec<f64> {
+    use rustfft::{FftPlanner, num_complex::Complex};
+    let n = x.len();
+    let mut buf: Vec<Complex<f64>> = x
+        .iter()
+        .enumerate()
+        .map(|(i, &s)| {
+            let w = 0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / n as f64).cos());
+            Complex::new(s * w, 0.0)
+        })
+        .collect();
+    FftPlanner::new().plan_fft_forward(n).process(&mut buf);
+    buf[..n / 2].iter().map(Complex::norm_sqr).collect()
+}
+
+/// Classify the difference: a moved band means a TONAL change; otherwise a
+/// shallow null (won't null despite matched bands) means a PHASE-ONLY change;
+/// a deep null means the captures are identical.
+fn verdict(bands: &[BandDelta], null_db: f64, tonal_thresh_db: f64, null_floor_db: f64) -> Verdict {
+    if bands.iter().any(|d| d.delta_db.abs() > tonal_thresh_db) {
+        Verdict::Tonal
+    } else if null_db > null_floor_db {
+        Verdict::PhaseOnly
+    } else {
+        Verdict::Identical
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -677,5 +1151,173 @@ mod tests {
     fn rms_db_of_silence_is_floor() {
         assert!(rms_db(&[]) <= -120.0);
         assert!(rms_db(&vec![0.0f32; 1000]) < -100.0);
+    }
+
+    // ── A/B compare (issue #57) ──────────────────────────────────────────────
+
+    /// Deterministic broadband noise (fixed-seed LCG), the stimulus stand-in.
+    fn noise(n: usize, seed: u64) -> Vec<f64> {
+        let mut s = seed | 1;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                ((s >> 33) as f64 / (1u64 << 31) as f64) - 1.0
+            })
+            .collect()
+    }
+
+    #[test]
+    fn best_integer_lag_recovers_a_known_shift() {
+        // b is a delayed by 137 samples; the aligner must report +137.
+        let a = noise(8192, 7);
+        let shift = 137usize;
+        let mut b = vec![0.0; a.len()];
+        b[shift..].copy_from_slice(&a[..a.len() - shift]);
+        assert_eq!(best_integer_lag(&a, &b, 1024), shift as isize);
+    }
+
+    #[test]
+    fn null_depth_is_deep_for_identical_signals() {
+        let a = noise(16384, 3);
+        // Same signal, scaled — gain compensation should still null it deeply.
+        let b: Vec<f64> = a.iter().map(|x| x * 1.7).collect();
+        assert!(
+            null_depth_db(&a, &b, 48_000.0) < -60.0,
+            "identical-up-to-gain must null deeply"
+        );
+    }
+
+    #[test]
+    fn null_depth_is_deep_for_a_delayed_copy() {
+        // A pure delay (integer + fractional) must be removed by alignment.
+        let n = 16384usize;
+        let w = 2.0 * std::f64::consts::PI * 997.0 / 48_000.0;
+        let a: Vec<f64> = (0..n).map(|i| (w * i as f64).sin()).collect();
+        let d = 40.5; // 40 whole + half a sample
+        let b: Vec<f64> = (0..n).map(|i| (w * (i as f64 - d)).sin()).collect();
+        assert!(
+            null_depth_db(&a, &b, 48_000.0) < -40.0,
+            "a delayed copy must null after fractional alignment"
+        );
+    }
+
+    #[test]
+    fn null_depth_is_shallow_for_a_pure_phase_difference() {
+        // Two tones; in `b` the second is 90° shifted. No single delay+gain can
+        // null both at once → this is the PHASE-ONLY signature.
+        let n = 16384usize;
+        let (w1, w2) = (
+            2.0 * std::f64::consts::PI * 500.0 / 48_000.0,
+            2.0 * std::f64::consts::PI * 5000.0 / 48_000.0,
+        );
+        let a: Vec<f64> = (0..n)
+            .map(|i| (w1 * i as f64).sin() + (w2 * i as f64).sin())
+            .collect();
+        let b: Vec<f64> = (0..n)
+            .map(|i| (w1 * i as f64).sin() + (w2 * i as f64).cos())
+            .collect();
+        assert!(
+            null_depth_db(&a, &b, 48_000.0) > -20.0,
+            "a frequency-dependent phase shift must not null"
+        );
+    }
+
+    #[test]
+    fn band_deltas_flag_a_broadband_gain() {
+        let a = noise(16384, 11);
+        let b: Vec<f64> = a.iter().map(|x| x * 2.0).collect(); // +6 dB everywhere
+        let bands = band_deltas(&a, &b, 48_000.0);
+        assert!(!bands.is_empty());
+        for band in &bands {
+            assert!(
+                (band.delta_db - 6.0).abs() < 1.0,
+                "band {} Hz: {} dB, expected ~+6",
+                band.center_hz,
+                band.delta_db
+            );
+        }
+    }
+
+    #[test]
+    fn band_deltas_localise_a_high_shelf_cut() {
+        // Remove the top: bass bands unchanged, treble bands drop hard.
+        let n = 16384usize;
+        let (w_lo, w_hi) = (
+            2.0 * std::f64::consts::PI * 200.0 / 48_000.0,
+            2.0 * std::f64::consts::PI * 9000.0 / 48_000.0,
+        );
+        let a: Vec<f64> = (0..n)
+            .map(|i| (w_lo * i as f64).sin() + (w_hi * i as f64).sin())
+            .collect();
+        let b: Vec<f64> = (0..n).map(|i| (w_lo * i as f64).sin()).collect(); // hi removed
+        let bands = band_deltas(&a, &b, 48_000.0);
+        let lo = bands.iter().find(|x| x.center_hz < 400.0).unwrap();
+        let hi = bands.iter().find(|x| x.center_hz > 6000.0).unwrap();
+        assert!(lo.delta_db.abs() < 1.0, "bass band should be untouched");
+        assert!(hi.delta_db < -20.0, "treble band should collapse");
+    }
+
+    #[test]
+    fn verdict_identical_when_matched_and_nulls() {
+        let bands = vec![BandDelta {
+            center_hz: 1000.0,
+            delta_db: 0.05,
+        }];
+        assert_eq!(verdict(&bands, -65.0, 0.5, -40.0), Verdict::Identical);
+    }
+
+    #[test]
+    fn verdict_phase_only_when_matched_but_wont_null() {
+        let bands = vec![BandDelta {
+            center_hz: 1000.0,
+            delta_db: 0.05,
+        }];
+        assert_eq!(verdict(&bands, -6.0, 0.5, -40.0), Verdict::PhaseOnly);
+    }
+
+    #[test]
+    fn allpass_on_noise_reads_as_phase_only() {
+        // The real #57 case: an all-pass (flat magnitude, frequency-dependent
+        // phase) is exactly what min- vs linear-phase EQ looks like. Bands must
+        // stay flat, the null must stay shallow, and the verdict PHASE-ONLY.
+        let a = noise(32768, 21);
+        let c = 0.7; // first-order all-pass: y[n] = c·x[n] + x[n-1] − c·y[n-1]
+        let mut b = vec![0.0; a.len()];
+        let (mut x1, mut y1) = (0.0, 0.0);
+        for (i, &x) in a.iter().enumerate() {
+            let y = c * x + x1 - c * y1;
+            b[i] = y;
+            x1 = x;
+            y1 = y;
+        }
+        let bands = band_deltas(&a, &b, 48_000.0);
+        assert!(!bands.is_empty());
+        for band in &bands {
+            assert!(
+                band.delta_db.abs() < 0.5,
+                "all-pass must not move band {} Hz ({} dB)",
+                band.center_hz,
+                band.delta_db
+            );
+        }
+        let null = null_depth_db(&a, &b, 48_000.0);
+        assert!(null > -25.0, "all-pass must not null (got {null} dB)");
+        assert_eq!(verdict(&bands, null, 0.5, -40.0), Verdict::PhaseOnly);
+    }
+
+    #[test]
+    fn verdict_tonal_when_a_band_moves() {
+        let bands = vec![
+            BandDelta {
+                center_hz: 1000.0,
+                delta_db: 0.05,
+            },
+            BandDelta {
+                center_hz: 8000.0,
+                delta_db: 3.2,
+            },
+        ];
+        // Even a deep null is TONAL if the magnitude spectrum changed.
+        assert_eq!(verdict(&bands, -65.0, 0.5, -40.0), Verdict::Tonal);
     }
 }
