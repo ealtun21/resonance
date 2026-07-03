@@ -7,6 +7,7 @@ pub mod curve;
 pub mod fr;
 pub mod paths;
 pub mod service;
+pub mod singleton;
 pub mod transport;
 
 pub const SOCKET_PATH_ENV: &str = "RESONANCE_SOCKET";
