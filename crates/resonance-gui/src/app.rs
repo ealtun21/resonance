@@ -1222,7 +1222,7 @@ fn demo_state() -> DaemonState {
         ],
         dither_bits: None,
         convolution: None,
-        solo_band: None,
+        audition: None,
         phase_mode_linear: false,
         eq_fir_latency_frames: 0,
     }

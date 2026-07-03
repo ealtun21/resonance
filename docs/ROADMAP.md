@@ -22,10 +22,7 @@ exists.)_
 
 ## Lower / niche
 
-- **Per-band listen/bandpass** — the richer follow-up to per-band solo: hear
-  *only the frequency region a band covers* (a band-pass audition,
-  FabFilter-style), rather than the whole signal with the other bands bypassed.
-  Needs a temporary band-pass around the soloed band's centre/width in the DSP.
+_(empty — per-band listen/bandpass shipped 2026-07-03, see below.)_
 
 ## Where Resonance is already ahead
 
@@ -45,9 +42,11 @@ release, band-passed sidechain, zero added latency; peaking bands, shipped
 2026-07-02); and a **linear-phase EQ mode** (static bands rendered to a
 symmetric FIR through the partitioned engine — no phase rotation, ~171 ms
 added latency at 48 kHz, hybrid with M/S + dynamic bands staying IIR; shipped
-2026-07-03 — closes backlog item 8 entirely); and **per-band solo** (audition
-one EQ band in isolation while tuning — a transient chain flag that bypasses
-every other band, never persisted, suspends linear-phase while active; CLI
-`band-solo`, GUI ear toggle, TUI `L`; all three platforms via the shared
-`ProcessorChain` + APO snapshot v8; shipped 2026-07-03). Most competitors do a
+2026-07-03 — closes backlog item 8 entirely); and a **per-band audition** with
+two modes — **Solo** (bypass every other band) and **Listen** (band-pass the
+band's operating region at unity gain, type-aware: peaking→BP, shelves/HP/LP→
+LP/HP at Fc). Transient (never persisted, suspends linear-phase while active);
+CLI `audition <idx> <solo|listen>`, GUI ear-icon cycle, TUI `L`; all three
+platforms via the shared `ProcessorChain` + APO snapshot v9; shipped 2026-07-03.
+Most competitors do a
 subset of these on a single OS.

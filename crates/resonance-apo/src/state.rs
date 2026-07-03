@@ -41,7 +41,8 @@ pub const STATE_MAGIC: u32 = 0x4F50_4152;
 /// v6: + per-band dynamic EQ (enabled flag + threshold/range/attack/release).
 /// v7: + linear-phase EQ mode flag.
 /// v8: + transient per-band solo (audition one band; `SOLO_NONE` = off).
-pub const STATE_VERSION: u32 = 8;
+/// v9: + audition mode (solo/listen) beside the `solo_band` index.
+pub const STATE_VERSION: u32 = 9;
 
 /// `solo_band` sentinel meaning "no band soloed" (the field is a fixed `u32`, so
 /// `Option` is encoded as this reserved value rather than a niche).
@@ -121,11 +122,14 @@ pub struct ChainSnapshot {
     /// `1` = linear-phase EQ (static bands rendered to a FIR by the APO's
     /// worker thread), `0` = minimum phase (biquads).
     pub phase_mode: u32,
-    /// Transiently soloed band index, or [`SOLO_NONE`] for no solo. While a
-    /// band is soloed the APO chain runs only that band (linear-phase is
-    /// suspended, matching the daemon). Occupies the slot the phase padding
-    /// used to fill, so the layout size is unchanged.
+    /// Transiently auditioned band index, or [`SOLO_NONE`] for no audition.
+    /// While set the APO chain isolates that band (linear-phase suspended,
+    /// matching the daemon).
     pub solo_band: u32,
+    /// Audition mode for `solo_band`: 0 = Solo (bypass others), 1 = Listen
+    /// (band-pass the band's region). Ignored when `solo_band == SOLO_NONE`.
+    pub audition_mode: u32,
+    _pad_audition: u32,
     pub filters: [FilterSnapshot; MAX_FILTERS],
     /// Square output routing matrix dimension: `0` = none/identity (passthrough);
     /// else `N` means an `N×N` remap stored row-major in the first `N*N` entries
@@ -154,6 +158,8 @@ impl Default for ChainSnapshot {
             convolution_enabled: 0,
             phase_mode: 0,
             solo_band: SOLO_NONE,
+            audition_mode: 0,
+            _pad_audition: 0,
             filters: [FilterSnapshot::default(); MAX_FILTERS],
             route_channels: 0,
             _pad_route: 0,
@@ -162,10 +168,11 @@ impl Default for ChainSnapshot {
     }
 }
 
-/// Encode a chain's transient solo index for the fixed `solo_band` slot
-/// ([`SOLO_NONE`] = no solo).
-fn solo_encode(solo: Option<usize>) -> u32 {
-    solo.and_then(|i| u32::try_from(i).ok())
+/// Encode an audition band index for the fixed `solo_band` slot
+/// ([`SOLO_NONE`] = no audition).
+fn audition_index_encode(band: usize) -> u32 {
+    u32::try_from(band)
+        .ok()
         .filter(|&i| i != SOLO_NONE)
         .unwrap_or(SOLO_NONE)
 }
@@ -315,7 +322,13 @@ impl ChainSnapshot {
             convolution_generation: 0,
             convolution_enabled: u32::from(chain.convolution.enabled()),
             phase_mode: u32::from(chain.phase_mode == resonance_dsp::chain::PhaseMode::Linear),
-            solo_band: solo_encode(chain.solo),
+            solo_band: chain
+                .audition
+                .map_or(SOLO_NONE, |a| audition_index_encode(a.band)),
+            audition_mode: chain.audition.map_or(0, |a| {
+                u32::from(a.mode == resonance_dsp::chain::AuditionMode::Listen)
+            }),
+            _pad_audition: 0,
             filters,
             route_channels,
             _pad_route: 0,
@@ -323,10 +336,17 @@ impl ChainSnapshot {
         }
     }
 
-    /// Decode the transient solo index ([`SOLO_NONE`] → `None`).
+    /// Decode the transient audition ([`SOLO_NONE`] → `None`).
     #[must_use]
-    pub fn solo(&self) -> Option<usize> {
-        (self.solo_band != SOLO_NONE).then_some(self.solo_band as usize)
+    pub fn audition(&self) -> Option<resonance_dsp::chain::BandAudition> {
+        (self.solo_band != SOLO_NONE).then_some(resonance_dsp::chain::BandAudition {
+            band: self.solo_band as usize,
+            mode: if self.audition_mode == 1 {
+                resonance_dsp::chain::AuditionMode::Listen
+            } else {
+                resonance_dsp::chain::AuditionMode::Solo
+            },
+        })
     }
 
     /// Rebuild a `ProcessorChain` at the APO's negotiated format, applying these
@@ -386,7 +406,7 @@ impl ChainSnapshot {
         chain.set_dither((self.dither_bits != 0).then_some(self.dither_bits));
         // Transient audition: solo forces the IIR path in the chain, so it works
         // regardless of the phase mode armed above.
-        chain.set_solo(self.solo());
+        chain.set_audition(self.audition());
         chain
     }
 
@@ -420,7 +440,7 @@ impl ChainSnapshot {
         chain.set_dither((self.dither_bits != 0).then_some(self.dither_bits));
         // Transient solo applies in place (a cheap flag; no filter-state reset,
         // so toggling an audition never clicks on the minimum-phase path).
-        chain.set_solo(self.solo());
+        chain.set_audition(self.audition());
 
         // Routing is format-independent state on the chain; apply it in place at
         // the chain's live width (square-only; mismatched/absent → passthrough).
@@ -1170,7 +1190,8 @@ mod tests {
     }
 
     #[test]
-    fn solo_round_trips_and_applies_in_place() {
+    fn audition_round_trips_and_applies_in_place() {
+        use resonance_dsp::chain::{AuditionMode, BandAudition};
         use resonance_dsp::filter::{ApoFilter, FilterType};
         let mk_band = |f: f64| {
             ApoFilter::builder()
@@ -1190,33 +1211,73 @@ mod tests {
             .add_filter(mk_band(5_000.0))
             .build();
 
-        // No solo by default; the sentinel round-trips to None.
+        // No audition by default; the sentinel round-trips to None.
         let snap = ChainSnapshot::from_chain(&chain);
         assert_eq!(snap.solo_band, SOLO_NONE);
-        assert_eq!(snap.solo(), None);
+        assert_eq!(snap.audition(), None);
 
-        // Solo band 1 → carried through the snapshot and applied in place.
-        chain.set_solo(Some(1));
+        // Listen band 1 → carried through the snapshot (mode=1) and applied.
+        chain.set_audition(Some(BandAudition {
+            band: 1,
+            mode: AuditionMode::Listen,
+        }));
         let snap = ChainSnapshot::from_chain(&chain);
-        assert_eq!(snap.solo(), Some(1));
+        assert_eq!(snap.audition_mode, 1);
+        assert_eq!(
+            snap.audition(),
+            Some(BandAudition {
+                band: 1,
+                mode: AuditionMode::Listen
+            })
+        );
         let mut fresh = ProcessorChain::builder()
             .channels(2)
             .sample_rate(48_000.0)
             .add_filter(mk_band(200.0))
             .add_filter(mk_band(5_000.0))
             .build();
-        assert!(snap.apply_to(&mut fresh, 48_000.0), "solo applies in place");
-        assert_eq!(fresh.solo, Some(1));
+        assert!(
+            snap.apply_to(&mut fresh, 48_000.0),
+            "audition applies in place"
+        );
+        assert_eq!(
+            fresh.audition,
+            Some(BandAudition {
+                band: 1,
+                mode: AuditionMode::Listen
+            })
+        );
 
-        // A rebuild (build_chain) also honours solo.
+        // A rebuild (build_chain) also honours the audition.
         let rebuilt = snap.build_chain(2, 48_000.0);
-        assert_eq!(rebuilt.solo, Some(1));
+        assert_eq!(
+            rebuilt.audition,
+            Some(BandAudition {
+                band: 1,
+                mode: AuditionMode::Listen
+            })
+        );
 
-        // Clearing solo round-trips back to None in place.
-        chain.set_solo(None);
+        // A Solo audition encodes mode=0.
+        chain.set_audition(Some(BandAudition {
+            band: 0,
+            mode: AuditionMode::Solo,
+        }));
+        let snap = ChainSnapshot::from_chain(&chain);
+        assert_eq!(snap.audition_mode, 0);
+        assert_eq!(
+            snap.audition(),
+            Some(BandAudition {
+                band: 0,
+                mode: AuditionMode::Solo
+            })
+        );
+
+        // Clearing round-trips back to None in place.
+        chain.set_audition(None);
         let snap = ChainSnapshot::from_chain(&chain);
         assert!(snap.apply_to(&mut fresh, 48_000.0));
-        assert_eq!(fresh.solo, None);
+        assert_eq!(fresh.audition, None);
     }
 
     #[test]

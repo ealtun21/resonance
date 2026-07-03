@@ -190,7 +190,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) {
         // Solo (audition) the selected band — bypass every other band. Transient
         // (no undo/save). Uppercase `L` (Listen) so lowercase `l` keeps its
         // load-preset meaning; no pref gate (it's a transient action on any band).
-        KeyCode::Char('L') if band_focus => app.toggle_band_solo(),
+        KeyCode::Char('L') if band_focus => app.cycle_band_audition(),
         KeyCode::Char('y') if band_focus && app.prefs.show_dynamics => app.toggle_band_dynamics(),
         KeyCode::Char('Y') if band_focus && app.prefs.show_dynamics => {
             app.begin_edit_band_dynamics();

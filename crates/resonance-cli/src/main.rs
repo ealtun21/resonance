@@ -177,11 +177,14 @@ enum Sub {
         /// linear | minimum (min)
         mode: String,
     },
-    /// Solo (audition) one EQ band, bypassing every other band. Transient —
-    /// never saved; suspends linear-phase while active. `off` clears the solo.
-    BandSolo {
+    /// Audition one EQ band: `solo` bypasses every other band, `listen`
+    /// band-passes the band's frequency region. Transient — never saved;
+    /// suspends linear-phase while active. `off` clears the audition.
+    Audition {
         /// Band index (1-based, as shown in `status`), or `off` to clear
         target: String,
+        /// Mode: solo | listen (default solo). Ignored for `off`.
+        mode: Option<String>,
     },
     /// Reset to defaults: flat EQ, all effects off, 0 dB preamp
     Reset,
@@ -605,12 +608,15 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
             "minimum" | "min" => Ok(Command::SetPhaseMode { linear: false }),
             other => bail!("phase must be linear or minimum, got {other}"),
         },
-        Sub::BandSolo { target } => {
+        Sub::Audition { target, mode } => {
             if matches!(
                 target.to_ascii_lowercase().as_str(),
                 "off" | "none" | "clear"
             ) {
-                return Ok(Command::SetBandSolo { index: None });
+                return Ok(Command::SetBandAudition {
+                    index: None,
+                    mode: resonance_ipc::AuditionMode::Solo,
+                });
             }
             let index: usize = target
                 .parse()
@@ -618,8 +624,19 @@ fn to_ipc_command(sub: Sub) -> Result<Command> {
             if index == 0 {
                 bail!("band index is 1-based (see `status`)");
             }
-            Ok(Command::SetBandSolo {
+            let mode = match mode
+                .as_deref()
+                .unwrap_or("solo")
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "solo" | "s" => resonance_ipc::AuditionMode::Solo,
+                "listen" | "l" => resonance_ipc::AuditionMode::Listen,
+                other => bail!("mode must be solo or listen, got {other}"),
+            };
+            Ok(Command::SetBandAudition {
                 index: Some(index - 1),
+                mode,
             })
         }
         Sub::Reset => Ok(Command::Reset),
@@ -1132,8 +1149,14 @@ fn print_state(p: &Paint, s: &resonance_ipc::DaemonState) {
     // EQ bands
     if !s.bands.is_empty() {
         println!();
-        let solo_note = match s.solo_band {
-            Some(i) => format!("  {}", p.yellow(&format!("SOLO band {}", i + 1))),
+        let solo_note = match s.audition {
+            Some(a) => {
+                let m = match a.mode {
+                    resonance_ipc::AuditionMode::Solo => "SOLO",
+                    resonance_ipc::AuditionMode::Listen => "LISTEN",
+                };
+                format!("  {}", p.yellow(&format!("{m} band {}", a.band + 1)))
+            }
             None => String::new(),
         };
         println!(
@@ -1172,10 +1195,15 @@ fn print_state(p: &Paint, s: &resonance_ipc::DaemonState) {
                     p.dim(&format!("dyn {:+.0}@{:.0}", d.range_db, d.threshold_db))
                 )
             });
-            let solo_tail = if s.solo_band == Some(i) {
-                format!("  {}", p.yellow("◀ solo"))
-            } else {
-                String::new()
+            let solo_tail = match s.audition {
+                Some(a) if a.band == i => {
+                    let m = match a.mode {
+                        resonance_ipc::AuditionMode::Solo => "◀ solo",
+                        resonance_ipc::AuditionMode::Listen => "◀ listen",
+                    };
+                    format!("  {}", p.yellow(m))
+                }
+                _ => String::new(),
             };
             let tail = format!("{slope_tail}{scope_tail}{dyn_tail}{ch_tail}{solo_tail}");
             println!(
@@ -1546,21 +1574,62 @@ mod tests {
     }
 
     #[test]
-    fn band_solo_parses_index_off_and_rejects_bad_input() {
-        // 1-based index → 0-based command index.
+    fn audition_parses_index_mode_off_and_rejects_bad_input() {
+        // 1-based index → 0-based command index; default mode = solo.
         assert!(matches!(
-            to_ipc_command(Sub::BandSolo { target: "3".into() }).unwrap(),
-            Command::SetBandSolo { index: Some(2) }
+            to_ipc_command(Sub::Audition {
+                target: "3".into(),
+                mode: None
+            })
+            .unwrap(),
+            Command::SetBandAudition {
+                index: Some(2),
+                mode: resonance_ipc::AuditionMode::Solo
+            }
+        ));
+        assert!(matches!(
+            to_ipc_command(Sub::Audition {
+                target: "3".into(),
+                mode: Some("listen".into())
+            })
+            .unwrap(),
+            Command::SetBandAudition {
+                index: Some(2),
+                mode: resonance_ipc::AuditionMode::Listen
+            }
         ));
         for off in ["off", "none", "clear", "OFF"] {
             assert!(matches!(
-                to_ipc_command(Sub::BandSolo { target: off.into() }).unwrap(),
-                Command::SetBandSolo { index: None }
+                to_ipc_command(Sub::Audition {
+                    target: off.into(),
+                    mode: None
+                })
+                .unwrap(),
+                Command::SetBandAudition { index: None, .. }
             ));
         }
-        // 0 (1-based) and non-numeric bail.
-        assert!(to_ipc_command(Sub::BandSolo { target: "0".into() }).is_err());
-        assert!(to_ipc_command(Sub::BandSolo { target: "x".into() }).is_err());
+        // 0 (1-based), non-numeric, and bad mode all bail.
+        assert!(
+            to_ipc_command(Sub::Audition {
+                target: "0".into(),
+                mode: None
+            })
+            .is_err()
+        );
+        assert!(
+            to_ipc_command(Sub::Audition {
+                target: "x".into(),
+                mode: None
+            })
+            .is_err()
+        );
+        assert!(
+            to_ipc_command(Sub::Audition {
+                target: "1".into(),
+                mode: Some("bogus".into())
+            })
+            .is_err()
+        );
     }
 
     #[test]

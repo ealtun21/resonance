@@ -418,17 +418,35 @@ impl GuiApp {
             gain_bar(ui, cols.graph_w, b.gain_db, &self.palette);
         }
 
-        // Solo (audition) toggle — transient (queue, not queue_edit) so it never
-        // dirties the EQ or the undo stack. Accent-lit while this band is soloed.
-        let soloed = state.solo_band == Some(i);
-        let tip = if soloed {
-            "Stop auditioning this band"
-        } else {
-            "Solo: audition only this band"
+        // Audition (Solo/Listen) toggle — transient (queue, not queue_edit) so it
+        // never dirties the EQ or the undo stack. Click cycles Off → Solo →
+        // Listen → Off. Accent-lit while active; the icon (ear vs ear+dot) and
+        // tooltip name the current mode.
+        let cur = state.audition.filter(|a| a.band == i).map(|a| a.mode);
+        let (icon, tip) = match cur {
+            None => (
+                Icon::Solo,
+                "Solo: audition only this band (click again → Listen)",
+            ),
+            Some(resonance_ipc::AuditionMode::Solo) => (
+                Icon::Solo,
+                "Solo (click → Listen: band-pass this band's region)",
+            ),
+            Some(resonance_ipc::AuditionMode::Listen) => {
+                (Icon::Listen, "Listen: band-pass region (click → off)")
+            }
         };
-        if kit::icon_btn_active(ui, Icon::Solo, 24.0, soloed, tip) {
-            self.queue(Command::SetBandSolo {
-                index: if soloed { None } else { Some(i) },
+        if kit::icon_btn_active(ui, icon, 24.0, cur.is_some(), tip) {
+            let next = match cur {
+                None => Some(resonance_ipc::AuditionMode::Solo),
+                Some(resonance_ipc::AuditionMode::Solo) => {
+                    Some(resonance_ipc::AuditionMode::Listen)
+                }
+                Some(resonance_ipc::AuditionMode::Listen) => None,
+            };
+            self.queue(Command::SetBandAudition {
+                index: next.map(|_| i),
+                mode: next.unwrap_or(resonance_ipc::AuditionMode::Solo),
             });
         }
 
