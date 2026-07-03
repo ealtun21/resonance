@@ -2671,9 +2671,9 @@ fn render_tab_tray(s: &SettingsState, frame: &mut Frame, area: Rect) {
             "(Enter toggles tray-at-login)",
         ),
         (
-            "Quit stops daemon",
+            "Tray quit stops daemon",
             cfg.quit_stops_daemon.to_string(),
-            "(Enter toggles; quit closes everything vs. just the UI)",
+            "(Enter toggles; governs the tray's \"Quit Resonance\" only — closing a UI never stops the daemon)",
         ),
         (
             "Left-click",
