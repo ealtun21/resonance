@@ -266,24 +266,32 @@ impl GuiApp {
     }
 
     /// Render one wide-layout side column from the persisted card order. Normal
-    /// mode draws the live cards (skipping absent ones); edit mode (Task 5) draws
-    /// compact draggable tiles with drop zones.
+    /// mode draws the live cards (skipping absent ones); edit mode draws compact
+    /// draggable tiles with drop zones. Both honour the hidden-panes set, so the
+    /// arranger shows only the cards the live layout will show.
     fn render_lower_column(&mut self, ui: &mut egui::Ui, s: &DaemonState, col: CardCol) {
         let ids = self.layout.column(col).to_vec();
         if self.layout_edit {
             // Only show the drop gaps once a drag is in flight, so an idle edit
-            // mode stays uncluttered.
+            // mode stays uncluttered. Hidden cards are omitted (WYSIWYG); drop
+            // indices stay ABSOLUTE (into the full column) so `move_card` places
+            // dropped cards correctly even with hidden cards interleaved.
             let dragging = egui::DragAndDrop::has_payload_of_type::<CardId>(ui.ctx());
+            let mut shown = 0;
             for (idx, id) in ids.iter().enumerate() {
+                if !self.pane_visible(PaneId::from_card(*id)) {
+                    continue;
+                }
                 if dragging {
                     self.drop_gap(ui, col, idx);
                 }
                 self.card_tile(ui, *id);
                 ui.add_space(6.0);
+                shown += 1;
             }
             if dragging {
                 self.drop_gap(ui, col, ids.len());
-            } else if ids.is_empty() {
+            } else if shown == 0 {
                 ui.weak("(empty — drag a card here)");
             }
         } else {
@@ -387,36 +395,87 @@ impl GuiApp {
                 .any(|&id| self.pane_visible(PaneId::from_card(id)))
     }
 
-    /// Wide layout: three columns — Effects | EQ bands (flexible centre) |
-    /// Devices/Profiles — that FILL the width like a native desktop app's panes
-    /// (thin splitter rules between them). EQ bands takes all the slack so its
-    /// table grows into the space rather than leaving a centred island. Side
-    /// panels drop when the user has hidden every card in them; when EQ bands is
-    /// hidden the remaining cards stack full-width instead.
+    /// Wide layout controls strip. Arrange (edit) mode and live mode diverge, so
+    /// each has its own renderer; both honour the hidden-panes set.
     fn lower_columns(&mut self, ui: &mut egui::Ui, state: Option<&DaemonState>) {
-        // Edit-mode banner spans the top of the controls strip.
         if self.layout_edit {
-            egui::Panel::top("layout_edit_banner")
-                .frame(egui::Frame::NONE)
-                .show_separator_line(false)
-                .show_inside(ui, |ui| self.layout_edit_banner(ui));
+            self.lower_columns_arrange(ui, state);
+        } else {
+            self.lower_columns_live(ui, state);
         }
+    }
 
-        // Arrange mode always shows the full 3-column arranger (both side columns
-        // + the live bands centre), ignoring the hidden-panes set — arranging is
-        // about placement, not visibility.
-        let bands_visible = self.layout_edit || self.pane_visible(PaneId::Bands);
+    /// Arrange (edit-layout) mode: the fixed 3-column arranger with draggable
+    /// tiles and drop zones. Respects the hidden-panes set — hidden cards are
+    /// omitted from the columns and a hidden EQ-bands centre shows a hint instead
+    /// of the table — so the arranger matches what the live layout will show.
+    /// Both side columns always render so an empty column stays a drop target;
+    /// the banner's Reset unhides every pane, so hiding everything is never a
+    /// dead-end.
+    fn lower_columns_arrange(&mut self, ui: &mut egui::Ui, state: Option<&DaemonState>) {
+        egui::Panel::top("layout_edit_banner")
+            .frame(egui::Frame::NONE)
+            .show_separator_line(false)
+            .show_inside(ui, |ui| self.layout_edit_banner(ui));
+        egui::Panel::left("effects_col")
+            .resizable(false)
+            .exact_size(EFFECTS_W)
+            .frame(egui::Frame::NONE)
+            .show_separator_line(false)
+            .show_inside(ui, |ui| {
+                if let Some(s) = state {
+                    padded_scroll(ui, "effects_scroll", |ui| {
+                        self.render_lower_column(ui, s, CardCol::Left);
+                    });
+                }
+            });
+        egui::Panel::right("devices_col")
+            .resizable(false)
+            .exact_size(DEVICES_W)
+            .frame(egui::Frame::NONE)
+            .show_separator_line(false)
+            .show_inside(ui, |ui| {
+                if let Some(s) = state {
+                    padded_scroll(ui, "side", |ui| {
+                        self.render_lower_column(ui, s, CardCol::Right);
+                    });
+                }
+            });
+        egui::CentralPanel::default()
+            .frame(bands_card_frame(ui))
+            .show_inside(ui, |ui| {
+                if self.pane_visible(PaneId::Bands) {
+                    if let Some(s) = state {
+                        self.bands_card(ui, s);
+                    }
+                } else {
+                    ui.add_space(8.0);
+                    ui.weak("EQ bands hidden — show it in Settings → Panes.");
+                }
+            });
+        // Apply a card move requested by a drop this frame, now that both columns
+        // have finished rendering (never mutate the lists mid-iteration).
+        if let Some((id, col, idx)) = self.pending_card_move.take() {
+            self.layout.move_card(id, col, idx);
+        }
+    }
+
+    /// Live (non-edit) layout: three columns — Effects | EQ bands (flexible
+    /// centre) | Devices/Profiles — that FILL the width like a native desktop
+    /// app's panes. A side panel drops when the user has hidden every card in it;
+    /// when EQ bands is hidden the remaining visible cards stack full-width
+    /// instead of the 3-column split.
+    fn lower_columns_live(&mut self, ui: &mut egui::Ui, state: Option<&DaemonState>) {
         let left_cards = self.visible_cards(CardCol::Left);
         let right_cards = self.visible_cards(CardCol::Right);
 
-        if bands_visible {
-            // Three-column layout. Frame::NONE on every column so they share one
-            // top inset (the panels' default frames differ — that's why EQ bands
-            // sat lower than its neighbours) and no separator lines, so the cards
-            // float on the body background with plain gaps between them (mockup
-            // `.controls`), instead of egui's panel-boundary grid lines. A side
-            // panel shows in edit mode, or when it holds at least one visible card.
-            if self.layout_edit || !left_cards.is_empty() {
+        if self.pane_visible(PaneId::Bands) {
+            // Frame::NONE on every column so they share one top inset (the panels'
+            // default frames differ — that's why EQ bands sat lower than its
+            // neighbours) and no separator lines, so the cards float on the body
+            // background with plain gaps between them (mockup `.controls`), instead
+            // of egui's panel-boundary grid lines.
+            if !left_cards.is_empty() {
                 egui::Panel::left("effects_col")
                     .resizable(false)
                     .exact_size(EFFECTS_W)
@@ -430,7 +489,7 @@ impl GuiApp {
                         }
                     });
             }
-            if self.layout_edit || !right_cards.is_empty() {
+            if !right_cards.is_empty() {
                 egui::Panel::right("devices_col")
                     .resizable(false)
                     .exact_size(DEVICES_W)
@@ -446,25 +505,19 @@ impl GuiApp {
             }
             // The centre column IS the bands card: a card-styled CentralPanel (so
             // it fills whatever the side panels leave — full width if both are
-            // gone), with the gutter as its outer margin. Its body (head/table/
-            // footer nested panels) lives in `bands_card`.
-            let t = kit::tokens(ui);
-            let card_frame = egui::Frame::default()
-                .fill(ui.visuals().faint_bg_color)
-                .stroke(egui::Stroke::new(1.0, t.line))
-                .corner_radius(egui::CornerRadius::same(kit::R_CARD as u8))
-                .outer_margin(egui::Margin::symmetric(8, 10));
+            // gone). Its body (head/table/footer nested panels) lives in
+            // `bands_card`.
             egui::CentralPanel::default()
-                .frame(card_frame)
+                .frame(bands_card_frame(ui))
                 .show_inside(ui, |ui| {
                     if let Some(s) = state {
                         self.bands_card(ui, s);
                     }
                 });
         } else {
-            // Bands hidden (and not arranging): no side panels — the remaining
-            // visible cards stack full-width in a scroll area (the same card
-            // widget the narrow accordion uses).
+            // Bands hidden: no side panels — the remaining visible cards stack
+            // full-width in a scroll area (the same card widget the narrow
+            // accordion uses).
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
                 .show_inside(ui, |ui| {
@@ -478,11 +531,6 @@ impl GuiApp {
                         });
                     }
                 });
-        }
-        // Apply a card move requested by a drop this frame, now that both columns
-        // have finished rendering (never mutate the lists mid-iteration).
-        if let Some((id, col, idx)) = self.pending_card_move.take() {
-            self.layout.move_card(id, col, idx);
         }
     }
 
@@ -515,4 +563,14 @@ impl GuiApp {
                 }
             });
     }
+}
+
+/// The card frame for the centre EQ-bands panel (and its hidden-in-arrange
+/// placeholder), shared by the arrange and live renderers so the two can't drift.
+fn bands_card_frame(ui: &egui::Ui) -> egui::Frame {
+    egui::Frame::default()
+        .fill(ui.visuals().faint_bg_color)
+        .stroke(egui::Stroke::new(1.0, kit::tokens(ui).line))
+        .corner_radius(egui::CornerRadius::same(kit::R_CARD as u8))
+        .outer_margin(egui::Margin::symmetric(8, 10))
 }
