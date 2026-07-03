@@ -4,7 +4,7 @@
 
 use crate::app::{GuiApp, ServiceAction, ServiceFn};
 use crate::card_layout::{CardCol, CardId, CardLayout};
-use crate::panes::PaneId;
+use crate::panes::{BandsOffLayout, PaneId};
 use crate::ui::kit;
 use crate::ui::widgets::{padded_scroll, section, section_hint};
 use eframe::egui;
@@ -359,7 +359,9 @@ impl GuiApp {
             .inner_margin(egui::Margin::symmetric(10, 6))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Arranging layout — drag cards between the side columns.");
+                    ui.label(
+                        "Arranging layout — drag panes to Hidden to remove; drag back (or +) to add.",
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("Done").clicked() {
                             self.layout_edit = false;
@@ -367,7 +369,22 @@ impl GuiApp {
                         if ui.button("Reset").clicked() {
                             self.layout = CardLayout::default();
                             self.hidden_panes.clear();
+                            self.bands_off_layout = BandsOffLayout::default();
                         }
+                        ui.separator();
+                        // Bands-off layout preference (applies to the live view).
+                        ui.label("EQ bands off:");
+                        let mut pref = self.bands_off_layout;
+                        egui::ComboBox::from_id_salt("bands_off_layout")
+                            .selected_text(match pref {
+                                BandsOffLayout::Columns => "Columns",
+                                BandsOffLayout::Stacked => "Stack",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut pref, BandsOffLayout::Columns, "Columns");
+                                ui.selectable_value(&mut pref, BandsOffLayout::Stacked, "Stack");
+                            });
+                        self.bands_off_layout = pref;
                     });
                 });
             });
@@ -515,22 +532,73 @@ impl GuiApp {
                     }
                 });
         } else {
-            // Bands hidden: no side panels — the remaining visible cards stack
-            // full-width in a scroll area (the same card widget the narrow
-            // accordion uses).
-            egui::CentralPanel::default()
-                .frame(egui::Frame::NONE)
-                .show_inside(ui, |ui| {
-                    if let Some(s) = state {
-                        padded_scroll(ui, "stacked_cards", |ui| {
-                            for id in left_cards.iter().chain(&right_cards) {
-                                if self.render_card(ui, s, *id) {
-                                    ui.add_space(12.0);
+            // Bands hidden: layout per the user's preference.
+            let Some(s) = state else { return };
+            match self.bands_off_layout {
+                // Stacked: all visible cards in one full-width scrolled column.
+                BandsOffLayout::Stacked => {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show_inside(ui, |ui| {
+                            padded_scroll(ui, "stacked_cards", |ui| {
+                                for id in left_cards.iter().chain(&right_cards) {
+                                    if self.render_card(ui, s, *id) {
+                                        ui.add_space(12.0);
+                                    }
                                 }
+                            });
+                        });
+                }
+                // Columns: two equal side-by-side columns. If only one side has
+                // visible cards it fills the width; both populated → 50/50.
+                BandsOffLayout::Columns => {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show_inside(ui, |ui| {
+                            match (left_cards.is_empty(), right_cards.is_empty()) {
+                                (false, false) => {
+                                    ui.columns(2, |cols| {
+                                        padded_scroll(&mut cols[0], "dual_left", |ui| {
+                                            for id in &left_cards {
+                                                if self.render_card(ui, s, *id) {
+                                                    ui.add_space(12.0);
+                                                }
+                                            }
+                                        });
+                                        padded_scroll(&mut cols[1], "dual_right", |ui| {
+                                            for id in &right_cards {
+                                                if self.render_card(ui, s, *id) {
+                                                    ui.add_space(12.0);
+                                                }
+                                            }
+                                        });
+                                    });
+                                }
+                                (false, true) => {
+                                    padded_scroll(ui, "dual_left", |ui| {
+                                        for id in &left_cards {
+                                            if self.render_card(ui, s, *id) {
+                                                ui.add_space(12.0);
+                                            }
+                                        }
+                                    });
+                                }
+                                (true, false) => {
+                                    padded_scroll(ui, "dual_right", |ui| {
+                                        for id in &right_cards {
+                                            if self.render_card(ui, s, *id) {
+                                                ui.add_space(12.0);
+                                            }
+                                        }
+                                    });
+                                }
+                                // Both empty + bands hidden ⇒ lower_has_content() is
+                                // false, so this branch isn't reached (graph fills).
+                                (true, true) => {}
                             }
                         });
-                    }
-                });
+                }
+            }
         }
     }
 
