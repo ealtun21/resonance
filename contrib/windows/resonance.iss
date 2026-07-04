@@ -28,6 +28,11 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
+; Setup closes every Resonance process itself in PrepareToInstall (see [Code]).
+; Disable the Restart Manager so it never prompts to close the tray: the tray is
+; a background winit/tray-icon app with no normal window that responds to a
+; graceful-close request, so that prompt could never actually close it.
+CloseApplications=no
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 
@@ -76,6 +81,20 @@ Filename: "powershell.exe"; \
     Flags: runhidden waituntilterminated; RunOnceId: "RemoveApo"
 
 [Code]
+// Force-close every Resonance process so its .exe files are unlocked and can be
+// replaced (install) or deleted (uninstall). resonance-tray.exe MUST be listed:
+// the tray runs independently of the daemon/GUI, so leaving it out lets it lock
+// its own .exe and block the install (and survive an uninstall).
+procedure KillResonanceProcesses;
+var
+  ResultCode: Integer;
+begin
+  Exec('taskkill.exe',
+    '/f /im resonanced.exe /im resonance-gui.exe /im resonance-tui.exe' +
+    ' /im resonance-tray.exe /im resonance.exe',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
 // The APO DLL may be loaded in audiodg.exe (the audio engine) from a prior
 // install, which would block overwriting it ("DeleteFile failed; Access is
 // denied"). Stop the audio service before copying files so the DLL is free;
@@ -85,10 +104,36 @@ var
   ResultCode: Integer;
 begin
   // Close the running daemon/clients so their .exe files can be replaced.
-  Exec('taskkill.exe',
-    '/f /im resonanced.exe /im resonance-gui.exe /im resonance-tui.exe /im resonance.exe',
-    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  KillResonanceProcesses;
   // Stop the audio engine so audiodg.exe releases the APO DLL.
   Exec('net.exe', 'stop audiosrv /y', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Result := '';
+end;
+
+// The uninstaller has no built-in way to stop running processes, so close them
+// before file removal — otherwise the tray/daemon keep running after uninstall
+// and their locked .exe files are left behind. usUninstall fires before any
+// files are deleted (and before [UninstallRun]).
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  ResultCode: Integer;
+begin
+  if CurUninstallStep = usUninstall then
+  begin
+    KillResonanceProcesses;
+    // The tray writes its own HKCU\...\Run "ResonanceTray" value at runtime (see
+    // resonance-ipc tray/autostart), which uninsdeletevalue never manages — drop
+    // it so uninstall does not leave a dead autostart pointing at the removed
+    // tray exe. Also clear the daemon "Resonance" value in case autostart was
+    // enabled at runtime rather than via the install task. A missing value makes
+    // reg delete return nonzero; ignore it (already gone).
+    Exec('reg.exe',
+      'delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run"' +
+      ' /v ResonanceTray /f',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec('reg.exe',
+      'delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run"' +
+      ' /v Resonance /f',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
 end;
