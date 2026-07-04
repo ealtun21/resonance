@@ -33,6 +33,9 @@ impl GuiApp {
     fn app_row(&mut self, ui: &mut egui::Ui, app: &AppStream) {
         const PCT_W: f32 = 46.0;
         let boost_col = self.palette.boost;
+        // Optimistic volume: the daemon's read-back lags the instant audio
+        // effect, so show the value the user is dragging until the poll confirms.
+        let shown_vol = crate::app::reconcile_vol(&mut self.app_vol_opt, &app.key, app.volume);
 
         // Line 1: mute toggle · name · right-aligned percentage.
         ui.horizontal(|ui| {
@@ -74,7 +77,7 @@ impl GuiApp {
             let (pr, _) = ui.allocate_exact_size(egui::vec2(PCT_W, 22.0), egui::Sense::hover());
             let pct_col = if app.muted {
                 t.faint
-            } else if app.volume > 1.0001 {
+            } else if shown_vol > 1.0001 {
                 boost_col
             } else {
                 t.dim
@@ -82,7 +85,7 @@ impl GuiApp {
             ui.painter().text(
                 egui::pos2(pr.right(), pr.center().y),
                 egui::Align2::RIGHT_CENTER,
-                format!("{:.0}%", app.volume * 100.0),
+                format!("{:.0}%", shown_vol * 100.0),
                 egui::FontId::monospace(kit::T_CAPTION),
                 pct_col,
             );
@@ -90,8 +93,10 @@ impl GuiApp {
 
         // Line 2: thin full-width volume slider.
         ui.add_space(2.0);
-        let mut vol = app.volume.min(VOL_MAX);
+        let mut vol = shown_vol.min(VOL_MAX);
         if kit::slider_h(ui, ui.available_width(), 12.0, &mut vol, 0.0..=VOL_MAX) {
+            self.app_vol_opt
+                .insert(app.key.clone(), (vol, std::time::Instant::now()));
             self.queue(Command::SetAppVolume {
                 key: app.key.clone(),
                 volume: vol,

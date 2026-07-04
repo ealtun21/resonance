@@ -321,7 +321,16 @@ pub(crate) fn slider_h(
     if resp.dragged() || resp.clicked() {
         if let Some(p) = resp.interact_pointer_pos() {
             let f = f64::from(((p.x - x0) / tw).clamp(0.0, 1.0));
-            let nv = lo + f * (hi - lo);
+            let mut nv = lo + f * (hi - lo);
+            // Bipolar sliders (preamp, bass, …) snap to exactly 0 within a small
+            // dead zone around the centre, so the neutral value is reachable
+            // instead of sticking just off zero (e.g. 0.1 dB).
+            if bipolar {
+                let zero_x = x0 + ((0.0 - lo) / (hi - lo)) as f32 * tw;
+                if (p.x - zero_x).abs() <= 3.0 {
+                    nv = 0.0;
+                }
+            }
             if (nv - *value).abs() > f64::EPSILON {
                 *value = nv;
                 changed = true;

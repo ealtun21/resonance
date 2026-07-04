@@ -209,8 +209,16 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, _el: &ActiveEventLoop, ev: UserEvent) {
         match ev {
             UserEvent::Model(m) => {
-                self.model = m;
-                self.refresh_tray();
+                // Only rebuild when something actually changed. On Windows
+                // `set_menu` replaces the live HMENU, which dismisses an open
+                // context menu — so an unconditional refresh on every poll tick
+                // (~1-3 s) closed the menu out from under the user. Skipping the
+                // no-op refresh keeps the menu open while idle; a genuine state
+                // change (power/profile/daemon) is rare and worth the rebuild.
+                if m != self.model {
+                    self.model = m;
+                    self.refresh_tray();
+                }
             }
             UserEvent::Menu(me) => self.on_menu(&me.id),
             // Treat a completed left click on the icon as `LeftClick`; ignore

@@ -369,6 +369,78 @@ pub struct GuiApp {
     /// Dev/screenshot hook: hold the reference Customize popup open
     /// (`RESONANCE_OPEN=customize`). No effect in normal use.
     pub(crate) open_customizer: bool,
+    /// Optimistic per-app / per-sink volume overrides (key → (value, set-at)).
+    /// The slider effect is instant but the daemon's read-back of the *actual*
+    /// system volume lags (Windows WASAPI especially), so a bare `state.volume`
+    /// snaps the handle back to the stale value after a drag. We show the
+    /// optimistic value until the poll confirms it (within `VOL_OPT_TOL`) or the
+    /// override ages out (`VOL_OPT_TIMEOUT`), keeping the slider glued to the
+    /// cursor. Session-only.
+    pub(crate) app_vol_opt: std::collections::HashMap<String, (f64, Instant)>,
+    pub(crate) sink_vol_opt: std::collections::HashMap<String, (f64, Instant)>,
+}
+
+/// How close the polled volume must get before an optimistic override is
+/// considered confirmed and dropped.
+pub(crate) const VOL_OPT_TOL: f64 = 0.005;
+/// How long an optimistic volume override survives without confirmation before
+/// we give up and fall back to the polled value (guards against a value the
+/// daemon never reaches, e.g. an external mixer change mid-drag).
+pub(crate) const VOL_OPT_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[cfg(test)]
+mod vol_opt_tests {
+    use super::*;
+
+    #[test]
+    fn override_shows_until_poll_confirms() {
+        let mut m = std::collections::HashMap::new();
+        m.insert("app".to_string(), (0.30, Instant::now()));
+        // Poll still reports the stale value → keep showing the optimistic one.
+        assert!((reconcile_vol(&mut m, "app", 0.80) - 0.30).abs() < 1e-9);
+        assert!(m.contains_key("app"));
+        // Poll catches up (within tolerance) → drop the override, show actual.
+        assert!((reconcile_vol(&mut m, "app", 0.3004) - 0.3004).abs() < 1e-9);
+        assert!(!m.contains_key("app"));
+    }
+
+    #[test]
+    fn override_ages_out_when_never_confirmed() {
+        let mut m = std::collections::HashMap::new();
+        let aged = Instant::now()
+            .checked_sub(VOL_OPT_TIMEOUT + Duration::from_secs(1))
+            .expect("monotonic clock older than the timeout");
+        m.insert("s".to_string(), (0.10, aged));
+        // Aged past the timeout → give up on the override, fall back to actual.
+        assert!((reconcile_vol(&mut m, "s", 0.90) - 0.90).abs() < 1e-9);
+        assert!(!m.contains_key("s"));
+    }
+
+    #[test]
+    fn no_override_passes_actual_through() {
+        let mut m = std::collections::HashMap::new();
+        assert!((reconcile_vol(&mut m, "missing", 0.42) - 0.42).abs() < 1e-9);
+    }
+}
+
+/// Reconcile an optimistic volume override against the freshly-polled `actual`
+/// value: return the value to display, dropping the override once the poll has
+/// caught up or the override has aged out.
+pub(crate) fn reconcile_vol(
+    pending: &mut std::collections::HashMap<String, (f64, Instant)>,
+    key: &str,
+    actual: f64,
+) -> f64 {
+    if let Some(&(v, t)) = pending.get(key) {
+        if (actual - v).abs() <= VOL_OPT_TOL || t.elapsed() >= VOL_OPT_TIMEOUT {
+            pending.remove(key);
+            actual
+        } else {
+            v
+        }
+    } else {
+        actual
+    }
 }
 
 /// Messages from the UI thread to the IPC worker.
@@ -736,6 +808,8 @@ impl GuiApp {
             hidden_curves: std::collections::HashSet::new(),
             demo: std::env::var("RESONANCE_DEMO").is_ok(),
             open_customizer: std::env::var("RESONANCE_OPEN").as_deref() == Ok("customize"),
+            app_vol_opt: std::collections::HashMap::new(),
+            sink_vol_opt: std::collections::HashMap::new(),
         };
         if let Some(p) = persisted_ref.and_then(|j| serde_json::from_str(&j).ok()) {
             app.reference.restore(p);

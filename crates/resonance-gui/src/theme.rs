@@ -271,8 +271,13 @@ fn native_palette() -> Palette {
 /// light base. `Native (auto)` passes the detected OS mode; the manual
 /// `Native Dark` / `Native Light` variants force their own.
 fn native_palette_for(dark: bool) -> Palette {
-    // Breeze blue is the sensible fallback when no accent can be read.
-    let accent = system_accent().unwrap_or_else(|| rgb(61, 174, 233));
+    // Breeze blue is the sensible fallback when no accent can be read — or when
+    // the OS reports an unusable one. Some Windows setups store a near-black DWM
+    // `AccentColor`; used verbatim it renders sliders/handles/selection almost
+    // invisible on the dark base, so treat it as "no accent" and fall back.
+    let accent = system_accent()
+        .filter(|&c| usable_accent(c))
+        .unwrap_or_else(|| rgb(61, 174, 233));
     if dark {
         Palette {
             accent,
@@ -294,6 +299,14 @@ fn native_palette_for(dark: bool) -> Palette {
             highlight: darken(accent, 1.15),
         }
     }
+}
+
+/// Whether a system-reported accent is bright enough to read as an accent on a
+/// dark surface. Rejects near-black colours (every channel below the floor),
+/// which some Windows configs report and which would paint sliders/handles /
+/// the selection wash almost invisible — falling back to the Breeze accent.
+fn usable_accent(c: Color32) -> bool {
+    c.r().max(c.g()).max(c.b()) >= 48
 }
 
 /// The host desktop's accent colour, if discoverable.
@@ -595,4 +608,20 @@ fn matugen_is_light() -> bool {
         let c = p.graph_bg;
         (u32::from(c.r()) + u32::from(c.g()) + u32::from(c.b())) / 3 > 140
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accent_usability_rejects_near_black() {
+        // Near-black accents (the broken Windows DWM case) are unusable and must
+        // fall back; ordinary saturated accents are kept.
+        assert!(!usable_accent(rgb(0, 0, 0)));
+        assert!(!usable_accent(rgb(20, 18, 24)));
+        assert!(usable_accent(rgb(61, 174, 233))); // breeze blue
+        assert!(usable_accent(rgb(48, 0, 0))); // exactly at the floor on one channel
+        assert!(usable_accent(rgb(200, 200, 200)));
+    }
 }

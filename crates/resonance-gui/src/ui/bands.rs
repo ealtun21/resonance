@@ -196,6 +196,10 @@ impl GuiApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show_inside(ui, |ui| {
+                // Reserve the scrollbar's gutter instead of floating it over the
+                // content, so the vertical bar never overlaps the rightmost cell
+                // (the per-band remove ✕ button) when the table overflows.
+                ui.spacing_mut().scroll.floating = false;
                 egui::ScrollArea::vertical()
                     .id_salt("bands_scroll")
                     .auto_shrink([false, false])
