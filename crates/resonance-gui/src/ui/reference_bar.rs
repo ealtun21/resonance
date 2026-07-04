@@ -269,9 +269,12 @@ impl GuiApp {
                 kit::text_width(ui, kit::T_VALUE, "Target") + 2.0 + kit::SP_S + 148.0
             }
             RefCtl::Customize => icon_label("Customize"),
-            RefCtl::CaptureResult => icon_label("Capture EQ'd"),
             // Icon-only ghost pills all share the same fixed width.
-            RefCtl::Manage | RefCtl::Clear | RefCtl::MeasFile | RefCtl::ToTarget => icon_only,
+            RefCtl::Manage
+            | RefCtl::Clear
+            | RefCtl::MeasFile
+            | RefCtl::ToTarget
+            | RefCtl::CaptureResult => icon_only,
             RefCtl::MeasChip => label_only(&self.meas_label()),
             RefCtl::Channel => label_only(self.reference.channel.label()),
             RefCtl::Raw => check("Raw"),
@@ -409,7 +412,7 @@ impl GuiApp {
     fn ref_to_target_pill(&mut self, ui: &mut egui::Ui) {
         if kit::pill_icon(
             ui,
-            Some(Icon::Save),
+            Some(Icon::MeasToTarget),
             "",
             false,
             true,
@@ -627,8 +630,8 @@ impl GuiApp {
         let id = ui.make_persistent_id("ref_capture_pop");
         kit::pill_popup(
             ui,
-            Some(Icon::Save),
-            "Capture EQ'd",
+            Some(Icon::ResultToTarget),
+            "",
             "Save the current EQ'd result (measurement + EQ) as a reusable target",
             id,
             300.0,

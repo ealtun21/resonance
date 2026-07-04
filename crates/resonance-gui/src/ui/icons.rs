@@ -43,6 +43,8 @@ pub(crate) enum Icon {
     Grip,
     Solo,
     Listen,
+    MeasToTarget,
+    ResultToTarget,
 }
 
 /// Every icon with a label — drives the dev gallery (`RESONANCE_ICON_GALLERY=1`).
@@ -74,6 +76,8 @@ pub(crate) const ALL: &[(Icon, &str)] = &[
     (Icon::Grip, "Grip"),
     (Icon::Solo, "Solo"),
     (Icon::Listen, "Listen"),
+    (Icon::MeasToTarget, "Meas to target"),
+    (Icon::ResultToTarget, "Result to target"),
 ];
 
 /// Draw `icon` centred in `rect`, tinted `color`. Stroke weight scales with the
@@ -220,7 +224,35 @@ fn paths(p: &Pen, icon: Icon) {
         Icon::Grip => draw_grip(p),
         Icon::Solo => draw_solo(p),
         Icon::Listen => draw_listen(p),
+        Icon::MeasToTarget => draw_meas_to_target(p),
+        Icon::ResultToTarget => draw_result_to_target(p),
     }
+}
+
+/// Down-arrow into a target bullseye — "save this to a target curve". Used for
+/// saving the loaded measurement as a target.
+fn draw_meas_to_target(p: &Pen) {
+    p.seg((0.50, 0.12), (0.50, 0.40));
+    p.head((0.50, 0.46), (0.0, 1.0), 0.14);
+    p.ring(0.50, 0.68, 0.18);
+    p.dot(0.50, 0.68, 0.055);
+}
+
+/// A single sine cycle resting on a target bullseye — "save the EQ'd result
+/// (the shaped curve) as a target". The wave silhouette distinguishes it from
+/// the plain down-arrow of [`draw_meas_to_target`] at a glance.
+fn draw_result_to_target(p: &Pen) {
+    let pts: Vec<(f32, f32)> = (0..=24)
+        .map(|i| {
+            let t = i as f32 / 24.0;
+            let x = 0.22 + 0.56 * t;
+            let y = 0.30 - 0.14 * (t * std::f32::consts::TAU).sin();
+            (x, y)
+        })
+        .collect();
+    p.line(&pts);
+    p.ring(0.50, 0.68, 0.18);
+    p.dot(0.50, 0.68, 0.055);
 }
 
 /// Headphones (the "solo" affordance): a headband arc over two ear cups.
