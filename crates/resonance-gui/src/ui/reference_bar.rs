@@ -43,6 +43,7 @@ enum RefCtl {
     Channel,
     MeasFile,
     ToTarget,
+    CaptureResult,
     Raw,
     Bounds,
     Normalize,
@@ -53,7 +54,7 @@ enum RefCtl {
 /// controls never collapse (the target picker + measurement chip — the minimum
 /// to be useful); among the rest, the LOWEST `drop_priority` collapses into the
 /// ☰ menu first as the bar narrows, so the view toggles go before Auto-EQ/Clear.
-const REF_LAYOUT: [(RefCtl, Section, bool, u8); 12] = [
+const REF_LAYOUT: [(RefCtl, Section, bool, u8); 13] = [
     (RefCtl::TargetDd, Section::Targets, true, 0),
     (RefCtl::Customize, Section::Targets, false, 8),
     (RefCtl::Manage, Section::Targets, false, 7),
@@ -62,6 +63,7 @@ const REF_LAYOUT: [(RefCtl, Section, bool, u8); 12] = [
     (RefCtl::Channel, Section::Measurements, false, 6),
     (RefCtl::MeasFile, Section::Measurements, false, 5),
     (RefCtl::ToTarget, Section::Measurements, false, 4),
+    (RefCtl::CaptureResult, Section::Measurements, false, 11),
     (RefCtl::Raw, Section::Measurements, false, 3),
     (RefCtl::Bounds, Section::Measurements, false, 2),
     (RefCtl::Normalize, Section::Measurements, false, 1),
@@ -267,6 +269,7 @@ impl GuiApp {
                 kit::text_width(ui, kit::T_VALUE, "Target") + 2.0 + kit::SP_S + 148.0
             }
             RefCtl::Customize => icon_label("Customize"),
+            RefCtl::CaptureResult => icon_label("Capture EQ'd"),
             // Icon-only ghost pills all share the same fixed width.
             RefCtl::Manage | RefCtl::Clear | RefCtl::MeasFile | RefCtl::ToTarget => icon_only,
             RefCtl::MeasChip => label_only(&self.meas_label()),
@@ -300,6 +303,7 @@ impl GuiApp {
             RefCtl::Clear => self.ref_clear_pill(ui),
             RefCtl::Channel => self.ref_channel_pill(ui),
             RefCtl::ToTarget => self.ref_to_target_pill(ui),
+            RefCtl::CaptureResult => self.ref_capture_button(ui),
             RefCtl::MeasFile => self.ref_meas_file_pill(ui),
             RefCtl::Raw => self.ref_raw_check(ui),
             RefCtl::Bounds => self.ref_bounds_check(ui),
@@ -552,6 +556,10 @@ impl GuiApp {
                     self.meas_to_target();
                 }
             }
+            RefCtl::CaptureResult => {
+                kit::menu_caption(ui, "Capture EQ'd result");
+                self.ref_capture_body(ui);
+            }
             RefCtl::MeasFile => {
                 if kit::menu_item(ui, "Load measurement file…", false) {
                     self.open_curve_picker(false);
@@ -608,6 +616,83 @@ impl GuiApp {
         if let Some(m) = self.reference.measurement.clone() {
             let name = self.reference.measurement_name.clone();
             self.reference.save_target(&name, &m);
+        }
+    }
+
+    /// "Capture EQ'd result" — a popup with a name field (seeded from the
+    /// measurement) and a Save button that bakes the current measurement+EQ into
+    /// the target library. Sibling of `meas_to_target`, which saves the raw
+    /// (un-EQ'd) measurement.
+    fn ref_capture_button(&mut self, ui: &mut egui::Ui) {
+        let id = ui.make_persistent_id("ref_capture_pop");
+        kit::pill_popup(
+            ui,
+            Some(Icon::Save),
+            "Capture EQ'd",
+            "Save the current EQ'd result (measurement + EQ) as a reusable target",
+            id,
+            300.0,
+            |ui| self.ref_capture_body(ui),
+        );
+    }
+
+    fn ref_capture_body(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            egui::RichText::new("Save the current EQ'd result (measurement + EQ) as a target.")
+                .size(kit::T_CAPTION)
+                .weak(),
+        );
+        ui.add_space(kit::SP_XS);
+        // Seed the name field from the measurement the first time it's empty.
+        if self.reference.capture_name.trim().is_empty() {
+            self.reference.capture_name = self.reference.eqd_target_default_name();
+        }
+        let has_meas = self.reference.measurement.is_some();
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = kit::SP_S;
+            kit::text_field(
+                ui,
+                180.0,
+                ui.make_persistent_id("ref_capture_name"),
+                &mut self.reference.capture_name,
+                "target name…",
+                false,
+            );
+            if kit::button_tip(
+                ui,
+                "Save",
+                true,
+                has_meas,
+                "Capture the EQ'd result into the target library",
+            ) {
+                self.capture_result_to_target();
+            }
+        });
+    }
+
+    fn capture_result_to_target(&mut self) {
+        let Some((bands, sr)) = self
+            .state
+            .as_ref()
+            .map(|st| (st.bands.clone(), st.sample_rate))
+        else {
+            self.set_status("no daemon connection");
+            return;
+        };
+        let name = {
+            let n = self.reference.capture_name.trim();
+            if n.is_empty() {
+                self.reference.eqd_target_default_name()
+            } else {
+                n.to_string()
+            }
+        };
+        if let Some(curve) = self.reference.result_curve(&bands, sr) {
+            self.reference.save_target(&name, &curve);
+            self.reference.capture_name.clear();
+            self.set_status(format!("captured EQ'd target: {name}"));
+        } else {
+            self.set_status("load a measurement first");
         }
     }
 
@@ -1581,9 +1666,12 @@ fn ctl_present(c: RefCtl, has_meas: bool, has_stereo: bool) -> bool {
         | RefCtl::MeasChip
         | RefCtl::MeasFile
         | RefCtl::AutoEq => true,
-        RefCtl::Clear | RefCtl::ToTarget | RefCtl::Raw | RefCtl::Bounds | RefCtl::Normalize => {
-            has_meas
-        }
+        RefCtl::Clear
+        | RefCtl::ToTarget
+        | RefCtl::CaptureResult
+        | RefCtl::Raw
+        | RefCtl::Bounds
+        | RefCtl::Normalize => has_meas,
         RefCtl::Channel => has_meas && has_stereo,
     }
 }
@@ -1804,6 +1892,7 @@ mod tests {
         for c in [
             RefCtl::Clear,
             RefCtl::ToTarget,
+            RefCtl::CaptureResult,
             RefCtl::Raw,
             RefCtl::Bounds,
             RefCtl::Normalize,
