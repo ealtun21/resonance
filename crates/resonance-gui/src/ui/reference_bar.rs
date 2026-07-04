@@ -63,7 +63,7 @@ const REF_LAYOUT: [(RefCtl, Section, bool, u8); 13] = [
     (RefCtl::Channel, Section::Measurements, false, 6),
     (RefCtl::MeasFile, Section::Measurements, false, 5),
     (RefCtl::ToTarget, Section::Measurements, false, 4),
-    (RefCtl::CaptureResult, Section::Measurements, false, 11),
+    (RefCtl::CaptureResult, Section::Measurements, false, 0),
     (RefCtl::Raw, Section::Measurements, false, 3),
     (RefCtl::Bounds, Section::Measurements, false, 2),
     (RefCtl::Normalize, Section::Measurements, false, 1),
