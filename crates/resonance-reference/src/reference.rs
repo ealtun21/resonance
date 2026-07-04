@@ -238,6 +238,11 @@ pub struct ReferenceState {
     pub adj_ear: f64,
     pub adj_treble: f64,
 
+    /// Transient scratch for the GUI "capture EQ'd result" name field. Not
+    /// persisted (this struct has no serde derive; persistence goes through
+    /// `PersistedReference`).
+    pub capture_name: String,
+
     /// Measurement saved per profile name. Populated on profile save, applied on
     /// profile load (so loading a profile restores the measurement it was saved
     /// with — for visual A/B comparison). The target is not stored here. Prefer
@@ -274,6 +279,7 @@ impl Default for ReferenceState {
             adj_bass: 0.0,
             adj_ear: 0.0,
             adj_treble: 0.0,
+            capture_name: String::new(),
             profile_meas: HashMap::new(),
         }
     }
@@ -737,6 +743,41 @@ impl ReferenceState {
         c.norm_offset_mean(LOG_MIN, LOG_MAX)
     }
 
+    /// Build the current EQ'd-device response — the loaded measurement shaped by
+    /// the EQ `bands` — as a standalone target curve, mean-removed so only the
+    /// shape is stored (targets are compared by shape; broadband loudness is the
+    /// daemon preamp's job). Returns `None` when no measurement is loaded, since
+    /// an EQ'd-device target is only meaningful relative to a real measurement.
+    #[must_use]
+    pub fn result_curve(&self, bands: &[BandState], sample_rate: f64) -> Option<RefCurve> {
+        const N: usize = 240;
+        let meas = self.measurement.as_ref()?;
+        let mut pts: Vec<(f64, f64)> = (0..N)
+            .map(|i| {
+                let lf = LOG_MIN + (i as f64 / (N - 1) as f64) * (LOG_MAX - LOG_MIN);
+                let f = 10f64.powf(lf);
+                (f, meas.interp(f) + response_db(bands, f, sample_rate))
+            })
+            .collect();
+        let mean_db = pts.iter().map(|&(_, db)| db).sum::<f64>() / N as f64;
+        for p in &mut pts {
+            p.1 -= mean_db;
+        }
+        Some(RefCurve::from_points(pts))
+    }
+
+    /// Suggested name for a captured EQ'd target: `"<measurement> (EQ'd)"`, or a
+    /// generic fallback when the measurement is unnamed.
+    #[must_use]
+    pub fn eqd_target_default_name(&self) -> String {
+        let n = self.measurement_name.trim();
+        if n.is_empty() {
+            "EQ'd target".to_string()
+        } else {
+            format!("{n} (EQ'd)")
+        }
+    }
+
     /// Build the series to draw over `[vlo, vhi]` (log10 Hz) at `n` points,
     /// given the live EQ `bands`. Empty when nothing is active.
     pub fn series(
@@ -969,6 +1010,85 @@ mod tests {
                 (20000.0, offset - 1.0),
             ],
         }
+    }
+
+    fn peaking_band(freq: f64, gain_db: f64, q: f64) -> resonance_ipc::BandState {
+        resonance_ipc::BandState {
+            band_type: resonance_ipc::BandType::Peaking,
+            freq,
+            gain_db,
+            q,
+            enabled: true,
+            channels: resonance_ipc::ChannelMask::ALL,
+            slope_db_oct: 12,
+            scope: resonance_ipc::BandScope::default(),
+            dynamics: None,
+        }
+    }
+
+    #[test]
+    fn result_curve_none_without_measurement() {
+        let s = ReferenceState::default();
+        assert!(s.result_curve(&[], 48000.0).is_none());
+    }
+
+    #[test]
+    fn result_curve_flat_eq_preserves_measurement_shape_mean_removed() {
+        let mut s = ReferenceState::default();
+        // Tilted synthetic measurement: -6 dB @20 Hz rising to +6 dB @20 kHz.
+        s.set_measurement(
+            "test".into(),
+            false,
+            RefCurve::from_points(vec![(20.0, -6.0), (1000.0, 0.0), (20000.0, 6.0)]),
+            None,
+        );
+        let c = s.result_curve(&[], 48000.0).unwrap();
+        // Shape-only: the grid mean is ~0.
+        let mean = c.points.iter().map(|&(_, d)| d).sum::<f64>() / c.points.len() as f64;
+        assert!(
+            mean.abs() < 1e-9,
+            "captured curve should be mean-removed, got {mean}"
+        );
+        // With a flat EQ the result equals the measurement up to a constant, so
+        // the span between two frequencies matches the measurement's span.
+        let span_res = c.interp(20000.0) - c.interp(20.0);
+        let span_meas = 6.0 - (-6.0);
+        assert!(
+            (span_res - span_meas).abs() < 0.1,
+            "span {span_res} vs {span_meas}"
+        );
+    }
+
+    #[test]
+    fn result_curve_applies_eq_band() {
+        let mut s = ReferenceState::default();
+        // Flat measurement so the only shaping is the EQ band.
+        s.set_measurement(
+            "flat".into(),
+            false,
+            RefCurve::from_points(vec![(20.0, 0.0), (20000.0, 0.0)]),
+            None,
+        );
+        let flat = s.result_curve(&[], 48000.0).unwrap();
+        let boosted = s
+            .result_curve(&[peaking_band(1000.0, 6.0, 1.0)], 48000.0)
+            .unwrap();
+        let lift = boosted.interp(1000.0) - flat.interp(1000.0);
+        // Mean-removal (shape-only capture) trims a Q=1 6 dB bump's apparent
+        // height at Fc by ~1.05 dB over the 20 Hz-20 kHz log grid, so the
+        // tolerance is a little wider than the raw per-band gain would need.
+        assert!(
+            (lift - 6.0).abs() < 1.1,
+            "expected ~+6 dB at Fc, got {lift}"
+        );
+    }
+
+    #[test]
+    fn eqd_target_default_name_from_measurement_else_fallback() {
+        let mut s = ReferenceState::default();
+        assert_eq!(s.eqd_target_default_name(), "EQ'd target");
+        s.set_measurement("HD650".into(), false, curve(0.0), None);
+        assert_eq!(s.eqd_target_default_name(), "HD650 (EQ'd)");
     }
 
     #[test]
