@@ -2173,7 +2173,7 @@ fn render_tab_reference(s: &SettingsState, app: &App, frame: &mut Frame, area: R
     } else {
         "fit measurement → target".to_string()
     };
-    let rows: [(&str, String, &str); 13] = [
+    let rows: [(&str, String, &str); 14] = [
         (
             "Reference",
             on(r.enabled).to_string(),
@@ -2232,6 +2232,11 @@ fn render_tab_reference(s: &SettingsState, app: &App, frame: &mut Frame, area: R
             String::new(),
             "(Enter zeroes tilt/bass/ear/treble)",
         ),
+        (
+            "Capture EQ'd result",
+            String::new(),
+            "(Enter: save measurement + EQ as a target)",
+        ),
     ];
 
     for (i, (label, value, desc)) in rows.iter().enumerate() {
@@ -2265,6 +2270,11 @@ fn render_tab_reference(s: &SettingsState, app: &App, frame: &mut Frame, area: R
                 Rect::new(area.x, y, area.width, 1),
             );
         }
+    }
+
+    // Inline text input overlay (capture-target name prompt).
+    if let Some(ti) = &s.text_input {
+        render_text_input_overlay(ti.label, &ti.buf, ti.cursor, frame, area);
     }
 }
 
@@ -3272,6 +3282,7 @@ mod tests {
             "Bass",
             "Treble",
             "Reset customizer",
+            "Capture EQ'd result",
         ] {
             assert!(
                 text.contains(needle),

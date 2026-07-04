@@ -2165,6 +2165,25 @@ impl App {
                     s.text_input = None;
                 }
             }
+            TextPurpose::CaptureTarget => {
+                let name = buf.trim().to_string();
+                let sr = self.state.as_ref().map_or(48000.0, |s| s.sample_rate);
+                let bands = self
+                    .state
+                    .as_ref()
+                    .map_or_else(Vec::new, |s| s.bands.clone());
+                if !name.is_empty() {
+                    if let Some(curve) = self.reference.result_curve(&bands, sr) {
+                        self.reference.write_target(&name, &curve);
+                        self.set_status(format!("captured EQ'd target: {name}"));
+                    } else {
+                        self.set_status("load a measurement first");
+                    }
+                }
+                if let InputMode::Settings(s) = &mut self.mode {
+                    s.text_input = None;
+                }
+            }
         }
     }
 
@@ -2261,6 +2280,20 @@ impl App {
                 self.reference.adj_ear = 0.0;
                 self.reference.adj_treble = 0.0;
                 self.reference.rebuild_target();
+            }
+            13 => {
+                if self.reference.measurement.is_some() {
+                    let default = self.reference.eqd_target_default_name();
+                    if let InputMode::Settings(s) = &mut self.mode {
+                        s.text_input = Some(crate::settings::TextInput::new(
+                            default,
+                            crate::settings::TextPurpose::CaptureTarget,
+                            "Target name",
+                        ));
+                    }
+                } else {
+                    self.set_status("load a measurement first");
+                }
             }
             _ => {}
         }

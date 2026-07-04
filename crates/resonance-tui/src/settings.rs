@@ -40,6 +40,9 @@ pub enum TextPurpose {
     PrefBandQ,
     TrayPoll,
     TrayRecent,
+    /// Capture the current EQ'd result (measurement + EQ) into the target
+    /// library under the entered name.
+    CaptureTarget,
 }
 
 #[derive(Debug, Clone)]
@@ -122,14 +125,16 @@ impl SettingsState {
             0 => self.profiles.len().saturating_sub(1),
             1 => self.mappings.len().saturating_sub(1),
             2 => self.sinks.len().saturating_sub(1),
+            4 => 3, // Daemon: Start / Stop / Restart / Autostart
             // Preferences: fps / refresh / confirm / band-Q / band-type / spectrum
             // + advanced toggles (slope / scope / dynamics / dither / IR /
             // channels) + swap L/R + linear phase.
-            3 => 13,
-            4 => 3, // Daemon: Start / Stop / Restart / Autostart
             // Reference: on / target / measurement / browse-online / autoeq /
-            // show-meas / normalize / bounds / tilt / bass / ear / treble / reset.
-            5 => 12,
+            // show-meas / normalize / bounds / tilt / bass / ear / treble / reset
+            // / capture.
+            // (3 and 5 coincide at 13 rows; merged so clippy::match_same_arms
+            // doesn't flag the duplicate value.)
+            3 | 5 => 13,
             // Tray: running / autostart / quit-stops-daemon / left-click / poll / recent.
             6 => 5,
             _ => 0,
