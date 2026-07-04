@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Resonance — system-wide equalizer & audio effects</title>
+<meta name="description" content="A system-wide parametric equalizer and audio-effects engine for Linux, macOS and Windows. GUI, TUI and CLI, with FxSound and EqualizerAPO preset support.">
+<meta property="og:title" content="Resonance">
+<meta property="og:description" content="System-wide equalizer & audio effects for Linux, macOS & Windows.">
+<meta property="og:image" content="media/banner.png">
+<meta property="og:type" content="website">
+<link rel="icon" href="media/banner.png">
+<style>
+  :root{
+    --bg:#0e0b16; --bg2:#15111f; --card:#181322; --border:#2a2340;
+    --text:#e9e6f2; --muted:#9a92b0; --dim:#6d6484;
+    --pur:#7c4dff; --pur2:#a98bff; --teal:#18e0d8; --teal2:#18b3ab;
+    --maxw:1120px;
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;background:var(--bg);color:var(--text);
+    font-family:"Montserrat",-apple-system,"Segoe UI",Roboto,Helvetica,Arial,"DejaVu Sans",sans-serif;
+    line-height:1.6;-webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--teal);text-decoration:none;}
+  a:hover{text-decoration:underline;}
+  img{max-width:100%;height:auto;display:block;}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 20px;}
+  .grad{background:linear-gradient(100deg,var(--pur2),var(--pur) 45%,var(--teal));
+    -webkit-background-clip:text;background-clip:text;color:transparent;}
+
+  /* nav */
+  header.nav{position:sticky;top:0;z-index:20;backdrop-filter:blur(10px);
+    background:rgba(14,11,22,.72);border-bottom:1px solid var(--border);}
+  .nav .wrap{display:flex;align-items:center;gap:18px;height:60px;}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:800;letter-spacing:-.3px;font-size:19px;}
+  .brand .dot{width:26px;height:26px;border-radius:7px;
+    background:linear-gradient(160deg,#2b2240,#15101f);border:1px solid #3a2f55;
+    display:grid;place-items:center;}
+  .brand .dot i{width:13px;height:9px;border-radius:2px;
+    background:linear-gradient(0deg,var(--pur),var(--teal));display:block;}
+  .nav nav{margin-left:auto;display:flex;gap:22px;align-items:center;}
+  .nav nav a{color:var(--muted);font-size:14.5px;font-weight:600;}
+  .nav nav a:hover{color:var(--text);text-decoration:none;}
+  .nav .gh{padding:8px 16px;border-radius:8px;border:1px solid var(--border);color:var(--text);}
+  .nav .gh:hover{border-color:var(--pur);}
+  @media(max-width:680px){.nav nav a.hideable{display:none;}}
+
+  /* hero */
+  .hero{position:relative;overflow:hidden;padding:64px 0 40px;text-align:center;}
+  .hero::before{content:"";position:absolute;inset:-40% 0 auto 0;height:520px;
+    background:radial-gradient(60% 100% at 50% 0,rgba(124,77,255,.22),transparent 70%),
+               radial-gradient(50% 80% at 80% 10%,rgba(24,224,216,.14),transparent 70%);
+    pointer-events:none;}
+  .hero .wrap{position:relative;}
+  .hero img.banner{max-width:640px;margin:0 auto 6px;filter:drop-shadow(0 20px 60px rgba(0,0,0,.5));}
+  .tag{font-size:clamp(20px,3.4vw,30px);font-weight:700;margin:14px 0 6px;letter-spacing:-.5px;}
+  .sub{color:var(--muted);font-size:clamp(15px,2vw,18px);max-width:680px;margin:0 auto 26px;}
+  .cta{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin-bottom:14px;}
+  .btn{display:inline-flex;align-items:center;gap:8px;padding:12px 22px;border-radius:10px;
+    font-weight:700;font-size:15px;transition:transform .1s ease,box-shadow .2s ease;}
+  .btn:hover{text-decoration:none;transform:translateY(-1px);}
+  .btn.primary{background:linear-gradient(100deg,var(--pur),var(--teal2));color:#fff;
+    box-shadow:0 8px 24px rgba(124,77,255,.35);}
+  .btn.ghost{background:var(--card);color:var(--text);border:1px solid var(--border);}
+  .btn.ghost:hover{border-color:var(--pur);}
+  .platforms{color:var(--dim);font-size:13.5px;font-weight:600;letter-spacing:.3px;margin-top:6px;}
+  .shot{margin-top:38px;border-radius:14px;overflow:hidden;border:1px solid var(--border);
+    box-shadow:0 30px 80px rgba(0,0,0,.55);}
+
+  section{padding:56px 0;}
+  h2{font-size:clamp(24px,3.6vw,34px);font-weight:800;letter-spacing:-.5px;margin:0 0 6px;text-align:center;}
+  .lead{color:var(--muted);text-align:center;max-width:640px;margin:0 auto 36px;}
+
+  /* features */
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px;}
+  .feat{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:22px;}
+  .feat:hover{border-color:#3a2f55;}
+  .feat .ic{font-size:22px;margin-bottom:10px;}
+  .feat h3{margin:0 0 6px;font-size:16.5px;font-weight:700;}
+  .feat p{margin:0;color:var(--muted);font-size:14.5px;}
+
+  /* screenshots */
+  .shots-alt{background:var(--bg2);}
+  .figrow{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start;margin-top:22px;}
+  @media(max-width:760px){.figrow{grid-template-columns:1fr;}}
+  figure{margin:0;}
+  figure img{border-radius:12px;border:1px solid var(--border);box-shadow:0 16px 40px rgba(0,0,0,.4);}
+  figcaption{color:var(--muted);font-size:13.5px;margin-top:10px;text-align:center;}
+  .tray-row{display:flex;gap:24px;align-items:center;flex-wrap:wrap;justify-content:center;margin-top:22px;}
+  .tray-row .txt{max-width:360px;color:var(--muted);}
+  .themegrid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:22px;}
+  @media(max-width:760px){.themegrid{grid-template-columns:repeat(2,1fr);}}
+  .themegrid figcaption{font-size:12.5px;}
+
+  /* install */
+  .instgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:20px;}
+  @media(max-width:820px){.instgrid{grid-template-columns:1fr;}}
+  .inst{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:20px;}
+  .inst h3{margin:0 0 12px;font-size:16px;display:flex;align-items:center;gap:8px;}
+  pre{background:#0b0912;border:1px solid var(--border);border-radius:9px;padding:12px 14px;
+    overflow-x:auto;font-size:13px;color:#d4cfe6;margin:0 0 10px;}
+  code{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+  .inst p{margin:0;color:var(--muted);font-size:13.5px;}
+  .inst a{font-weight:600;}
+
+  footer{border-top:1px solid var(--border);padding:34px 0;color:var(--dim);font-size:14px;}
+  footer .wrap{display:flex;gap:18px;flex-wrap:wrap;align-items:center;justify-content:space-between;}
+  footer a{color:var(--muted);font-weight:600;}
+  .flinks{display:flex;gap:20px;flex-wrap:wrap;}
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap">
+    <span class="brand"><span class="dot"><i></i></span>Resonance</span>
+    <nav>
+      <a class="hideable" href="#features">Features</a>
+      <a class="hideable" href="#screenshots">Screenshots</a>
+      <a class="hideable" href="#install">Install</a>
+      <a href="https://github.com/ealtun21/resonance/wiki">Docs</a>
+      <a class="gh" href="https://github.com/ealtun21/resonance">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrap">
+    <img class="banner" src="media/banner.png" alt="Resonance">
+    <p class="tag">A <span class="grad">system-wide equalizer</span> for every OS.</p>
+    <p class="sub">Resonance routes your system audio through a high-precision DSP chain — a full
+      parametric EQ plus FxSound-style effects — and plays it back. One daemon, three front-ends.</p>
+    <div class="cta">
+      <a class="btn primary" href="#install">Install</a>
+      <a class="btn ghost" href="https://github.com/ealtun21/resonance">★ Star on GitHub</a>
+    </div>
+    <p class="platforms">Linux&nbsp;·&nbsp;macOS&nbsp;·&nbsp;Windows&nbsp;&nbsp;—&nbsp;&nbsp;GUI&nbsp;·&nbsp;TUI&nbsp;·&nbsp;CLI</p>
+    <div class="shot"><img src="media/gui-breeze.png" alt="Resonance desktop GUI"></div>
+  </div>
+</section>
+
+<section id="features">
+  <div class="wrap">
+    <h2>Everything an EQ should be</h2>
+    <p class="lead">Precise, cross-platform, and built for preset interop — the tonal heavy lifting
+      done right.</p>
+    <div class="grid">
+      <div class="feat"><div class="ic">🎛️</div><h3>Parametric EQ</h3><p>Unlimited bands, 14 biquad
+        filter types, per-band slope (12/24/48 dB/oct) and Stereo/Mid/Side scope.</p></div>
+      <div class="feat"><div class="ic">✨</div><h3>FxSound effects</h3><p>Fidelity, Ambience,
+        Surround, Dynamic Boost and Bass — tuned to sound like FxSound.</p></div>
+      <div class="feat"><div class="ic">📈</div><h3>Reference & Auto-EQ</h3><p>Overlay a target and a
+        real measurement, stay inside preference bounds, or one-click Auto-EQ. squig.link built in.</p></div>
+      <div class="feat"><div class="ic">🧪</div><h3>Advanced DSP</h3><p>Dynamic EQ, linear-phase EQ,
+        crossfeed, ISO&nbsp;226 loudness, convolution/IR loader and dithering.</p></div>
+      <div class="feat"><div class="ic">🎚️</div><h3>Per-app & per-output</h3><p>Independent volume/mute
+        per application and per output sink, synced with the system mixer.</p></div>
+      <div class="feat"><div class="ic">🔀</div><h3>N-channel + routing</h3><p>Per-channel EQ and an
+        N×N routing matrix — not just stereo.</p></div>
+      <div class="feat"><div class="ic">🖥️</div><h3>Three clients</h3><p>A desktop GUI, a terminal
+        TUI, and a scriptable CLI — plus an optional system tray.</p></div>
+      <div class="feat"><div class="ic">🧩</div><h3>Preset interop</h3><p>FxSound <code>.fac</code>,
+        EqualizerAPO <code>.txt</code>, REW imports, AutoEq downloads and <code>.toml</code> metadata.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="screenshots" class="shots-alt">
+  <div class="wrap">
+    <h2>See it in action</h2>
+    <p class="lead">The desktop GUI, the terminal UI, the CLI, and the tray — all driving the same daemon.</p>
+
+    <figure>
+      <img src="media/gui-reference.png" alt="Reference target and Auto-EQ overlay">
+      <figcaption>Reference target + measurement overlay with one-click Auto-EQ</figcaption>
+    </figure>
+
+    <div class="figrow">
+      <figure><img src="media/tui.png" alt="Resonance TUI"><figcaption>Terminal UI (ratatui)</figcaption></figure>
+      <figure><img src="media/cli.png" alt="resonance status in the CLI"><figcaption>Scriptable CLI</figcaption></figure>
+    </div>
+
+    <div class="tray-row">
+      <img src="media/tray.png" alt="Resonance tray menu" width="230">
+      <p class="txt">An optional standalone <strong>system tray</strong> toggles power, swaps presets,
+        opens or quits a UI, and manages the daemon.</p>
+    </div>
+
+    <h2 style="margin-top:52px;">Themes</h2>
+    <p class="lead">Several built-in themes, plus a matugen/pywal auto theme.</p>
+    <div class="themegrid">
+      <figure><img src="media/gui-gruvbox.png" alt="Gruvbox"><figcaption>Gruvbox</figcaption></figure>
+      <figure><img src="media/gui-nord.png" alt="Nord"><figcaption>Nord</figcaption></figure>
+      <figure><img src="media/gui-matrix.png" alt="Matrix"><figcaption>Matrix</figcaption></figure>
+      <figure><img src="media/gui-light.png" alt="Light"><figcaption>Light</figcaption></figure>
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <h2>Install</h2>
+    <p class="lead">Native on every platform — no virtual cables, no kernel drivers.</p>
+    <div class="instgrid">
+      <div class="inst">
+        <h3>🐧 Linux</h3>
+        <pre><code>curl -fsSL https://raw.githubusercontent.com/ealtun21/resonance/master/install.sh | bash</code></pre>
+        <p>PipeWire virtual sink. Handles immutable distros (SteamOS/Silverblue) and Arch
+          <code>PKGBUILD</code>. <a href="https://github.com/ealtun21/resonance/wiki/Installation#linux">Details →</a></p>
+      </div>
+      <div class="inst">
+        <h3>🍏 macOS</h3>
+        <pre><code>git clone https://github.com/ealtun21/resonance
+cd resonance
+contrib/macos/build-app.sh</code></pre>
+        <p>macOS 14.2+ Core Audio process tap — no BlackHole/kext.
+          <a href="https://github.com/ealtun21/resonance/wiki/Installation#macos">Details →</a></p>
+      </div>
+      <div class="inst">
+        <h3>🪟 Windows</h3>
+        <pre><code>Download resonance-setup-x.y.z.exe
+from the Releases page &amp; run it.</code></pre>
+        <p>In-graph Audio Processing Object (APO). No virtual cable or driver.
+          <a href="https://github.com/ealtun21/resonance/wiki/Installation#windows">Details →</a></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span class="brand"><span class="dot"><i></i></span>Resonance</span>
+    <div class="flinks">
+      <a href="https://github.com/ealtun21/resonance">GitHub</a>
+      <a href="https://github.com/ealtun21/resonance/wiki">Wiki</a>
+      <a href="https://github.com/ealtun21/resonance/releases">Releases</a>
+      <a href="https://github.com/ealtun21/resonance/blob/master/docs/ROADMAP.md">Roadmap</a>
+      <a href="https://github.com/ealtun21/resonance/blob/master/LICENSE">GPL-3.0</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
