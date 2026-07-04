@@ -688,7 +688,7 @@ impl GuiApp {
             }
         };
         if let Some(curve) = self.reference.result_curve(&bands, sr) {
-            self.reference.save_target(&name, &curve);
+            self.reference.write_target(&name, &curve);
             self.reference.capture_name.clear();
             self.set_status(format!("captured EQ'd target: {name}"));
         } else {
