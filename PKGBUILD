@@ -3,7 +3,7 @@
 # so this package is named 'resonance-eq'. The installed binaries keep their
 # plain names (resonanced, resonance, resonance-tui, resonance-gui).
 pkgname=resonance-eq
-pkgver=0.9.1
+pkgver=0.9.2
 pkgrel=1
 pkgdesc="Terminal EQ daemon for Linux/PipeWire with FxSound .fac and EqualizerAPO preset support"
 arch=('x86_64')

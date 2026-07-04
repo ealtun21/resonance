@@ -7,7 +7,7 @@
 # After cutting a new release, refresh the checksums with:
 #   updpkgsums
 pkgname=resonance-eq-bin
-pkgver=0.9.1
+pkgver=0.9.2
 pkgrel=1
 pkgdesc="Terminal EQ daemon for Linux/PipeWire with FxSound .fac and EqualizerAPO preset support (prebuilt binaries)"
 arch=('x86_64')
