@@ -970,6 +970,18 @@ impl GuiApp {
             }
         }
 
+        // A plain click (press+release without crossing the drag threshold) never
+        // fires `drag_started`, so select the nearest node on click too — otherwise
+        // a node can only be selected by nudging it, which reads as "click doesn't
+        // work". `nearest_band` returns None off any node, so empty clicks no-op.
+        if response.clicked_by(Primary) && self.zoom_sel.is_none() && !over_legend {
+            if let Some(p) = response.interact_pointer_pos() {
+                if let Some(i) = nearest_band(state, p, axes) {
+                    self.selected_band = i;
+                }
+            }
+        }
+
         // Drag handling: left button moves a node (freq+gain), right button tunes
         // its Q (drag up = narrower). A vertical-locked node moves on the gain
         // axis only. Pick the nearest node on press.
