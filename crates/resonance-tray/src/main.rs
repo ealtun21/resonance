@@ -2,6 +2,14 @@
 //! Not standalone: refuses to run without at least one installed UI, and is
 //! never embedded in the daemon.
 
+// On Windows, run as a GUI-subsystem process so no console window appears. The
+// tray autostart writes an `HKCU\...\Run` "ResonanceTray" value pointing at this
+// exe (see `resonance_ipc::tray::autostart`); at logon Windows launches it
+// directly with no `CREATE_NO_WINDOW`, so a console-subsystem build would flash a
+// console window on every restart. This makes the invariant that autostart.rs
+// already documents ("the tray is `windows_subsystem = "windows"` too") true.
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 use menu::{MenuAction, MenuModel, build_model};
 use resonance_ipc::tray::{self, Ui, control::GUI_INSTANCE};
 use std::sync::mpsc::channel;
