@@ -156,7 +156,7 @@ fn load_ir_blob(
         ));
         Some(std::sync::Arc::new(ir))
     } else {
-        log::line("IR blob referenced by snapshot but unreadable — convolution off");
+        log::line("IR blob referenced by snapshot but unreadable - convolution off");
         None
     }
 }
@@ -235,6 +235,7 @@ fn worker_loop(weak: Weak<Shared>) {
     let mut last_ring_pos: usize = 0;
     let mut starved_ticks: u32 = 0;
     let mut watch = HeartbeatWatch::new();
+    let mut was_stale = false;
 
     loop {
         std::thread::sleep(Duration::from_millis(25));
@@ -329,16 +330,28 @@ fn worker_loop(weak: Weak<Shared>) {
         // next publish (a generation change) rebuilds the chain and
         // restores normal processing.
         let hb = crate::state::read_heartbeat_fresh(&path);
-        if watch.observe(hb, std::time::Instant::now()) {
+        let stale = watch.observe(hb, std::time::Instant::now());
+        if stale {
             if let Ok(mut g) = shared.state.try_lock() {
                 if let Some(l) = g.as_mut() {
                     if l.chain.enabled {
                         l.chain.enabled = false;
-                        crate::log::line("daemon heartbeat stale — forcing bypass");
+                        crate::log::line("daemon heartbeat stale - forcing bypass");
                     }
                 }
             }
+        } else if was_stale {
+            // Heartbeat resumed: force a snapshot re-read so `enabled` is
+            // restored per the daemon's last publish. Never blindly
+            // re-enable — after a graceful shutdown the snapshot itself
+            // says enabled=0, and recovery requires an advancing
+            // heartbeat, so a dead daemon can't revive EQ. `u64::MAX` is
+            // unreachable as a real generation (they start near 0 and
+            // increment by 2), so this unconditionally forces the rebuild
+            // path above on the next tick.
+            last_gen = u64::MAX;
         }
+        was_stale = stale;
 
         // Telemetry only while watched.
         if !want {
@@ -1144,6 +1157,114 @@ mod hires_harness {
         assert!(
             !w.observe(Some(1), t0 + Duration::from_secs(4)),
             "file back -> recovers"
+        );
+    }
+
+    /// End-to-end through the real exports: a stale heartbeat bypasses the
+    /// chain, and a RESUMED heartbeat (with no new daemon publish) rebuilds
+    /// and restores it. Guards the recovery half of the staleness watchdog —
+    /// without it, the worker only ever latches `enabled = false` and never
+    /// re-reads the snapshot once the daemon comes back.
+    #[test]
+    fn stale_heartbeat_bypasses_then_recovers_on_beat() {
+        let rate = 48_000.0;
+        let tone_hz = 1_000.0;
+        let max_frames = 1024u32;
+
+        // Publish an audible chain: +12 dB band at 1 kHz.
+        let band = ApoFilter::builder()
+            .filter_type(FilterType::Peaking)
+            .freq(tone_hz)
+            .gain_db(12.0)
+            .q(4.0)
+            .enabled(true)
+            .channels(2)
+            .sample_rate(rate)
+            .build()
+            .unwrap();
+        let chain = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(rate)
+            .add_filter(band)
+            .build();
+        let mut w = ApoStateWriter::create(&default_state_path()).expect("state writer");
+        w.publish(&chain);
+        w.beat();
+
+        let p = resonance_apo_create();
+        assert!(!p.is_null(), "create returned null");
+        resonance_apo_lock(p, 2, rate, max_frames);
+        // Let the worker build the freshly published chain before driving audio.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        let amp = 0.2f64;
+        let frames = (rate * 0.25) as usize;
+        let w0 = 2.0 * PI * tone_hz / rate;
+
+        // Process a fresh tone through the engine, chunked to `max_frames`
+        // (matching the real callback buffer size), and return the measured
+        // steady-state gain in dB.
+        let measure_gain = || -> f64 {
+            let mut buf: Vec<f32> = (0..frames)
+                .flat_map(|i| {
+                    let s = (amp * (w0 * i as f64).sin()) as f32;
+                    [s, s]
+                })
+                .collect();
+            let mut off = 0usize;
+            while off < frames {
+                let n = (frames - off).min(max_frames as usize);
+                resonance_apo_process(p, buf[off * 2..].as_mut_ptr(), n as u32, 2);
+                off += n;
+            }
+            let skip = frames / 4;
+            let mono: Vec<f64> = (skip..frames).map(|i| f64::from(buf[i * 2])).collect();
+            let in_rms = amp / 2f64.sqrt();
+            let out_rms = (mono.iter().map(|x| x * x).sum::<f64>() / mono.len() as f64).sqrt();
+            20.0 * (out_rms / in_rms).log10()
+        };
+
+        // Phase 1: heartbeat fresh (from the single beat above) → chain
+        // built, band audible.
+        let gain_live = measure_gain();
+        assert!(
+            (gain_live - 12.0).abs() < 1.5,
+            "expected ~+12 dB while heartbeat is live, got {gain_live:.2}"
+        );
+
+        // Phase 2: stop beating; wait past STALE_AFTER (2 s) plus a few
+        // worker ticks so the bypass has definitely landed.
+        std::thread::sleep(std::time::Duration::from_millis(2200));
+        let gain_stale = measure_gain();
+        assert!(
+            gain_stale.abs() < 1.0,
+            "expected ~0 dB (bypassed) once heartbeat goes stale, got {gain_stale:.2}"
+        );
+
+        // Phase 3: resume beating — deliberately WITHOUT any new publish —
+        // so the only way back is the worker invalidating its latched
+        // generation and rebuilding from the still-current snapshot.
+        for _ in 0..6 {
+            w.beat();
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let gain_recovered = measure_gain();
+        assert!(
+            (gain_recovered - 12.0).abs() < 1.5,
+            "expected ~+12 dB again after heartbeat resumes with no new publish, got {gain_recovered:.2}"
+        );
+
+        resonance_apo_unlock(p);
+        resonance_apo_destroy(p);
+
+        // Restore a flat default state for the following tests.
+        let mut w = ApoStateWriter::create(&default_state_path()).expect("state writer");
+        w.publish(
+            &ProcessorChain::builder()
+                .channels(2)
+                .sample_rate(48_000.0)
+                .build(),
         );
     }
 }

@@ -1811,6 +1811,7 @@ mod tests {
         w.beat();
         w.beat();
         assert_eq!(read_heartbeat_fresh(&path).unwrap(), h0 + 2);
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -1835,5 +1836,6 @@ mod tests {
             (s2.preamp_db - (-3.5)).abs() < 1e-12,
             "other params preserved"
         );
+        std::fs::remove_file(&path).ok();
     }
 }
