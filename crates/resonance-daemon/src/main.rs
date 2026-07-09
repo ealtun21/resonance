@@ -425,7 +425,6 @@ async fn main() -> Result<()> {
     if !acquire_singleton_or_exit()? {
         return Ok(());
     }
-    shutdown::install_signal_handlers();
 
     let (cmd_tx, cmd_rx) = RingBuffer::<state::AudioCommand>::new(256);
     let (spectrum_tx, spectrum_rx) = RingBuffer::<f32>::new(audio::SPECTRUM_BUF);
@@ -449,6 +448,7 @@ async fn main() -> Result<()> {
 
     let meters = std::sync::Arc::new(meters::AtomicMeters::default());
     let shared = state::SharedState::new(cmd_tx, route_tx, meters.clone(), app_ctl_tx, sink_ctl_tx);
+    shutdown::install_signal_handlers(&shared);
 
     spawn_spectrum_task(spectrum_rx, &shared);
     spawn_output_mapping_task(output_rx, &shared);

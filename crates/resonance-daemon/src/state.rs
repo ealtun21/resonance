@@ -242,9 +242,13 @@ impl SharedState {
         let watching = inner
             .last_poll
             .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(1500));
-        let Some(w) = inner.apo_writer.as_ref() else {
+        let Some(w) = inner.apo_writer.as_mut() else {
             return;
         };
+        // The pump runs on a fixed interval regardless of connected clients —
+        // exactly the liveness signal the APO's heartbeat watchdog consumes to
+        // decide the daemon control plane is still alive.
+        w.beat();
         // The gate is a daemon write — its store reaches the file the APO reads.
         w.set_telemetry_enabled(watching);
         if watching {
@@ -300,6 +304,16 @@ impl SharedState {
         // Mirror the new state to the Windows APO (no-op when no writer).
         if let Some(w) = inner.apo_writer.as_mut() {
             w.publish(&inner.chain);
+        }
+    }
+
+    /// Force the APO into passthrough before the daemon exits. No-op when the
+    /// APO bridge is absent (non-Windows, or bridge init failed): EQ must not
+    /// outlive the control plane.
+    pub fn publish_apo_bypass(&self) {
+        let mut guard = self.0.lock().unwrap();
+        if let Some(w) = guard.apo_writer.as_mut() {
+            w.publish_bypass();
         }
     }
 
