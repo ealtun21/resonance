@@ -42,7 +42,8 @@ pub const STATE_MAGIC: u32 = 0x4F50_4152;
 /// v7: + linear-phase EQ mode flag.
 /// v8: + transient per-band solo (audition one band; `SOLO_NONE` = off).
 /// v9: + audition mode (solo/listen) beside the `solo_band` index.
-pub const STATE_VERSION: u32 = 9;
+/// v10: + daemon liveness heartbeat (APO auto-bypass when stale).
+pub const STATE_VERSION: u32 = 10;
 
 /// `solo_band` sentinel meaning "no band soloed" (the field is a fixed `u32`, so
 /// `Option` is encoded as this reserved value rather than a niche).
@@ -254,6 +255,10 @@ pub struct SharedState {
     pub telemetry_enabled: AtomicU32,
     _pad2: u32,
     pub telemetry: Telemetry,
+    /// Daemon liveness stamp: a counter the daemon bumps ~every 30 ms while it
+    /// runs. The APO worker bypasses the chain when it stops advancing (daemon
+    /// quit, killed, or crashed) so EQ never outlives its control plane.
+    pub heartbeat: AtomicU64,
 }
 
 /// Total mapped size.
@@ -742,6 +747,7 @@ impl SharedFile {
             st.generation.store(0, Ordering::Release);
             st.telemetry_enabled.store(0, Ordering::Release);
             st.telemetry.generation.store(0, Ordering::Release);
+            st.heartbeat.store(0, Ordering::Release);
         }
         Ok(this)
     }
@@ -783,6 +789,26 @@ impl SharedFile {
         let g = st.generation.load(Ordering::Relaxed);
         st.generation.store(g.wrapping_add(1), Ordering::Release); // odd: writing
         st.snapshot = snap;
+        st.generation.store(g.wrapping_add(2), Ordering::Release); // even: done
+    }
+
+    /// Bump the daemon-liveness stamp (called ~every 30 ms by the daemon's
+    /// telemetry pump). Not a seqlock write: a torn read of a monotonically
+    /// increasing u64 still reads as "changed", which is all the APO needs.
+    pub fn beat(&mut self) {
+        let st = self.state_mut();
+        let h = st.heartbeat.load(Ordering::Relaxed);
+        st.heartbeat.store(h.wrapping_add(1), Ordering::Release);
+    }
+
+    /// Publish a bypass: keep the last chain parameters but force
+    /// `enabled = 0`, so the APO passes audio through untouched. Called on
+    /// graceful daemon shutdown — EQ must not outlive the control plane.
+    pub fn publish_bypass(&mut self) {
+        let st = self.state_mut();
+        let g = st.generation.load(Ordering::Relaxed);
+        st.generation.store(g.wrapping_add(1), Ordering::Release); // odd: writing
+        st.snapshot.enabled = 0;
         st.generation.store(g.wrapping_add(2), Ordering::Release); // even: done
     }
 
@@ -970,6 +996,22 @@ pub fn read_chain_fresh(path: &Path) -> Option<(u64, ChainSnapshot, bool)> {
         }
     }
     None
+}
+
+/// Read the daemon-liveness heartbeat with a fresh file read (a long-lived
+/// mapped view does not observe the daemon's writes across sessions on
+/// Windows — see `read_chain_fresh`). `None` = file missing/invalid, which
+/// callers must treat as "daemon gone".
+#[must_use]
+pub fn read_heartbeat_fresh(path: &Path) -> Option<u64> {
+    let b = std::fs::read(path).ok()?;
+    if b.len() < STATE_SIZE
+        || read_u32(&b, 0)? != STATE_MAGIC
+        || read_u32(&b, std::mem::offset_of!(SharedState, version))? != STATE_VERSION
+    {
+        return None;
+    }
+    read_u64(&b, std::mem::offset_of!(SharedState, heartbeat))
 }
 
 /// Fresh read of the APO's telemetry block (meters + spectrum), used by the
@@ -1759,5 +1801,39 @@ mod tests {
         assert!(r.generation() >= 2, "generation preserved on re-open");
         assert!(r.read().is_some());
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn heartbeat_beats_and_reads_fresh() {
+        let path = temp_path("hb");
+        let mut w = ApoStateWriter::create(&path).unwrap();
+        let h0 = read_heartbeat_fresh(&path).unwrap();
+        w.beat();
+        w.beat();
+        assert_eq!(read_heartbeat_fresh(&path).unwrap(), h0 + 2);
+    }
+
+    #[test]
+    fn publish_bypass_zeroes_enabled_and_advances_generation() {
+        let mut chain = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48000.0)
+            .preamp_db(-3.5)
+            .build();
+        chain.enabled = true;
+        let path = temp_path("byp");
+        let mut w = ApoStateWriter::create(&path).unwrap();
+        w.publish(&chain);
+        let (g1, s1, _) = read_chain_fresh(&path).unwrap();
+        assert_eq!(s1.enabled, 1);
+
+        w.publish_bypass();
+        let (g2, s2, _) = read_chain_fresh(&path).unwrap();
+        assert_eq!(s2.enabled, 0, "bypass must publish enabled=0");
+        assert!(g2 > g1, "generation must advance so the worker notices");
+        assert!(
+            (s2.preamp_db - (-3.5)).abs() < 1e-12,
+            "other params preserved"
+        );
     }
 }
