@@ -94,10 +94,11 @@ pub fn execute(action: &MenuAction) -> anyhow::Result<()> {
             }
         }
         MenuAction::Quit => {
-            // "Quit Resonance" (the default) tears down the daemon too; plain
-            // "Quit tray" leaves it running. Best-effort: a failed stop must not
-            // block the tray from exiting.
+            // "Quit Resonance" (the default) closes everything — GUI, daemon,
+            // tray; plain "Quit tray" exits only the tray. Best-effort: a
+            // failed stop must not block the tray from exiting.
             if tray::TrayConfig::load().quit_stops_daemon {
+                let _ = tray::control::quit_ui();
                 let _ = service::stop();
             }
             std::process::exit(0);
