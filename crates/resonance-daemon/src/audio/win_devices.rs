@@ -236,11 +236,14 @@ pub fn endpoint_guid(wasapi_id: &str) -> Option<&str> {
 /// installer (the daemon calls this for every newly-seen endpoint).
 pub fn attach_apo_endpoint(guid: &str) -> String {
     use std::io::Write;
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let script = std::env::temp_dir().join("resonance_attach_endpoint.ps1");
     if let Ok(mut f) = std::fs::File::create(&script) {
         let _ = f.write_all(ATTACH_ENDPOINT_PS.as_bytes());
     }
     match std::process::Command::new("powershell.exe")
+        .creation_flags(CREATE_NO_WINDOW)
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(&script)
         .env("RESONANCE_ATTACH_GUID", guid)

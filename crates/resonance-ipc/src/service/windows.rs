@@ -126,6 +126,22 @@ pub fn start() -> io::Result<()> {
 // Returns Result for parity with the Linux/macOS service API, where stop can fail.
 #[allow(clippy::unnecessary_wraps)]
 pub fn stop() -> io::Result<()> {
+    // Graceful first: over IPC the daemon publishes an APO bypass before
+    // exiting, so audio stops being processed the moment it dies. A bare
+    // taskkill (the fallback) skips that hook — the APO's heartbeat
+    // staleness then bypasses within ~2 s instead.
+    if let Ok(mut c) =
+        crate::transport::SyncClient::connect_with_timeout(std::time::Duration::from_millis(400))
+    {
+        if c.send(crate::Command::Shutdown).is_ok() {
+            for _ in 0..33 {
+                if !is_active() {
+                    return Ok(());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(30));
+            }
+        }
+    }
     // `/t` kills the process tree; taskkill blocks until termination is
     // initiated. A new daemon spawned right after still reclaims the pidfile:
     // the daemon's single-instance check treats a terminating PID as dead

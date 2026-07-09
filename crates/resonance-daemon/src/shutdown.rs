@@ -160,42 +160,52 @@ fn process_alive(pid: u32) -> bool {
 
 /// Install termination handlers that clean up the IPC endpoint + pidfile and
 /// exit. Unix listens for SIGINT/SIGTERM; Windows for Ctrl-C / Ctrl-Break.
-pub fn install_signal_handlers() {
+/// Either path publishes an APO bypass first: a signalled daemon must not
+/// leave the in-graph APO applying a chain whose control plane is gone.
+pub fn install_signal_handlers(shared: &crate::state::SharedState) {
     #[cfg(unix)]
-    tokio::spawn(async {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut term = match signal(SignalKind::terminate()) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("SIGTERM handler: {e}");
-                return;
+    {
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut term = match signal(SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("SIGTERM handler: {e}");
+                    return;
+                }
+            };
+            let mut int = match signal(SignalKind::interrupt()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("SIGINT handler: {e}");
+                    return;
+                }
+            };
+            tokio::select! {
+                _ = term.recv() => tracing::info!("SIGTERM received"),
+                _ = int.recv() => tracing::info!("SIGINT received"),
             }
-        };
-        let mut int = match signal(SignalKind::interrupt()) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("SIGINT handler: {e}");
-                return;
-            }
-        };
-        tokio::select! {
-            _ = term.recv() => tracing::info!("SIGTERM received"),
-            _ = int.recv() => tracing::info!("SIGINT received"),
-        }
-        cleanup();
-        std::process::exit(0);
-    });
+            shared.publish_apo_bypass();
+            cleanup();
+            std::process::exit(0);
+        });
+    }
 
     #[cfg(windows)]
-    tokio::spawn(async {
-        if let Err(e) = tokio::signal::ctrl_c().await {
-            tracing::warn!("Ctrl-C handler: {e}");
-            return;
-        }
-        tracing::info!("Ctrl-C received");
-        cleanup();
-        std::process::exit(0);
-    });
+    {
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            if let Err(e) = tokio::signal::ctrl_c().await {
+                tracing::warn!("Ctrl-C handler: {e}");
+                return;
+            }
+            tracing::info!("Ctrl-C received");
+            shared.publish_apo_bypass();
+            cleanup();
+            std::process::exit(0);
+        });
+    }
 }
 
 #[cfg(test)]
