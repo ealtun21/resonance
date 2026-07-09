@@ -153,7 +153,7 @@ pub fn stop(name: &str) -> std::io::Result<bool> {
     }
     #[cfg(windows)]
     {
-        std::process::Command::new("taskkill")
+        crate::service::windows::hidden("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .output()?;
     }
