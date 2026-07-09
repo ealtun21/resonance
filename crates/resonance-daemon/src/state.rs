@@ -234,7 +234,9 @@ impl SharedState {
     }
 
     /// Windows telemetry pump: enable APO telemetry while a client is watching,
-    /// and copy the APO's meters/spectrum into `SharedState` for clients.
+    /// and copy the APO's meters/spectrum into `SharedState` for clients. It is
+    /// ALSO the daemon's liveness heartbeat for the APO — it must keep running
+    /// even with no clients connected, or the APO will bypass a healthy daemon.
     #[cfg(target_os = "windows")]
     pub fn pump_telemetry(&self) {
         let mut guard = self.0.lock().unwrap();
@@ -311,7 +313,10 @@ impl SharedState {
     /// APO bridge is absent (non-Windows, or bridge init failed): EQ must not
     /// outlive the control plane.
     pub fn publish_apo_bypass(&self) {
-        let mut guard = self.0.lock().unwrap();
+        let mut guard = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(w) = guard.apo_writer.as_mut() {
             w.publish_bypass();
         }
@@ -325,6 +330,7 @@ impl SharedState {
         inner.apo_writer = Some(writer);
         if let Some(w) = inner.apo_writer.as_mut() {
             w.publish(&inner.chain);
+            w.beat();
         }
     }
 
