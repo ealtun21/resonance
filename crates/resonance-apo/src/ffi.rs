@@ -161,6 +161,40 @@ fn load_ir_blob(
     }
 }
 
+/// How long the daemon heartbeat may sit unchanged before the worker forces
+/// a bypass. The daemon beats every ~30 ms; 2 s of silence means it is gone
+/// (quit, killed, or crashed) — taskkill /f skips every shutdown hook, so
+/// this staleness check is the only crash-safe teardown signal.
+const STALE_AFTER: Duration = Duration::from_secs(2);
+
+/// Tracks the daemon heartbeat and decides staleness. Pure logic (fed a
+/// timestamp) so the bypass rule is unit-testable without a worker thread.
+struct HeartbeatWatch {
+    last_seen: Option<u64>,
+    changed_at: Option<std::time::Instant>,
+}
+
+impl HeartbeatWatch {
+    fn new() -> Self {
+        Self {
+            last_seen: None,
+            changed_at: None,
+        }
+    }
+
+    /// Feed the latest heartbeat reading (`None` = state file unreadable).
+    /// Returns true once the value has not advanced for `STALE_AFTER`.
+    fn observe(&mut self, hb: Option<u64>, now: std::time::Instant) -> bool {
+        if self.changed_at.is_none() || hb != self.last_seen {
+            self.last_seen = hb;
+            self.changed_at = Some(now);
+            return false;
+        }
+        self.changed_at
+            .is_some_and(|t| now.duration_since(t) >= STALE_AFTER)
+    }
+}
+
 /// Worker thread: rebuild the chain on daemon changes, and (only when a client
 /// is watching) compute the spectrum off the RT thread and publish telemetry.
 // `weak` is moved into and owned for the lifetime of this spawned worker thread.
@@ -200,6 +234,7 @@ fn worker_loop(weak: Weak<Shared>) {
     let mut prev_want = false;
     let mut last_ring_pos: usize = 0;
     let mut starved_ticks: u32 = 0;
+    let mut watch = HeartbeatWatch::new();
 
     loop {
         std::thread::sleep(Duration::from_millis(25));
@@ -285,6 +320,22 @@ fn worker_loop(weak: Weak<Shared>) {
                         }
                     }
                     last_gen = cur;
+                }
+            }
+        }
+
+        // Daemon liveness: when the heartbeat stops advancing, force a
+        // bypass so EQ never outlives its control plane. The daemon's
+        // next publish (a generation change) rebuilds the chain and
+        // restores normal processing.
+        let hb = crate::state::read_heartbeat_fresh(&path);
+        if watch.observe(hb, std::time::Instant::now()) {
+            if let Ok(mut g) = shared.state.try_lock() {
+                if let Some(l) = g.as_mut() {
+                    if l.chain.enabled {
+                        l.chain.enabled = false;
+                        crate::log::line("daemon heartbeat stale — forcing bypass");
+                    }
                 }
             }
         }
@@ -604,8 +655,8 @@ mod hires_harness {
     //! emulated HD-Audio codec can't provide): it exercises the exact shipping
     //! APO code path at hi-res.
     use super::{
-        resonance_apo_create, resonance_apo_destroy, resonance_apo_lock, resonance_apo_process,
-        resonance_apo_unlock,
+        HeartbeatWatch, resonance_apo_create, resonance_apo_destroy, resonance_apo_lock,
+        resonance_apo_process, resonance_apo_unlock,
     };
     use crate::state::{ApoStateWriter, default_state_path};
     use resonance_dsp::chain::ProcessorChain;
@@ -1053,6 +1104,46 @@ mod hires_harness {
             (buf[mid * 2 + 1] - 0.5).abs() < 1e-3,
             "R should carry the swapped-in L (0.5), got {}",
             buf[mid * 2 + 1]
+        );
+    }
+
+    #[test]
+    fn heartbeat_watch_goes_stale_only_after_silence() {
+        use std::time::Duration;
+        let t0 = std::time::Instant::now();
+        let mut w = HeartbeatWatch::new();
+        assert!(
+            !w.observe(Some(1), t0),
+            "first sight starts the grace window"
+        );
+        assert!(
+            !w.observe(Some(2), t0 + Duration::from_secs(10)),
+            "advancing heartbeat never goes stale"
+        );
+        assert!(
+            !w.observe(Some(2), t0 + Duration::from_secs(11)),
+            "1 s of silence is not yet stale"
+        );
+        assert!(
+            w.observe(Some(2), t0 + Duration::from_secs(13)),
+            "silent past STALE_AFTER -> stale"
+        );
+        assert!(
+            !w.observe(Some(3), t0 + Duration::from_secs(14)),
+            "resumed heartbeat recovers"
+        );
+    }
+
+    #[test]
+    fn heartbeat_watch_treats_unreadable_as_silence() {
+        use std::time::Duration;
+        let t0 = std::time::Instant::now();
+        let mut w = HeartbeatWatch::new();
+        assert!(!w.observe(None, t0), "grace window on first sight");
+        assert!(w.observe(None, t0 + Duration::from_secs(3)));
+        assert!(
+            !w.observe(Some(1), t0 + Duration::from_secs(4)),
+            "file back -> recovers"
         );
     }
 }
