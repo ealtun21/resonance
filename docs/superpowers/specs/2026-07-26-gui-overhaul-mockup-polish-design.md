@@ -93,10 +93,12 @@ polish issues found before moving to the real egui port.
   for signed gain values, per theme.
 - The Setup page's existing Appearance buttons (Native (auto), Native Dark,
   Native Light, Breeze Dark, Gruvbox, Nord, Matrix, Light, Matugen (auto))
-  get a click handler that sets `data-theme` on `<html>` for the 6 previewable
-  entries; the 3 host-dependent entries (Native (auto)/Matugen (auto), and
-  Native Dark/Light without a fixed accent) stay visually inert or fall back
-  to the generic Native example, with no claim of accuracy.
+  get a click handler that sets `data-theme` on `<html>`. Native Dark / Native
+  Light both map to the one generic "Native (example)" block (forcing its
+  dark or light background variant respectively) since they share the same
+  illustrative accent. Native (auto) and Matugen (auto) have no static value
+  to show at all — clicking them is a no-op in the mockup, left exactly as
+  inert as today.
 - Verification: screenshot each of the 6 themes on at least the Equalize
   page (most visually complex) via headless chromium, reviewed inline.
 
