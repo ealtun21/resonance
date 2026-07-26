@@ -109,11 +109,7 @@ impl Profile {
                 dynamic_boost_enabled: e.dynamic_boost.enabled,
                 bass_intensity: e.bass.intensity,
                 bass_enabled: e.bass.enabled,
-                // Loudness is a Resonance-native effect with no FxSound/APO preset
-                // equivalent, so it starts off for preset-derived profiles.
-                loudness_intensity: 0.0,
-                loudness_enabled: false,
-                // Crossfeed likewise has no preset equivalent — off by default.
+                // Crossfeed has no preset equivalent either — off by default.
                 crossfeed_intensity: 0.0,
                 crossfeed_enabled: false,
             },
