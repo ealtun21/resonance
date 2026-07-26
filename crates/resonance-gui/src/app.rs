@@ -1225,8 +1225,6 @@ fn demo_state() -> DaemonState {
             dynamic_boost_enabled: true,
             bass_intensity: 0.71,
             bass_enabled: true,
-            loudness_intensity: 0.4,
-            loudness_enabled: true,
             crossfeed_intensity: 0.25,
             crossfeed_enabled: true,
         },
