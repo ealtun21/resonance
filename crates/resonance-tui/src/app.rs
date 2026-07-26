@@ -2686,7 +2686,6 @@ pub const EFFECT_NAMES: [&str; FxEffectId::ALL.len()] = [
     "Surround",
     "Dyn Boost",
     "Bass",
-    "Loudness",
     "Crossfeed",
 ];
 
