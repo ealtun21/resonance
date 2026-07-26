@@ -81,3 +81,13 @@ effects column).
 - No consolidating any Loudness behavior into Dynamic Boost — this is removal,
   not a merge.
 - No changes to any other effect or to `.fac`/APO preset parsing.
+
+## Addendum (post-execution correction)
+
+Execution discovered `STATE_VERSION` 10 is already claimed by the unmerged
+`worktree-win-lifecycle-fixes` branch (PR #65, a daemon liveness-heartbeat
+field — real, VM-verified work, not yet on `master`). Bumping to 10 here would
+let two incompatible `SharedState` layouts both claim version 10. Corrected to
+bump `STATE_VERSION` 9→**11** instead (skipping the reserved 10), with a doc-
+comment noting why 10 is skipped. See `docs/superpowers/plans/2026-07-26-remove-loudness-effect.md`'s
+matching addendum and `[[loudness-effect-removed]]` memory.

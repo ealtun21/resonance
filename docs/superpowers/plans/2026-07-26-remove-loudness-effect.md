@@ -1489,3 +1489,29 @@ git commit -m "docs: remove loudness effect from the roadmap"
 ```
 
 (`CLAUDE.md` stays edited on disk but is never staged — it's gitignored per `.git/info/exclude`.)
+
+---
+
+## Addendum (post-execution correction, Task 3)
+
+While verifying Task 8, `windows-lifecycle-fixes` memory + the checked-out
+`.claude/worktrees/win-lifecycle-fixes` worktree (branch
+`worktree-win-lifecycle-fixes`, PR #65, unmerged) revealed `STATE_VERSION` 10
+is already claimed there for a daemon liveness-heartbeat field — real,
+VM-verified work (35/35 in-guest APO tests), just not on `master` yet. Task 3
+as written above would have collided: two incompatible `SharedState` layouts
+both labeled version 10, defeating the version check's whole purpose.
+
+Fix applied (commit `9371aa5`, `fix(apo): renumber loudness-removal state
+version to 11`): bumped to **11** instead of 10, with a `v10: reserved by the
+unmerged worktree-win-lifecycle-fixes branch ... do not reuse` doc-comment
+line so the skip is self-explaining. `crates/resonance-apo/src/state.rs` now
+reads `STATE_VERSION: u32 = 11`, not the `10` shown in Task 3's Steps 2/5-6
+code blocks above (left as-executed for history; this addendum is the
+correction). All 24 `resonance-apo` tests still pass unchanged.
+
+**Lesson for future STATE_VERSION bumps:** check `git branch -a` / `git
+worktree list` for unmerged work claiming the next version number before
+committing to it — this repo carries long-lived feature worktrees
+(`.claude/worktrees/*`) whose `resonance-apo/src/state.rs` may already have
+incremented the constant on a branch that hasn't reached `master`.
