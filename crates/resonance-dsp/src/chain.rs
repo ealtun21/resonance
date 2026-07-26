@@ -3,7 +3,7 @@ use crate::convolution::ConvolutionEngine;
 use crate::dither::DitherStage;
 use crate::effects::{
     AmbienceEffect, BassBoostEffect, CrossfeedEffect, DynamicBoostEffect, Effect, FidelityEffect,
-    LoudnessEffect, SurroundEffect,
+    SurroundEffect,
 };
 use crate::filter::{ApoFilter, BandScope};
 
@@ -53,20 +53,18 @@ pub enum FxEffect {
     Surround,
     DynamicBoost,
     Bass,
-    Loudness,
     Crossfeed,
 }
 
 impl FxEffect {
     /// Every effect, in chain order. Adding a variant forces this array to be
     /// updated, propagating to every `ALL` iteration.
-    pub const ALL: [FxEffect; 7] = [
+    pub const ALL: [FxEffect; 6] = [
         FxEffect::Fidelity,
         FxEffect::Ambience,
         FxEffect::Surround,
         FxEffect::DynamicBoost,
         FxEffect::Bass,
-        FxEffect::Loudness,
         FxEffect::Crossfeed,
     ];
 }
@@ -111,7 +109,6 @@ pub struct ProcessorChain {
     pub surround: SurroundEffect,
     pub dynamic_boost: DynamicBoostEffect,
     pub bass: BassBoostEffect,
-    pub loudness: LoudnessEffect,
     pub crossfeed: CrossfeedEffect,
     /// Final-stage TPDF dither (off by default → bit-exact).
     pub dither: DitherStage,
@@ -355,7 +352,6 @@ impl ProcessorChain {
         self.surround.process(buf, channels);
         self.dynamic_boost.process(buf, channels);
         self.bass.process(buf, channels);
-        self.loudness.process(buf, channels);
         // Crossfeed narrows the final stereo image, so it runs last — after every
         // other effect (including Surround, which widens it) has shaped the sound.
         self.crossfeed.process(buf, channels);
@@ -415,7 +411,6 @@ impl ProcessorChain {
             FxEffect::Surround => self.surround.set_intensity(value),
             FxEffect::DynamicBoost => self.dynamic_boost.set_intensity(value),
             FxEffect::Bass => self.bass.set_intensity(value),
-            FxEffect::Loudness => self.loudness.set_intensity(value),
             FxEffect::Crossfeed => self.crossfeed.set_intensity(value),
         }
     }
@@ -433,7 +428,6 @@ impl ProcessorChain {
                 (self.dynamic_boost.intensity(), self.dynamic_boost.enabled())
             }
             FxEffect::Bass => (self.bass.intensity(), self.bass.enabled()),
-            FxEffect::Loudness => (self.loudness.intensity(), self.loudness.enabled()),
             FxEffect::Crossfeed => (self.crossfeed.intensity(), self.crossfeed.enabled()),
         }
     }
@@ -445,7 +439,6 @@ impl ProcessorChain {
             FxEffect::Surround => self.surround.set_enabled(on),
             FxEffect::DynamicBoost => self.dynamic_boost.set_enabled(on),
             FxEffect::Bass => self.bass.set_enabled(on),
-            FxEffect::Loudness => self.loudness.set_enabled(on),
             FxEffect::Crossfeed => self.crossfeed.set_enabled(on),
         }
     }
@@ -473,7 +466,6 @@ impl ProcessorChain {
         self.surround.reset();
         self.dynamic_boost.reset();
         self.bass.reset();
-        self.loudness.reset();
         self.crossfeed.reset();
     }
 
@@ -513,7 +505,6 @@ impl ProcessorChain {
         self.dynamic_boost =
             carry_settings(&self.dynamic_boost, DynamicBoostEffect::new(sample_rate));
         self.bass = carry_settings(&self.bass, BassBoostEffect::new(ch, sample_rate));
-        self.loudness = carry_settings(&self.loudness, LoudnessEffect::new(ch, sample_rate));
         self.crossfeed = carry_settings(&self.crossfeed, CrossfeedEffect::new(ch, sample_rate));
     }
 
@@ -541,7 +532,6 @@ impl ProcessorChain {
         self.surround = carry_settings(&self.surround, SurroundEffect::new(sr));
         self.dynamic_boost = carry_settings(&self.dynamic_boost, DynamicBoostEffect::new(sr));
         self.bass = carry_settings(&self.bass, BassBoostEffect::new(channels, sr));
-        self.loudness = carry_settings(&self.loudness, LoudnessEffect::new(channels, sr));
         self.crossfeed = carry_settings(&self.crossfeed, CrossfeedEffect::new(channels, sr));
         self.dither.set_channels(channels);
     }
@@ -679,7 +669,6 @@ impl ProcessorChainBuilder {
             surround: SurroundEffect::new(sr),
             dynamic_boost: DynamicBoostEffect::new(sr),
             bass: BassBoostEffect::new(channels, sr),
-            loudness: LoudnessEffect::new(channels, sr),
             crossfeed: CrossfeedEffect::new(channels, sr),
             dither: DitherStage::new(channels),
             routing: None,
