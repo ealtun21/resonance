@@ -51,7 +51,7 @@ enum Sub {
     },
     /// Set an `FxSound` effect intensity (0–100)
     Set {
-        /// Effect: fidelity / ambience / surround / `dynamic_boost` / bass / loudness / crossfeed
+        /// Effect: fidelity / ambience / surround / `dynamic_boost` / bass / crossfeed
         effect: String,
         /// Intensity 0–100
         value: u8,
@@ -1282,7 +1282,7 @@ fn print_state(p: &Paint, s: &resonance_ipc::DaemonState) {
     }
 
     // Effects with intensity bars. Iterate `FxEffectId::ALL` so new effects
-    // (Loudness, Crossfeed, …) show up automatically and stay in chain order.
+    // (Crossfeed, …) show up automatically and stay in chain order.
     println!();
     println!("{}", p.bold("effects"));
     for id in FxEffectId::ALL {
@@ -1604,7 +1604,6 @@ fn effect_cli_name(id: FxEffectId) -> &'static str {
         FxEffectId::Surround => "surround",
         FxEffectId::DynamicBoost => "dynamic_boost",
         FxEffectId::Bass => "bass",
-        FxEffectId::Loudness => "loudness",
         FxEffectId::Crossfeed => "crossfeed",
     }
 }
@@ -1635,10 +1634,9 @@ fn parse_effect(s: &str) -> Result<FxEffectId> {
         "surround" => Ok(FxEffectId::Surround),
         "dynamic_boost" | "dynamic" => Ok(FxEffectId::DynamicBoost),
         "bass" => Ok(FxEffectId::Bass),
-        "loudness" => Ok(FxEffectId::Loudness),
         "crossfeed" => Ok(FxEffectId::Crossfeed),
         _ => bail!(
-            "unknown effect '{s}': use fidelity/ambience/surround/dynamic_boost/bass/loudness/crossfeed"
+            "unknown effect '{s}': use fidelity/ambience/surround/dynamic_boost/bass/crossfeed"
         ),
     }
 }
