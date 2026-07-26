@@ -359,20 +359,18 @@ pub enum FxEffectId {
     Surround,
     DynamicBoost,
     Bass,
-    Loudness,
     Crossfeed,
 }
 
 impl FxEffectId {
     /// Every effect, in chain order. Adding a variant forces the array to be
     /// updated, which propagates exhaustively to every `ALL` iteration.
-    pub const ALL: [FxEffectId; 7] = [
+    pub const ALL: [FxEffectId; 6] = [
         FxEffectId::Fidelity,
         FxEffectId::Ambience,
         FxEffectId::Surround,
         FxEffectId::DynamicBoost,
         FxEffectId::Bass,
-        FxEffectId::Loudness,
         FxEffectId::Crossfeed,
     ];
 
@@ -386,7 +384,6 @@ impl FxEffectId {
             FxEffectId::Surround => "Surround",
             FxEffectId::DynamicBoost => "Dynamic Boost",
             FxEffectId::Bass => "Bass",
-            FxEffectId::Loudness => "Loudness",
             FxEffectId::Crossfeed => "Crossfeed",
         }
     }
@@ -414,7 +411,6 @@ impl From<FxEffectId> for FxEffect {
             FxEffectId::Surround => FxEffect::Surround,
             FxEffectId::DynamicBoost => FxEffect::DynamicBoost,
             FxEffectId::Bass => FxEffect::Bass,
-            FxEffectId::Loudness => FxEffect::Loudness,
             FxEffectId::Crossfeed => FxEffect::Crossfeed,
         }
     }
@@ -897,13 +893,6 @@ pub struct EffectsState {
     pub dynamic_boost_enabled: bool,
     pub bass_intensity: f64,
     pub bass_enabled: bool,
-    // `#[serde(default)]` so self-describing profiles written before Loudness
-    // existed still load (default off). The postcard IPC wire is version-locked
-    // regardless — clients + daemon ship together.
-    #[serde(default)]
-    pub loudness_intensity: f64,
-    #[serde(default)]
-    pub loudness_enabled: bool,
     #[serde(default)]
     pub crossfeed_intensity: f64,
     #[serde(default)]
@@ -921,7 +910,6 @@ impl EffectsState {
             FxEffectId::Surround => (self.surround_intensity, self.surround_enabled),
             FxEffectId::DynamicBoost => (self.dynamic_boost_intensity, self.dynamic_boost_enabled),
             FxEffectId::Bass => (self.bass_intensity, self.bass_enabled),
-            FxEffectId::Loudness => (self.loudness_intensity, self.loudness_enabled),
             FxEffectId::Crossfeed => (self.crossfeed_intensity, self.crossfeed_enabled),
         }
     }
@@ -943,10 +931,6 @@ impl EffectsState {
             FxEffectId::DynamicBoost => {
                 self.dynamic_boost_intensity = intensity;
                 self.dynamic_boost_enabled = enabled;
-            }
-            FxEffectId::Loudness => {
-                self.loudness_intensity = intensity;
-                self.loudness_enabled = enabled;
             }
             FxEffectId::Bass => {
                 self.bass_intensity = intensity;
@@ -1030,8 +1014,6 @@ mod tests {
                 dynamic_boost_enabled: false,
                 bass_intensity: 0.0,
                 bass_enabled: false,
-                loudness_intensity: 0.0,
-                loudness_enabled: false,
                 crossfeed_intensity: 0.3,
                 crossfeed_enabled: true,
             },
@@ -1280,8 +1262,6 @@ mod tests {
                 dynamic_boost_enabled: false,
                 bass_intensity: -1.0,
                 bass_enabled: true,
-                loudness_intensity: 0.6,
-                loudness_enabled: true,
                 crossfeed_intensity: 0.4,
                 crossfeed_enabled: true,
             },
