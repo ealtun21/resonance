@@ -42,7 +42,8 @@ pub const STATE_MAGIC: u32 = 0x4F50_4152;
 /// v7: + linear-phase EQ mode flag.
 /// v8: + transient per-band solo (audition one band; `SOLO_NONE` = off).
 /// v9: + audition mode (solo/listen) beside the `solo_band` index.
-pub const STATE_VERSION: u32 = 9;
+/// v10: − Loudness effect removed (buggy, redundant with Dynamic Boost).
+pub const STATE_VERSION: u32 = 10;
 
 /// `solo_band` sentinel meaning "no band soloed" (the field is a fixed `u32`, so
 /// `Option` is encoded as this reserved value rather than a niche).
@@ -108,7 +109,6 @@ pub struct ChainSnapshot {
     pub surround: EffectSnapshot,
     pub dynamic_boost: EffectSnapshot,
     pub bass: EffectSnapshot,
-    pub loudness: EffectSnapshot,
     pub crossfeed: EffectSnapshot,
     pub num_filters: u32,
     /// Output dither target bit depth (`0` = off; else 16/20/24).
@@ -150,7 +150,6 @@ impl Default for ChainSnapshot {
             surround: EffectSnapshot::default(),
             dynamic_boost: EffectSnapshot::default(),
             bass: EffectSnapshot::default(),
-            loudness: EffectSnapshot::default(),
             crossfeed: EffectSnapshot::default(),
             num_filters: 0,
             dither_bits: 0,
@@ -269,7 +268,6 @@ fn effect(chain: &ProcessorChain, e: FxEffect) -> EffectSnapshot {
             chain.dynamic_boost.enabled(),
         ),
         FxEffect::Bass => (chain.bass.intensity(), chain.bass.enabled()),
-        FxEffect::Loudness => (chain.loudness.intensity(), chain.loudness.enabled()),
         FxEffect::Crossfeed => (chain.crossfeed.intensity(), chain.crossfeed.enabled()),
     };
     EffectSnapshot {
@@ -313,7 +311,6 @@ impl ChainSnapshot {
             surround: effect(chain, FxEffect::Surround),
             dynamic_boost: effect(chain, FxEffect::DynamicBoost),
             bass: effect(chain, FxEffect::Bass),
-            loudness: effect(chain, FxEffect::Loudness),
             crossfeed: effect(chain, FxEffect::Crossfeed),
             num_filters: n as u32,
             dither_bits: chain.dither.bits().unwrap_or(0),
@@ -399,8 +396,6 @@ impl ChainSnapshot {
         chain.set_effect_enabled(FxEffect::DynamicBoost, self.dynamic_boost.enabled != 0);
         chain.set_effect_intensity(FxEffect::Bass, self.bass.intensity);
         chain.set_effect_enabled(FxEffect::Bass, self.bass.enabled != 0);
-        chain.set_effect_intensity(FxEffect::Loudness, self.loudness.intensity);
-        chain.set_effect_enabled(FxEffect::Loudness, self.loudness.enabled != 0);
         chain.set_effect_intensity(FxEffect::Crossfeed, self.crossfeed.intensity);
         chain.set_effect_enabled(FxEffect::Crossfeed, self.crossfeed.enabled != 0);
         chain.set_dither((self.dither_bits != 0).then_some(self.dither_bits));
@@ -433,8 +428,6 @@ impl ChainSnapshot {
         chain.set_effect_enabled(FxEffect::DynamicBoost, self.dynamic_boost.enabled != 0);
         chain.set_effect_intensity(FxEffect::Bass, self.bass.intensity);
         chain.set_effect_enabled(FxEffect::Bass, self.bass.enabled != 0);
-        chain.set_effect_intensity(FxEffect::Loudness, self.loudness.intensity);
-        chain.set_effect_enabled(FxEffect::Loudness, self.loudness.enabled != 0);
         chain.set_effect_intensity(FxEffect::Crossfeed, self.crossfeed.intensity);
         chain.set_effect_enabled(FxEffect::Crossfeed, self.crossfeed.enabled != 0);
         chain.set_dither((self.dither_bits != 0).then_some(self.dither_bits));
