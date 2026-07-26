@@ -42,8 +42,10 @@ pub const STATE_MAGIC: u32 = 0x4F50_4152;
 /// v7: + linear-phase EQ mode flag.
 /// v8: + transient per-band solo (audition one band; `SOLO_NONE` = off).
 /// v9: + audition mode (solo/listen) beside the `solo_band` index.
-/// v10: − Loudness effect removed (buggy, redundant with Dynamic Boost).
-pub const STATE_VERSION: u32 = 10;
+/// v10: reserved by the unmerged `worktree-win-lifecycle-fixes` branch
+///     (+ daemon liveness heartbeat field) — do not reuse.
+/// v11: − Loudness effect removed (buggy, redundant with Dynamic Boost).
+pub const STATE_VERSION: u32 = 11;
 
 /// `solo_band` sentinel meaning "no band soloed" (the field is a fixed `u32`, so
 /// `Option` is encoded as this reserved value rather than a niche).
