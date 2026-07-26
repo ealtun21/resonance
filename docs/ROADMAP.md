@@ -31,8 +31,7 @@ squig.link + Auto-EQ integration with a live reference/measurement overlay;
 N-channel + per-channel EQ + routing matrix; per-application **and** per-output
 volume/mute on all three platforms; three front-ends (GUI/TUI/CLI); FxSound
 effect emulation (Fidelity/Ambience/Surround/Dynamic Boost/Bass);
-**loudness compensation (ISO 226:2023 equal-loudness)** — the "loudness" button
-most consumer EQs have; **headphone crossfeed** (Bauer/Meier); **adjustable
+**headphone crossfeed** (Bauer/Meier); **adjustable
 filter slopes** (12/24/48 dB/oct Butterworth on shelves + HP/LP); **mid/side
 EQ** (per-band `Stereo | Mid | Side`); **output dithering** (TPDF); a
 **convolution / impulse-response loader** (partitioned FFT, WAV IRs for room
