@@ -141,7 +141,7 @@ impl GuiApp {
                 let t = kit::tokens(ui);
                 let hero_frame = egui::Frame::default()
                     .fill(ui.visuals().extreme_bg_color)
-                    .stroke(egui::Stroke::new(1.0, t.line))
+                    .stroke(egui::Stroke::new(1.0_f32, t.line))
                     .corner_radius(egui::CornerRadius::same(kit::R_CARD as u8))
                     .outer_margin(egui::Margin {
                         left: 8,
@@ -316,7 +316,7 @@ impl GuiApp {
         let t = kit::tokens(ui);
         egui::Frame::default()
             .fill(ui.visuals().faint_bg_color)
-            .stroke(egui::Stroke::new(1.0, t.line))
+            .stroke(egui::Stroke::new(1.0_f32, t.line))
             .corner_radius(egui::CornerRadius::same(kit::R_CARD as u8))
             .inner_margin(egui::Margin::symmetric(10, 8))
             .show(ui, |ui| {
@@ -360,7 +360,7 @@ impl GuiApp {
         let t = kit::tokens(ui);
         egui::Frame::default()
             .fill(ui.visuals().faint_bg_color)
-            .stroke(egui::Stroke::new(1.0, t.line))
+            .stroke(egui::Stroke::new(1.0_f32, t.line))
             .corner_radius(egui::CornerRadius::same(kit::R_CARD as u8))
             .inner_margin(egui::Margin::symmetric(10, 6))
             .show(ui, |ui| {
@@ -764,7 +764,7 @@ impl GuiApp {
 fn bands_card_frame(ui: &egui::Ui) -> egui::Frame {
     egui::Frame::default()
         .fill(ui.visuals().faint_bg_color)
-        .stroke(egui::Stroke::new(1.0, kit::tokens(ui).line))
+        .stroke(egui::Stroke::new(1.0_f32, kit::tokens(ui).line))
         .corner_radius(egui::CornerRadius::same(kit::R_CARD as u8))
         .outer_margin(egui::Margin::symmetric(8, 10))
 }

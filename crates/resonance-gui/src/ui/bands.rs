@@ -182,7 +182,7 @@ impl GuiApp {
                 ui.painter().hline(
                     head.x_range(),
                     head.bottom() - 0.5,
-                    egui::Stroke::new(1.0, t.line),
+                    egui::Stroke::new(1.0_f32, t.line),
                 );
             });
 
@@ -299,8 +299,11 @@ impl GuiApp {
         let rr = row.response.rect;
         let tk = kit::tokens(ui);
         if i + 1 < nbands {
-            ui.painter()
-                .hline(rr.x_range(), rr.bottom(), egui::Stroke::new(1.0, tk.line));
+            ui.painter().hline(
+                rr.x_range(),
+                rr.bottom(),
+                egui::Stroke::new(1.0_f32, tk.line),
+            );
         }
         if row_selected {
             let bar = egui::Rect::from_min_max(
@@ -713,7 +716,7 @@ impl GuiApp {
         ui.painter().hline(
             line_r.x_range(),
             line_r.top(),
-            egui::Stroke::new(1.0, t.line),
+            egui::Stroke::new(1.0_f32, t.line),
         );
         egui::Frame::default()
             .inner_margin(egui::Margin::symmetric(

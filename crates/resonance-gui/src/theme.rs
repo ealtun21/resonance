@@ -186,9 +186,9 @@ impl Theme {
         v.panel_fill = panel;
         v.extreme_bg_color = p.graph_bg;
         v.faint_bg_color = card;
-        v.window_stroke = egui::Stroke::new(1.0, blend(panel, p.grid, 0.7));
+        v.window_stroke = egui::Stroke::new(1.0_f32, blend(panel, p.grid, 0.7));
         v.selection.bg_fill = p.accent.gamma_multiply(0.5);
-        v.selection.stroke = egui::Stroke::new(1.0, p.accent);
+        v.selection.stroke = egui::Stroke::new(1.0_f32, p.accent);
         v.hyperlink_color = p.accent;
 
         // Platform-appropriate corner radius: KDE Breeze is subtle (~3px); macOS
@@ -209,10 +209,10 @@ impl Theme {
 
         // Faint borders so panels/cards/inputs read as distinct surfaces.
         let hairline = blend(card, p.grid, 0.55);
-        v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, hairline);
-        v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, hairline);
-        v.widgets.hovered.bg_stroke = egui::Stroke::new(1.2, p.accent);
-        v.widgets.active.bg_stroke = egui::Stroke::new(1.2, p.accent);
+        v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, hairline);
+        v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, hairline);
+        v.widgets.hovered.bg_stroke = egui::Stroke::new(1.2_f32, p.accent);
+        v.widgets.active.bg_stroke = egui::Stroke::new(1.2_f32, p.accent);
 
         // Buttons: accent-tinted off the card surface with a clear hover/active
         // progression so controls read as interactive, not flat grey.

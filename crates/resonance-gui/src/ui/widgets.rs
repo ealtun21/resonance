@@ -198,7 +198,7 @@ pub(crate) fn gain_bar(ui: &mut egui::Ui, width: f32, db: f64, pal: &Palette) {
             egui::pos2(cx, rect.top() + 1.0),
             egui::pos2(cx, rect.bottom() - 1.0),
         ],
-        egui::Stroke::new(1.0, pal.grid),
+        egui::Stroke::new(1.0_f32, pal.grid),
     );
     // Scale to the FR graph's ±DB_RANGE so the bar length matches the curve's
     // vertical extent (and the TUI's bar), not the much larger ±GAIN_LIMIT edit

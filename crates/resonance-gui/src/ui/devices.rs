@@ -431,7 +431,7 @@ impl GuiApp {
             ui.painter().hline(
                 row_rect.x_range(),
                 row_rect.bottom(),
-                egui::Stroke::new(1.0, line),
+                egui::Stroke::new(1.0_f32, line),
             );
         }
     }
@@ -650,7 +650,7 @@ impl GuiApp {
                 ui.painter().circle_filled(dr.center(), 4.0, dot_col);
             } else {
                 ui.painter()
-                    .circle_stroke(dr.center(), 3.5, egui::Stroke::new(1.3, dot_col));
+                    .circle_stroke(dr.center(), 3.5, egui::Stroke::new(1.3_f32, dot_col));
             }
             // Name (faded if long) over a transport · rate sub-line. A
             // disconnected device is dimmed so present ones read first.
@@ -721,7 +721,7 @@ impl GuiApp {
                 ui.painter().rect_stroke(
                     tag,
                     3.0,
-                    egui::Stroke::new(1.0, self.palette.boost.gamma_multiply(0.7)),
+                    egui::Stroke::new(1.0_f32, self.palette.boost.gamma_multiply(0.7)),
                     egui::StrokeKind::Inside,
                 );
                 ui.painter().text(
@@ -742,7 +742,7 @@ impl GuiApp {
             let line = kit::tokens(ui).line;
             let rr = resp.response.rect;
             ui.painter()
-                .hline(rr.x_range(), rr.bottom(), egui::Stroke::new(1.0, line));
+                .hline(rr.x_range(), rr.bottom(), egui::Stroke::new(1.0_f32, line));
         }
     }
 }

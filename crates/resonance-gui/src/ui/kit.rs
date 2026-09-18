@@ -181,7 +181,7 @@ fn card_impl(
         collapsible && ui.data(|d| d.get_temp::<bool>(collapse_id).unwrap_or(false));
     egui::Frame::default()
         .fill(fill)
-        .stroke(egui::Stroke::new(1.0, t.line))
+        .stroke(egui::Stroke::new(1.0_f32, t.line))
         .corner_radius(egui::CornerRadius::same(R_CARD as u8))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
@@ -242,7 +242,7 @@ fn card_impl(
                 p.hline(
                     head.x_range(),
                     head.bottom() - 0.5,
-                    egui::Stroke::new(1.0, t.line),
+                    egui::Stroke::new(1.0_f32, t.line),
                 );
                 egui::Frame::default()
                     .inner_margin(egui::Margin {
@@ -420,7 +420,7 @@ pub(crate) fn checkbox(ui: &mut egui::Ui, on: &mut bool, label: &str) -> bool {
     p.rect_stroke(
         box_rect,
         3.0,
-        egui::Stroke::new(1.0, border),
+        egui::Stroke::new(1.0_f32, border),
         egui::StrokeKind::Inside,
     );
     if how > 0.05 {
@@ -434,7 +434,7 @@ pub(crate) fn checkbox(ui: &mut egui::Ui, on: &mut bool, label: &str) -> bool {
                 egui::pos2(c.x - s * 0.08, c.y + s * 0.34),
                 egui::pos2(c.x + s * 0.46, c.y - s * 0.34),
             ],
-            egui::Stroke::new(1.8, col),
+            egui::Stroke::new(1.8_f32, col),
         ));
     }
     if !label.is_empty() {
@@ -530,7 +530,7 @@ fn pill_draw(
     p.rect_stroke(
         rect,
         radius,
-        egui::Stroke::new(1.0, border),
+        egui::Stroke::new(1.0_f32, border),
         egui::StrokeKind::Inside,
     );
     let cy = rect.center().y;
@@ -541,7 +541,7 @@ fn pill_draw(
         p.rect_stroke(
             bx,
             3.0,
-            egui::Stroke::new(1.0, if on { t.accent } else { t.line }),
+            egui::Stroke::new(1.0_f32, if on { t.accent } else { t.line }),
             egui::StrokeKind::Inside,
         );
         if on {
@@ -552,7 +552,7 @@ fn pill_draw(
                     egui::pos2(c.x - 1.0, c.y + 2.6),
                     egui::pos2(c.x + 3.2, c.y - 2.6),
                 ],
-                egui::Stroke::new(1.6, Color32::WHITE),
+                egui::Stroke::new(1.6_f32, Color32::WHITE),
             ));
         }
         x += 14.0 + gap;
@@ -875,9 +875,9 @@ pub(crate) fn text_field(
         // plot background. Border off at rest, accent ring on focus.
         v.extreme_bg_color = t.well;
         v.widgets.inactive.bg_stroke = egui::Stroke::NONE;
-        v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, lerp_color(t.well, t.accent, 0.5));
-        v.widgets.active.bg_stroke = egui::Stroke::new(1.0, t.accent);
-        v.selection.stroke = egui::Stroke::new(1.0, t.accent);
+        v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, lerp_color(t.well, t.accent, 0.5));
+        v.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, t.accent);
+        v.selection.stroke = egui::Stroke::new(1.0_f32, t.accent);
         let mut edit = egui::TextEdit::singleline(buf)
             .id(id)
             .hint_text(hint)
@@ -1077,7 +1077,7 @@ pub(crate) fn tag_dropdown(
     ui.painter().rect_stroke(
         rect,
         4.0,
-        egui::Stroke::new(1.0, border),
+        egui::Stroke::new(1.0_f32, border),
         egui::StrokeKind::Inside,
     );
     ui.painter().text(
@@ -1140,7 +1140,7 @@ pub(crate) fn tag_chip(
     ui.painter().rect_stroke(
         rect,
         4.0,
-        egui::Stroke::new(1.0, border),
+        egui::Stroke::new(1.0_f32, border),
         egui::StrokeKind::Inside,
     );
     // Label centred, leaving room for a small caret on the right.
@@ -1659,7 +1659,7 @@ pub(crate) fn well_frame<R>(
     let t = tokens(ui);
     egui::Frame::default()
         .fill(t.well)
-        .stroke(egui::Stroke::new(1.0, t.line))
+        .stroke(egui::Stroke::new(1.0_f32, t.line))
         .corner_radius(egui::CornerRadius::same(R_CTRL as u8))
         .inner_margin(egui::Margin::same(SP_XS as i8))
         .show(ui, add)
