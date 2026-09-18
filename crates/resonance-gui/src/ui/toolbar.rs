@@ -186,7 +186,7 @@ impl GuiApp {
         let (r, _) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
         ui.painter()
-            .hline(r.x_range(), r.center().y, egui::Stroke::new(1.0, line));
+            .hline(r.x_range(), r.center().y, egui::Stroke::new(1.0_f32, line));
     }
 
     /// A thin vertical hairline between toolbar groups, matching the kit's rule
@@ -236,7 +236,7 @@ impl GuiApp {
         p.rect_stroke(
             rect,
             radius,
-            egui::Stroke::new(1.0, border),
+            egui::Stroke::new(1.0_f32, border),
             egui::StrokeKind::Inside,
         );
         let cy = rect.center().y;
@@ -244,7 +244,7 @@ impl GuiApp {
         if on {
             p.circle_filled(dot_c, DOT_D * 0.5, color);
         } else {
-            p.circle_stroke(dot_c, DOT_D * 0.5 - 0.5, egui::Stroke::new(1.5, color));
+            p.circle_stroke(dot_c, DOT_D * 0.5 - 0.5, egui::Stroke::new(1.5_f32, color));
         }
         let lx = rect.left() + PAD_L + DOT_D + GAP;
         p.text(
@@ -597,7 +597,7 @@ impl GuiApp {
         ui.painter().hline(
             line_r.x_range(),
             line_r.top(),
-            egui::Stroke::new(1.0, t.line),
+            egui::Stroke::new(1.0_f32, t.line),
         );
 
         let mono = egui::FontId::monospace(kit::T_CAPTION);

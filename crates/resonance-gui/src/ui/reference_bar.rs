@@ -745,10 +745,14 @@ impl GuiApp {
         p.rect_stroke(
             rect,
             kit::R_CTRL,
-            egui::Stroke::new(1.0, t.line),
+            egui::Stroke::new(1.0_f32, t.line),
             egui::StrokeKind::Inside,
         );
-        p.hline(rect.x_range(), y_of(0.0), egui::Stroke::new(1.0, t.faint));
+        p.hline(
+            rect.x_range(),
+            y_of(0.0),
+            egui::Stroke::new(1.0_f32, t.faint),
+        );
 
         if self.reference.target.is_some() {
             if let Some(b) = self.reference.base_curve() {
@@ -759,7 +763,7 @@ impl GuiApp {
                     .collect();
                 p.add(egui::Shape::dashed_line(
                     &path,
-                    egui::Stroke::new(1.0, t.faint),
+                    egui::Stroke::new(1.0_f32, t.faint),
                     3.0,
                     3.0,
                 ));
@@ -770,7 +774,10 @@ impl GuiApp {
                     .iter()
                     .map(|&(f, db)| egui::pos2(x_of(f), y_of(db)))
                     .collect();
-                p.add(egui::Shape::line(path, egui::Stroke::new(1.5, pal.accent)));
+                p.add(egui::Shape::line(
+                    path,
+                    egui::Stroke::new(1.5_f32, pal.accent),
+                ));
             }
             // Context label on an opaque graph-bg scrim (covers the curve behind it).
             let label = format!("Stacking on {}", self.reference.target_label());
@@ -878,7 +885,7 @@ impl GuiApp {
             let (r, _) =
                 ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
             ui.painter()
-                .hline(r.x_range(), r.center().y, egui::Stroke::new(1.0, line));
+                .hline(r.x_range(), r.center().y, egui::Stroke::new(1.0_f32, line));
         }
         ui.add_space(kit::SP_S);
         ui.horizontal(|ui| {
@@ -1780,7 +1787,7 @@ fn cust_slider(
         );
         p.line_segment(
             [egui::pos2(zx, cy - 5.0), egui::pos2(zx, cy + 5.0)],
-            egui::Stroke::new(1.0, t.line),
+            egui::Stroke::new(1.0_f32, t.line),
         );
         let hr = if resp.hovered() || resp.dragged() {
             7.0
@@ -1788,7 +1795,7 @@ fn cust_slider(
             6.0
         };
         p.circle_filled(egui::pos2(hx, cy), hr, t.text);
-        p.circle_stroke(egui::pos2(hx, cy), hr, egui::Stroke::new(1.5, t.well));
+        p.circle_stroke(egui::pos2(hx, cy), hr, egui::Stroke::new(1.5_f32, t.well));
         p.rect_filled(cr, kit::R_CTRL, t.well);
         p.text(
             cr.center(),

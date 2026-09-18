@@ -166,8 +166,11 @@ impl GuiApp {
                     // rounds to visible-or-not as the layout resizes (the flicker).
                     // Centring keeps the full stroke inside the clip rect so it's
                     // always drawn.
-                    ui.painter()
-                        .hline(lr.x_range(), lr.center().y, egui::Stroke::new(1.0, line));
+                    ui.painter().hline(
+                        lr.x_range(),
+                        lr.center().y,
+                        egui::Stroke::new(1.0_f32, line),
+                    );
                     // Inset the pills from the card edges (the rule stays full-bleed).
                     egui::Frame::default()
                         .inner_margin(egui::Margin {
@@ -203,7 +206,7 @@ impl GuiApp {
         ui.painter().hline(
             line_r.x_range(),
             line_r.center().y,
-            egui::Stroke::new(1.0, t.line),
+            egui::Stroke::new(1.0_f32, t.line),
         );
         ui.horizontal(|ui| {
             ui.set_min_height(25.0);
@@ -623,13 +626,13 @@ impl GuiApp {
         let pal = self.palette;
         let plot = axes.plot;
         let label_col = pal.neutral;
-        let grid = egui::Stroke::new(1.0, pal.grid.gamma_multiply(0.6));
+        let grid = egui::Stroke::new(1.0_f32, pal.grid.gamma_multiply(0.6));
         let n_lines = (axes.db / self.db_step) as i32;
         for k in -n_lines..=n_lines {
             let g = f64::from(k) * self.db_step;
             let y = axes.y_of(g);
             let stroke = if g == 0.0 {
-                egui::Stroke::new(1.6, pal.neutral)
+                egui::Stroke::new(1.6_f32, pal.neutral)
             } else {
                 grid
             };
@@ -654,7 +657,7 @@ impl GuiApp {
         let pal = self.palette;
         let plot = axes.plot;
         let label_col = pal.neutral;
-        let grid = egui::Stroke::new(1.0, pal.grid.gamma_multiply(0.6));
+        let grid = egui::Stroke::new(1.0_f32, pal.grid.gamma_multiply(0.6));
         let mut last_label_x = f32::NEG_INFINITY;
         for (logf, label) in curve::x_axis_ticks_range(axes.vlo, axes.vhi) {
             let x = axes.x_of(logf);
@@ -798,7 +801,7 @@ impl GuiApp {
                             egui::pos2(axes.x_of(w[0].0), axes.y_of(w[0].1)),
                             egui::pos2(axes.x_of(w[1].0), axes.y_of(w[1].1)),
                         ],
-                        egui::Stroke::new(2.0, *col),
+                        egui::Stroke::new(2.0_f32, *col),
                     );
                 }
             }
@@ -820,7 +823,7 @@ impl GuiApp {
                 for w in cpts.windows(2) {
                     let a = egui::pos2(axes.x_of(w[0].0), axes.y_of(w[0].1));
                     let b = egui::pos2(axes.x_of(w[1].0), axes.y_of(w[1].1));
-                    painter.line_segment([a, b], egui::Stroke::new(2.0, col));
+                    painter.line_segment([a, b], egui::Stroke::new(2.0_f32, col));
                 }
             }
         } else {
@@ -830,7 +833,7 @@ impl GuiApp {
                 let a = egui::pos2(axes.x_of(lf0), axes.y_of(g0));
                 let b = egui::pos2(axes.x_of(lf1), axes.y_of(g1));
                 let color = gain_color((g0 + g1) * 0.5, &pal);
-                painter.line_segment([a, b], egui::Stroke::new(2.0, color));
+                painter.line_segment([a, b], egui::Stroke::new(2.0_f32, color));
             }
         }
     }
@@ -900,7 +903,7 @@ impl GuiApp {
                 painter.rect_stroke(
                     band,
                     0.0,
-                    egui::Stroke::new(1.0, pal.highlight),
+                    egui::Stroke::new(1.0_f32, pal.highlight),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -1100,7 +1103,7 @@ impl GuiApp {
             // matches the curve and nodes). Dashed + thick so it stands out
             // against the grid and the response curve.
             let guide = contrast_color(pal.graph_bg);
-            let stroke = egui::Stroke::new(2.0, guide);
+            let stroke = egui::Stroke::new(2.0_f32, guide);
             // vlock: vertical guide with end caps ("moves up/down only").
             if locked {
                 let x = center.x;
@@ -1154,9 +1157,9 @@ impl GuiApp {
             };
             painter.circle_filled(center, r, color);
             let ring = if selected {
-                egui::Stroke::new(2.0, contrast_color(pal.graph_bg))
+                egui::Stroke::new(2.0_f32, contrast_color(pal.graph_bg))
             } else {
-                egui::Stroke::new(1.0, pal.graph_bg)
+                egui::Stroke::new(1.0_f32, pal.graph_bg)
             };
             painter.circle_stroke(center, r, ring);
         }
@@ -1201,7 +1204,7 @@ fn draw_reference(
         if let Some(t) = series.iter().find(|s| s.role == SeriesRole::Target) {
             let [r, g, b, _] = pal.accent.to_array();
             let fill = egui::Color32::from_rgba_unmultiplied(r, g, b, 26);
-            let edge = egui::Stroke::new(1.0, pal.accent.gamma_multiply(0.45));
+            let edge = egui::Stroke::new(1.0_f32, pal.accent.gamma_multiply(0.45));
             let mut up: Vec<egui::Pos2> = Vec::with_capacity(t.pts.len());
             let mut lo: Vec<egui::Pos2> = Vec::with_capacity(t.pts.len());
             for &(lf, y) in &t.pts {
@@ -1245,7 +1248,7 @@ fn draw_reference(
             // error you're correcting; faint so the result stands out.
             SeriesRole::Measurement => line(
                 &s.pts,
-                egui::Stroke::new(1.0, pal.neutral.gamma_multiply(0.5)),
+                egui::Stroke::new(1.0_f32, pal.neutral.gamma_multiply(0.5)),
             ),
             // The dashed target line. Its points already flatten toward the 0-line
             // as `na`→1; fade it out over the last quarter of the morph so it hands
@@ -1255,7 +1258,7 @@ fn draw_reference(
                 if a > 0.01 {
                     dashed(
                         &s.pts,
-                        egui::Stroke::new(1.5, pal.accent.gamma_multiply(a)),
+                        egui::Stroke::new(1.5_f32, pal.accent.gamma_multiply(a)),
                         6.0,
                         4.0,
                     );
@@ -1273,7 +1276,7 @@ fn draw_reference(
                             egui::pos2(axes.x_of(l0), axes.y_of(y0)),
                             egui::pos2(axes.x_of(l1), axes.y_of(y1)),
                         ],
-                        egui::Stroke::new(2.5, color),
+                        egui::Stroke::new(2.5_f32, color),
                     );
                 }
             }
@@ -1342,7 +1345,7 @@ fn legend_with_eyes(
     painter.rect_stroke(
         rect,
         4.0,
-        egui::Stroke::new(1.0, pal.grid.gamma_multiply(0.8)),
+        egui::Stroke::new(1.0_f32, pal.grid.gamma_multiply(0.8)),
         egui::StrokeKind::Inside,
     );
     for (i, (label, color, dashed)) in entries.iter().enumerate() {
@@ -1370,16 +1373,16 @@ fn legend_with_eyes(
         if off {
             painter.line_segment(
                 [egui::pos2(eye.x - 4.0, cy), egui::pos2(eye.x + 4.0, cy)],
-                egui::Stroke::new(1.4, dim(label_col)),
+                egui::Stroke::new(1.4_f32, dim(label_col)),
             );
         } else {
-            painter.circle_stroke(eye, 4.0, egui::Stroke::new(1.2, label_col));
+            painter.circle_stroke(eye, 4.0, egui::Stroke::new(1.2_f32, label_col));
             painter.circle_filled(eye, 1.6, label_col);
         }
         // Colour swatch.
         let x0 = rect.left() + pad + eye_w + gap;
         let x1 = x0 + sw;
-        let stroke = egui::Stroke::new(2.0, dim(*color));
+        let stroke = egui::Stroke::new(2.0_f32, dim(*color));
         if *dashed {
             painter.add(egui::Shape::dashed_line(
                 &[egui::pos2(x0, cy), egui::pos2(x1, cy)],
