@@ -198,6 +198,15 @@ struct GraphState {
     /// a bare `subscribe_params` only reliably delivers a device route's initial
     /// value, so we re-`enum_params` periodically to catch external changes.
     route_poll_phase: u8,
+    /// Bound proxy of our own "resonance" sink + its `Props` listener. Its
+    /// volume never reaches the audio (`monitor.channel-volumes = false`), so it
+    /// serves as the master control the desktop's volume keys/OSD drive: it is
+    /// kept in sync with the real output device (see [`sync_master_volume`]).
+    virt_node: Option<(pw::node::Node, pw::node::NodeListener)>,
+    /// Read-back inbox for `virt_node`'s `(volume, mute)` (same model as `app_volumes`).
+    virt_read: Arc<Mutex<AppVolRead>>,
+    /// Last `(volume, muted)` known on the virtual sink; `None` until first synced.
+    virt_state: Option<(f64, bool)>,
 }
 
 // SAFETY: only touched from the pw main-loop thread.
@@ -300,6 +309,9 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
         device_seen_count: 0,
         device_seen_ticks: 0,
         route_poll_phase: 0,
+        virt_node: None,
+        virt_read: Arc::new(Mutex::new((None, None))),
+        virt_state: None,
     }));
 
     Ok(thread::Builder::new()
@@ -346,6 +358,8 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
                     g.metadata_listener = None;
                     g.default_set = false;
                     g.last_output = None;
+                    g.virt_node = None;
+                    g.virt_state = None;
                 }
                 fd.in_ports
                     .iter_mut()
@@ -655,6 +669,7 @@ fn on_graph_timer_tick(g: &mut GraphState, node_id: u32, quit_ptr: usize) {
         poll_routes(g);
     }
     apply_sink_volumes(g);
+    sync_master_volume(g);
     // Apply any pending preferred-output changes from the IPC thread.
     let mut reroute_needed = false;
     while let Ok(name) = g.route_rx.try_recv() {
@@ -781,6 +796,29 @@ fn on_global(
             );
             if mc == "Audio/Sink" && name == "resonance" {
                 g.sink_node_id = obj.id;
+                // Read back our sink's volume/mute: it is the master control the
+                // desktop changes (see `sync_master_volume`).
+                if let Ok(node) = registry.bind::<pw::node::Node, _>(obj) {
+                    let inbox = Arc::clone(&g.virt_read);
+                    let listener = node
+                        .add_listener_local()
+                        .param(move |_seq, _ty, _idx, _next, pod| {
+                            if let Some(pod) = pod {
+                                let (vol, muted) = parse_node_props(pod);
+                                let mut e = inbox.lock().unwrap();
+                                if vol.is_some() {
+                                    e.0 = vol;
+                                }
+                                if muted.is_some() {
+                                    e.1 = muted;
+                                }
+                            }
+                        })
+                        .register();
+                    node.subscribe_params(&[ParamType::Props]);
+                    g.virt_node = Some((node, listener));
+                    g.virt_state = None;
+                }
                 reroute(g);
                 try_set_default(g);
             } else if mc == "Audio/Sink" {
@@ -1402,6 +1440,71 @@ fn apply_sink_volumes(g: &mut GraphState) {
     if changed {
         publish_sinks(g);
     }
+}
+
+/// Keep the "resonance" sink's volume/mute and the real output device's in sync,
+/// so the desktop's volume keys/slider (which act on the default sink — ours)
+/// control the device's master volume, and changes made elsewhere (Resonance's
+/// own slider, pavucontrol) show up on our sink. Called each timer tick.
+///
+/// A change read back from our sink is the user's: forward it to the device.
+/// Otherwise mirror the device onto our sink. The device wins on first sync.
+fn sync_master_volume(g: &mut GraphState) {
+    let Some(target) = find_target_sink(g) else {
+        return;
+    };
+    let Some((name, real)) = g
+        .sink_nodes
+        .get(&target)
+        .filter(|s| s.route_index >= 0)
+        .map(|s| (s.name.clone(), (s.volume, s.muted)))
+    else {
+        return; // device route not read back yet
+    };
+    let (rv, rm) = std::mem::take(&mut *g.virt_read.lock().unwrap());
+    let Some((vv, vm)) = g.virt_state else {
+        set_virt_volume(g, real);
+        return;
+    };
+    let (nv, nm) = (rv.unwrap_or(vv), rm.unwrap_or(vm));
+    let vol_changed = (nv - vv).abs() > 0.0005;
+    if vol_changed || nm != vm {
+        if vol_changed {
+            apply_sink_ctl(
+                g,
+                &SinkCtl::SetVolume {
+                    name: name.clone(),
+                    volume: nv,
+                },
+            );
+        }
+        if nm != vm {
+            apply_sink_ctl(g, &SinkCtl::SetMute { name, muted: nm });
+        }
+        g.virt_state = Some((nv, nm));
+    } else if (real.0 - vv).abs() > 0.0005 || real.1 != vm {
+        set_virt_volume(g, real);
+    }
+}
+
+/// Set our "resonance" sink's `Props` to `(volume, muted)` and record it as known.
+fn set_virt_volume(g: &mut GraphState, (volume, muted): (f64, bool)) {
+    let Some((node, _)) = &g.virt_node else {
+        return;
+    };
+    let linear = volume.powi(3) as f32;
+    for bytes in [
+        pod_channel_volumes(g.active_channels, linear),
+        pod_mute(muted),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(pod) = Pod::from_bytes(&bytes) {
+            node.set_param(ParamType::Props, 0, pod);
+        }
+    }
+    g.virt_state = Some((volume, muted));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
