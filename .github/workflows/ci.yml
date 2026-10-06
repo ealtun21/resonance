@@ -26,11 +26,11 @@ jobs:
             pkg-config \
             musl-tools
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-          targets: x86_64-unknown-linux-musl
+      - name: Install Rust toolchain (version pinned in rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - name: Add musl target
+        run: rustup target add x86_64-unknown-linux-musl
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -62,10 +62,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - name: Install Rust toolchain (version pinned in rust-toolchain.toml)
+        run: rustup toolchain install
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

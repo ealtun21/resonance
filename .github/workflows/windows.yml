@@ -20,10 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust (MSVC)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
+      - name: Install Rust toolchain (version pinned in rust-toolchain.toml)
+        run: rustup toolchain install
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

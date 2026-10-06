@@ -610,7 +610,7 @@ impl GuiApp {
             // collide ("presmid treble air") when the graph is narrow.
             if xr - xl > label.len() as f32 * 5.2 + 6.0 {
                 painter.text(
-                    egui::pos2((xl + xr) * 0.5, plot.top() + 1.0),
+                    egui::pos2(f32::midpoint(xl, xr), plot.top() + 1.0),
                     egui::Align2::CENTER_TOP,
                     label,
                     egui::FontId::monospace(8.0),
@@ -832,7 +832,7 @@ impl GuiApp {
                 let (lf1, g1) = w[1];
                 let a = egui::pos2(axes.x_of(lf0), axes.y_of(g0));
                 let b = egui::pos2(axes.x_of(lf1), axes.y_of(g1));
-                let color = gain_color((g0 + g1) * 0.5, &pal);
+                let color = gain_color(f64::midpoint(g0, g1), &pal);
                 painter.line_segment([a, b], egui::Stroke::new(2.0_f32, color));
             }
         }
@@ -1270,7 +1270,8 @@ fn draw_reference(
                 for w in s.pts.windows(2) {
                     let (l0, y0) = w[0];
                     let (l1, y1) = w[1];
-                    let color = lerp_color(pal.highlight, gain_color((y0 + y1) * 0.5, pal), na);
+                    let color =
+                        lerp_color(pal.highlight, gain_color(f64::midpoint(y0, y1), pal), na);
                     painter.line_segment(
                         [
                             egui::pos2(axes.x_of(l0), axes.y_of(y0)),
@@ -1447,7 +1448,7 @@ mod tests {
     #[test]
     fn x_of_and_logf_of_are_inverse() {
         let a = test_axes();
-        for &logf in &[a.vlo, (a.vlo + a.vhi) * 0.5, a.vhi] {
+        for &logf in &[a.vlo, f64::midpoint(a.vlo, a.vhi), a.vhi] {
             let round = a.logf_of(a.x_of(logf));
             assert!((round - logf).abs() < 1e-6, "logf {logf} -> {round}");
         }
