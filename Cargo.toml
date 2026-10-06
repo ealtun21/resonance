@@ -58,6 +58,10 @@ many_single_char_names = "allow"
 struct_excessive_bools = "allow"
 fn_params_excessive_bools = "allow"
 
+# Clippy 1.99 nudge for `assert!(x.is_empty())` in tests; its suggested rewrite
+# (`assert_eq!(x, [] as [String; 0])`) reads worse than the original. Style only.
+assert_is_empty = "allow"
+
 [workspace.dependencies]
 # DSP
 biquad = "0.6"

@@ -169,7 +169,7 @@ impl RefCurve {
                 let f = 10f64.powf(lf);
                 let la = 10f64.powf(a.interp(f) / 20.0);
                 let lb = 10f64.powf(b.interp(f) / 20.0);
-                (f, 20.0 * ((la + lb) * 0.5).log10())
+                (f, 20.0 * f64::midpoint(la, lb).log10())
             })
             .collect();
         RefCurve { points: pts }

@@ -274,7 +274,7 @@ impl ProcessorChain {
                         let il = frame * channels;
                         let ir = il + 1;
                         let (l, r) = (buf[il], buf[ir]);
-                        let m = (l + r) * 0.5;
+                        let m = f64::midpoint(l, r);
                         let s = (l - r) * 0.5;
                         // Mid uses biquad state slot 0, Side slot 1, so the two
                         // scopes never share running history within a band. The

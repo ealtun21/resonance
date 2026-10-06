@@ -390,7 +390,7 @@ impl Effect for SurroundEffect {
         for frame in 0..frames {
             let l = samples[frame * channels];
             let r = samples[frame * channels + 1];
-            let mono = (l + r) * 0.5;
+            let mono = f64::midpoint(l, r);
             let out_l = mono * comp + gain_side * (l - mono);
             let out_r = mono * comp + gain_side * (r - mono);
             samples[frame * channels] = out_l.clamp(-1.0, 1.0);

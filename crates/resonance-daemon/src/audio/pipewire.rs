@@ -1527,20 +1527,20 @@ fn find_target_sink(g: &GraphState) -> Option<u32> {
     };
     g.preferred_output
         .as_deref()
-        .and_then(&find_sink)
+        .and_then(find_sink)
         .or_else(|| {
             g.live_default
                 .lock()
                 .unwrap()
                 .as_deref()
-                .and_then(&find_sink)
+                .and_then(find_sink)
         })
         .or_else(|| {
             g.original_default
                 .lock()
                 .unwrap()
                 .as_deref()
-                .and_then(&find_sink)
+                .and_then(find_sink)
         })
         .or_else(|| {
             g.nodes

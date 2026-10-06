@@ -829,7 +829,7 @@ fn search(x: &[f32], v: f32) -> usize {
 
 fn sgm(x: f32, x0: f32, x1: f32) -> f32 {
     let k = 4.0 / (x1 - x0);
-    let m = 0.5 * (x0 + x1);
+    let m = f32::midpoint(x0, x1);
     let y = k * (x - m);
     0.5 * (0.5 * y).tanh() + 0.5
 }
