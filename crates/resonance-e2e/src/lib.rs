@@ -10,6 +10,7 @@
 )]
 
 pub mod compare;
+pub mod ratechain;
 pub mod render;
 pub mod scenario;
 pub mod stimulus;
