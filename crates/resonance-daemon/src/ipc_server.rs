@@ -235,6 +235,7 @@ async fn dispatch_inner(cmd: Command, state: &SharedState) -> Response {
             handle_set_convolution_enabled(state, enabled)
         }
         Command::CaptureOutput { frames } => handle_capture_output(state, frames),
+        Command::ResetAndExportChain { path } => handle_reset_and_export_chain(state, &path),
         // The actual cleanup + exit happens in `handle_client` after this Ok is
         // flushed to the client (see the `is_shutdown` branch there).
         Command::Shutdown => Response::Ok,
@@ -402,6 +403,27 @@ fn handle_set_convolution_enabled(state: &SharedState, enabled: bool) -> Respons
     state.send(AudioCommand::SetConvolutionEnabled(enabled), move |chain| {
         chain.convolution.set_enabled(enabled);
     });
+    Response::Ok
+}
+
+/// Export the live chain for the e2e harness, then restart the RT chain from
+/// zeroed filter/effect state (see `Command::ResetAndExportChain`).
+fn handle_reset_and_export_chain(state: &SharedState, path: &str) -> Response {
+    use resonance_apo::state::{ApoStateWriter, MAX_FILTERS};
+    let mut chain = state.0.lock().unwrap().chain.clone();
+    if chain.filters.len() > MAX_FILTERS {
+        return Response::Error(format!(
+            "chain has {} bands; a snapshot holds at most {MAX_FILTERS}",
+            chain.filters.len()
+        ));
+    }
+    let mut writer = match ApoStateWriter::create(std::path::Path::new(path)) {
+        Ok(w) => w,
+        Err(e) => return Response::Error(format!("create '{path}': {e}")),
+    };
+    writer.publish(&chain);
+    chain.reset();
+    state.replace_chain(chain.clone(), chain);
     Response::Ok
 }
 
@@ -1707,6 +1729,67 @@ mod tests {
             other => panic!("expected Error, got {other:?}"),
         }
         assert!(state.snapshot().convolution.is_none());
+    }
+
+    fn export_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir()
+            .join(format!("resonance-export-{tag}-{}", std::process::id()))
+            .join("chain.bin")
+    }
+
+    fn peaking_band() -> resonance_dsp::filter::ApoFilter {
+        resonance_dsp::filter::ApoFilter::builder()
+            .filter_type(resonance_dsp::filter::FilterType::Peaking)
+            .freq(1000.0)
+            .gain_db(3.0)
+            .q(1.0)
+            .enabled(true)
+            .channels(2)
+            .sample_rate(48_000.0)
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn reset_and_export_chain_writes_snapshot_and_resets_rt_chain() {
+        let (state, mut rx) = test_state();
+        state.0.lock().unwrap().chain.filters = vec![peaking_band()];
+        while rx.pop().is_ok() {}
+        let path = export_path("ok");
+        let resp = dispatch(
+            Command::ResetAndExportChain {
+                path: path.to_string_lossy().into_owned(),
+            },
+            &state,
+        )
+        .await;
+        assert!(matches!(resp, Response::Ok), "{resp:?}");
+        let (_, snap, _) = resonance_apo::state::read_chain_fresh(&path).expect("snapshot written");
+        assert_eq!(snap.num_filters, 1);
+        assert!(
+            matches!(rx.pop(), Ok(AudioCommand::ReplaceChain(_))),
+            "RT thread receives a fresh chain"
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_and_export_chain_refuses_more_bands_than_a_snapshot_holds() {
+        let (state, _rx) = test_state();
+        state.0.lock().unwrap().chain.filters =
+            vec![peaking_band(); resonance_apo::state::MAX_FILTERS + 1];
+        let path = export_path("too-many");
+        let resp = dispatch(
+            Command::ResetAndExportChain {
+                path: path.to_string_lossy().into_owned(),
+            },
+            &state,
+        )
+        .await;
+        assert!(
+            matches!(&resp, Response::Error(e) if e.contains("at most 32")),
+            "{resp:?}"
+        );
+        assert!(!path.exists(), "nothing written on refusal");
     }
 
     #[tokio::test]
