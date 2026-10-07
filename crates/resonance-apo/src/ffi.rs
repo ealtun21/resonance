@@ -69,60 +69,26 @@ fn build_chain(snap: Option<&ChainSnapshot>, channels: usize, sample_rate: f64) 
     }
 }
 
-/// Attach the sidecar IR to a freshly built chain per the snapshot's
-/// convolution fields. Kernel preparation (resample + FFT) happens right here —
-/// callers must be off the RT path (worker thread / format lock).
-fn attach_ir(
-    chain: &mut ProcessorChain,
-    snap: &ChainSnapshot,
-    ir: Option<&std::sync::Arc<resonance_dsp::convolution::IrData>>,
-) {
-    if snap.convolution_generation == 0 {
-        return;
+/// Log what a freshly built chain carries (IR probe + linear-phase taps).
+/// Off the RT path only: worker thread / format lock.
+fn log_attached(chain: &ProcessorChain, sample_rate: f64) {
+    if let Some(info) = chain.convolution.info() {
+        let mut probe = chain.convolution.clone();
+        let mut buf = vec![0.0f64; 2048];
+        buf[0] = 1.0;
+        probe.process(&mut buf, 1);
+        let sum: f64 = buf.iter().sum();
+        let peak = buf.iter().fold(0.0f64, |a, &b| a.max(b.abs()));
+        log::line(&format!(
+            "IR attached: taps {}, engine_rate {}, probe dc {sum:.4} peak {peak:.4}",
+            info.taps, chain.sample_rate
+        ));
     }
-    if let Some(ir) = ir {
-        match chain.convolution.load_ir(ir.clone()) {
-            Ok(()) => {
-                chain.convolution.set_enabled(snap.convolution_enabled != 0);
-                // Diagnostic: probe the prepared kernel with an impulse so the
-                // effective response is visible in the log (sum ≈ DC gain).
-                let mut probe = chain.convolution.clone();
-                let mut buf = vec![0.0f64; 2048];
-                buf[0] = 1.0;
-                probe.process(&mut buf, 1);
-                let sum: f64 = buf.iter().sum();
-                let peak = buf.iter().fold(0.0f64, |a, &b| a.max(b.abs()));
-                log::line(&format!(
-                    "IR attached: taps {}, ir_rate {}, engine_rate {}, probe dc {sum:.4} peak {peak:.4}",
-                    chain.convolution.info().map_or(0, |i| i.taps),
-                    ir.sample_rate,
-                    chain.sample_rate,
-                ));
-            }
-            Err(e) => log::line(&format!("convolution IR rejected: {e}")),
-        }
-    }
-}
-
-/// Render + attach the linear-phase FIR realisation of the chain's static
-/// bands. No-op unless the chain's mode is Linear (armed by `build_chain`
-/// from the snapshot). Kernel synthesis is an FFT — callers must be off the
-/// RT path (worker thread / format lock), same rule as [`attach_ir`]. On a
-/// failed render the chain simply keeps its IIR bank (never silence).
-fn attach_eq_fir(chain: &mut ProcessorChain, sample_rate: f64) {
-    if chain.phase_mode != resonance_dsp::chain::PhaseMode::Linear {
-        return;
-    }
-    let ch = chain.channels;
-    let Some(ir) = resonance_dsp::linphase::render(&chain.filters, ch, sample_rate) else {
-        return; // no linearizable bands — IIR fallback is already correct
-    };
-    let taps = ir.channels.first().map_or(0, Vec::len);
-    match chain.eq_fir.load_ir(std::sync::Arc::new(ir)) {
-        Ok(()) => log::line(&format!(
-            "linear-phase kernel attached: {taps} taps at {sample_rate} Hz"
-        )),
-        Err(e) => log::line(&format!("linear-phase kernel rejected: {e}")),
+    if let Some(info) = chain.eq_fir.info() {
+        log::line(&format!(
+            "linear-phase kernel attached: {} taps at {sample_rate} Hz",
+            info.taps
+        ));
     }
 }
 
@@ -275,9 +241,11 @@ fn worker_loop(weak: Weak<Shared>) {
                         }
                     }
                     if need_rebuild {
-                        let mut c = build_chain(Some(&snap), channels, sr);
-                        attach_ir(&mut c, &snap, cached_ir.as_ref());
-                        attach_eq_fir(&mut c, sr);
+                        let (c, notes) = snap.build_full_chain(channels, sr, cached_ir.as_ref());
+                        for n in &notes {
+                            log::line(n);
+                        }
+                        log_attached(&c, sr);
                         if let Ok(mut g) = shared.state.lock() {
                             if let Some(l) = g.as_mut() {
                                 l.chain = c;
@@ -439,13 +407,19 @@ pub extern "C" fn resonance_apo_lock(
         let snap = SharedFile::open(&state::default_state_path())
             .ok()
             .and_then(|f| f.read());
-        let mut chain = build_chain(snap.as_ref(), ch, sample_rate);
         // Format lock is initialisation, not the streaming callback — safe to
         // read + prepare the convolution IR here.
-        if let Some(s) = snap.as_ref() {
-            attach_ir(&mut chain, s, load_ir_blob(s).as_ref());
-        }
-        attach_eq_fir(&mut chain, sample_rate);
+        let mut chain = match snap.as_ref() {
+            Some(s) => {
+                let (c, notes) = s.build_full_chain(ch, sample_rate, load_ir_blob(s).as_ref());
+                for n in &notes {
+                    log::line(n);
+                }
+                log_attached(&c, sample_rate);
+                c
+            }
+            None => build_chain(None, ch, sample_rate),
+        };
         chain.reset();
         let scratch = vec![0.0f64; (max_frames as usize).saturating_mul(ch)];
         let routed = scratch.clone();
