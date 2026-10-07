@@ -4800,6 +4800,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "resonance-e2e"
+version = "0.10.1"
+dependencies = [
+ "anyhow",
+ "clap 4.6.1",
+ "hound",
+ "pipewire",
+ "resonance-apo",
+ "resonance-dsp",
+ "resonance-ipc",
+ "rustfft",
+ "serde",
+ "serde_json",
+ "toml 1.1.2+spec-1.1.0",
+]
+
+[[package]]
 name = "resonance-gui"
 version = "0.10.1"
 dependencies = [
