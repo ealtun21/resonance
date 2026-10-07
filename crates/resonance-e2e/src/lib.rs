@@ -9,6 +9,7 @@
     clippy::doc_markdown
 )]
 
+pub mod checks;
 pub mod compare;
 pub mod latency;
 pub mod ratechain;
