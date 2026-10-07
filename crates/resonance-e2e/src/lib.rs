@@ -17,5 +17,7 @@ pub mod linux;
 pub mod ratechain;
 pub mod render;
 pub mod report;
+#[cfg(target_os = "linux")]
+pub mod runner;
 pub mod scenario;
 pub mod stimulus;

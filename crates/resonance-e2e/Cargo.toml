@@ -8,6 +8,10 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+[[bin]]
+name = "resonance-e2e"
+path = "src/main.rs"
+
 [dependencies]
 resonance-dsp = { path = "../resonance-dsp" }
 resonance-ipc = { path = "../resonance-ipc" }
