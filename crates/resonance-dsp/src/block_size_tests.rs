@@ -113,15 +113,25 @@ fn assert_block_size_independent(make: fn() -> ProcessorChain) {
     );
 }
 
-// Spike 4 (2026-10-07): FAILS. Output differs from block 1024 at every size tried
-// (64..4096, max |diff| ~0.57, differences persist to the end of 1 s of noise), so
-// live linear-phase output depends on the host quantum and cannot be compared
-// against an offline render at a different block size. Product finding for the
-// e2e plan (Task 20 marks linear-phase scenarios expected_fail).
+// Spike 4 (2026-10-07): the IIR -> FIR switch-over (a chain that arms linear
+// phase while already running) depends on the block size: output differs from
+// block 1024 at every size tried (64..4096, max |diff| ~0.57, persisting to the
+// end of 1 s of noise, i.e. a time shift rather than a transient). A chain that
+// starts in the FIR path is exact (`linear_phase_from_reset_..` below), which is
+// what the e2e harness uses (`ResetAndExportChain`). Finding DSP-E2.
 #[test]
-#[ignore = "known: linear-phase output depends on block size"]
-fn linear_phase_output_is_independent_of_block_size() {
+#[ignore = "known (DSP-E2): the IIR->FIR switch-over depends on block size"]
+fn linear_phase_switchover_is_independent_of_block_size() {
     assert_block_size_independent(linear_chain);
+}
+
+#[test]
+fn linear_phase_from_reset_is_independent_of_block_size() {
+    assert_block_size_independent(|| {
+        let mut c = linear_chain();
+        c.reset();
+        c
+    });
 }
 
 #[test]

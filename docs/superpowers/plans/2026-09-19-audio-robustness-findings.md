@@ -230,7 +230,7 @@ Dive not yet run (one subagent at a time; token cap). Planned scope and known an
 ### §6.x Findings from the first e2e run (2026-10-07)
 
 - **DSP-E1 (P3, fixed 2026-10-07):** `ProcessorChain::reset()` did not reset the dither RNG (now `DitherStage::reset`, test `reset_restarts_the_dither_sequence`). Even so, the live chain draws from the RNG on every idle graph cycle before the stimulus, so dithered output still cannot equal an offline render; `fx-all-dithered` keeps `tolerance_dbfs = -80`.
-- **DSP-E2 (P2):** linear-phase EQ output depends on the caller's block size (spike 4: max abs diff ~0.57 against block 1024 at every size tried, 64..4096). Live it matched the render only because the quantum matched the render block; `block_size_tests::linear_phase_output_is_independent_of_block_size` is `#[ignore]`d as evidence.
+- **DSP-E2 (P3):** the IIR -> FIR switch-over (linear phase armed on a running chain) depends on the caller block size: max abs diff ~0.57 against block 1024 at every size tried, persisting to the end of the signal (a time shift, not a transient). A chain that starts in the FIR path is bit-identical at all block sizes (`linear_phase_from_reset_is_independent_of_block_size`), which is why the live linear-phase e2e scenario is exact. The switch-over test is `#[ignore]`d as evidence. Root cause not yet found (suspect the FIR engine's partition phase after `eq_fir.reset()` at a block boundary).
 - **PW-E1 (P3):** daemon added latency measured through a null sink moves in whole graph quanta (up to 2 quanta apart between identical runs, ring-buffer fill). The e2e gate uses the minimum of three chirp trains; absolute "added latency" values are quantum-granular and can read negative.
 
 ## 7. Daemon core + DSP numeric stability — pending
