@@ -51,8 +51,9 @@ id = "fx-all-dithered"
 tier = "quick"
 rates = [48000]
 channels = [2]
-# TPDF dither is random and its RNG advances on every idle graph cycle, so the
-# live noise cannot equal the render; 16-bit TPDF stays within ~6 LSB (-80 dBFS).
+# TPDF dither draws from its PRNG on every sample, including the idle cycles the
+# live chain runs before the stimulus starts, so the live noise cannot line up
+# with the render; 16-bit TPDF stays within ~6 LSB (-80 dBFS).
 [scenario.expect]
 compare = { tolerance_dbfs = -80 }
 [scenario.profile]

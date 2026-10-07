@@ -467,6 +467,7 @@ impl ProcessorChain {
         self.dynamic_boost.reset();
         self.bass.reset();
         self.crossfeed.reset();
+        self.dither.reset();
     }
 
     /// Rebind every sample-rate-dependent coefficient to a new output rate.
@@ -1003,6 +1004,26 @@ mod tests {
                 i * gain
             );
         }
+    }
+
+    #[test]
+    fn reset_restarts_the_dither_sequence() {
+        // A reset is a hard restart: a chain that has already dithered must, once
+        // reset, produce exactly what a fresh chain produces (the e2e harness
+        // compares live output with an offline render from zero state).
+        let signal: Vec<f64> = (0..256)
+            .map(|i| (f64::from(i) * 0.05).sin() * 0.4)
+            .collect();
+        let mut fresh = ProcessorChain::builder().channels(2).build();
+        fresh.set_dither(Some(16));
+        let mut used = fresh.clone();
+        let mut warmup = signal.clone();
+        used.process(&mut warmup);
+        used.reset();
+        let (mut a, mut b) = (signal.clone(), signal);
+        fresh.process(&mut a);
+        used.process(&mut b);
+        assert!(a == b, "reset chain must dither exactly like a fresh chain");
     }
 
     #[test]
