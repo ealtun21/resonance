@@ -16,3 +16,6 @@ linker = "x86_64-linux-musl-gcc"
 # Prerequisites: sudo pacman -S aarch64-linux-musl-gcc (or cross)
 # [target.aarch64-unknown-linux-musl]
 # linker = "aarch64-linux-musl-gcc"
+
+[alias]
+xtask = "run --package xtask --"

@@ -13,6 +13,7 @@ members = [
     "crates/resonance-gui",
     "crates/resonance-tray",
     "crates/resonance-e2e",
+    "xtask",
 ]
 
 [workspace.package]
