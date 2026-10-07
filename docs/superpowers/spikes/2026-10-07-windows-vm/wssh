@@ -1,0 +1,2 @@
+#!/bin/sh
+exec ssh -i ~/.ssh/resonance_winvm -p 22220 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes Quickemu@127.0.0.1 "$@"
