@@ -10,6 +10,7 @@
 )]
 
 pub mod compare;
+pub mod latency;
 pub mod ratechain;
 pub mod render;
 pub mod scenario;
