@@ -12,6 +12,8 @@
 pub mod checks;
 pub mod compare;
 pub mod latency;
+#[cfg(target_os = "linux")]
+pub mod linux;
 pub mod ratechain;
 pub mod render;
 pub mod report;
