@@ -18,3 +18,6 @@ mod effects_tests;
 
 #[cfg(test)]
 mod rate_tests;
+
+#[cfg(test)]
+mod block_size_tests;
