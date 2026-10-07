@@ -64,15 +64,15 @@ the spike already proved. Latency baselines in `contrib/e2e/baselines/windows.to
 
 ## M3: macOS
 
-### M0: macOS spike completion (in progress)
+### M0: macOS spike (done 2026-10-07)
 
-Finish the Sequoia install (Recovery -> Reinstall, driven by QMP/HMP), create user `e2e`, enable Remote
-Login, then run the plan's spike steps 3 to 6: provision rust + BlackHole + SwitchAudioSource, build the
-daemon, run it from a LaunchAgent, and record whether `HAL tap IOProc` reports `with audio > 0` and which
-TCC path works (one-time approval via QMP clicks, or a `TCC.db` row with SIP off). Append to spec
-section 14, row 1.
+Passed: the Sequoia VM installs unattended-by-script (recipe in `docs/superpowers/spikes/2026-10-07-macos-vm/`),
+the daemon runs from a LaunchAgent as a signed minimal `Resonance.app`, and after clicking Allow on the two
+first-launch prompts the tap reports audio (705 of about 1960 callbacks) on reruns without a prompt. Open:
+the 16-channel tap on BlackHole 16ch, and whether the grant survives a rebuild (the plan's stable signing
+identity: run `contrib/macos/make-signing-cert.sh` in the image).
 
-### M1: image build and agent backend
+### M1 (macOS): image build and agent backend
 
 Same shape as W1/W2: `cargo xtask e2e image macos` (install automation script kept in
 `contrib/e2e/macos/`, base disk snapshot), `macos::env` (SwitchAudioSource, BlackHole channel count,
