@@ -511,4 +511,15 @@ kind = "restart_daemon"
         assert!(glob_match("*", "anything"));
         assert!(!glob_match("eq*", "flat@48000x2"));
     }
+
+    #[test]
+    fn repo_scenario_files_parse_and_quick_tier_is_not_empty() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contrib/e2e/scenarios");
+        let all = load_dir(&dir).unwrap_or_else(|e| panic!("{e:#}"));
+        assert!(!select(&all, Tier::Quick, None, "linux").is_empty());
+        assert!(
+            all.iter()
+                .all(|s| s.profile.preset.as_ref().is_none_or(|p| p.exists()))
+        );
+    }
 }

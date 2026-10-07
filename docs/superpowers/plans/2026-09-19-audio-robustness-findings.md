@@ -227,6 +227,12 @@ Dive not yet run (one subagent at a time; token cap). Planned scope and known an
 - `rate_tests.rs` + `verify.rs` coverage for the Linux path (what is asserted: peak frequency after capture→playback at mismatched rates?).
 - Findings will be numbered `PW-1..n`.
 
+### §6.x Findings from the first e2e run (2026-10-07)
+
+- **DSP-E1 (P3):** `ProcessorChain::reset()` does not reset the dither RNG, and the live chain consumes it on every idle graph cycle, so dithered output can never equal an offline render. `fx-all-dithered` compares with `tolerance_dbfs = -80` instead of exact.
+- **DSP-E2 (P2):** linear-phase EQ output depends on the caller's block size (spike 4: max abs diff ~0.57 against block 1024 at every size tried, 64..4096). Live it matched the render only because the quantum matched the render block; `block_size_tests::linear_phase_output_is_independent_of_block_size` is `#[ignore]`d as evidence.
+- **PW-E1 (P3):** daemon added latency measured through a null sink moves in whole graph quanta (up to 2 quanta apart between identical runs, ring-buffer fill). The e2e gate uses the minimum of three chirp trains; absolute "added latency" values are quantum-granular and can read negative.
+
 ## 7. Daemon core + DSP numeric stability — pending
 
 Dive not yet run. Planned scope:

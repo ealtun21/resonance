@@ -1,0 +1,66 @@
+# Every UI band type, all slopes, mid/side scopes, a per-channel band and a
+# dynamic band. 8 bands (snapshots hold at most 32).
+preamp_db = -6.0
+
+[[bands]]
+band_type = "Peaking"
+freq = 1000.0
+gain_db = 6.0
+q = 1.41
+enabled = true
+
+[[bands]]
+band_type = "LowShelf"
+freq = 105.0
+gain_db = 4.0
+q = 0.7
+enabled = true
+slope_db_oct = 24
+
+[[bands]]
+band_type = "HighShelf"
+freq = 8000.0
+gain_db = -3.0
+q = 0.7
+enabled = true
+slope_db_oct = 48
+
+[[bands]]
+band_type = "HighPass"
+freq = 25.0
+gain_db = 0.0
+q = 0.707
+enabled = true
+slope_db_oct = 24
+
+[[bands]]
+band_type = "LowPass"
+freq = 18000.0
+gain_db = 0.0
+q = 0.707
+enabled = true
+
+[[bands]]
+band_type = "Notch"
+freq = 3150.0
+gain_db = 0.0
+q = 8.0
+enabled = true
+scope = "Side"
+
+[[bands]]
+band_type = "BandPass"
+freq = 250.0
+gain_db = 0.0
+q = 0.5
+enabled = true
+scope = "Mid"
+channels = 1
+
+[[bands]]
+band_type = "Peaking"
+freq = 6500.0
+gain_db = 4.0
+q = 2.0
+enabled = true
+dynamics = { threshold_db = -30.0, range_db = -6.0, attack_ms = 5.0, release_ms = 150.0 }

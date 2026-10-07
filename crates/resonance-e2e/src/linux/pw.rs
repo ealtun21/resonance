@@ -215,8 +215,9 @@ pub fn play_and_record(
         *pw::keys::MEDIA_TYPE => "Audio",
         *pw::keys::MEDIA_CATEGORY => "Playback",
         *pw::keys::MEDIA_ROLE => "Production",
+        // No `node.dont-reconnect`: like a real app, the player follows its
+        // target when the daemon recreates the sink (device switch, restart).
         *pw::keys::TARGET_OBJECT => play.node,
-        "node.dont-reconnect" => "true",
     };
     let stream = pw::stream::StreamBox::new(&core, "e2e-play", props)?;
     let (sh, ev, src, ch, rate) = (

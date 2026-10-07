@@ -1,0 +1,14 @@
+[[scenario]]
+id = "long-flat"
+tier = "full"
+rates = [48000]
+channels = [2]
+body_secs = 60.0
+
+[[scenario]]
+id = "long-full-eq"
+tier = "full"
+rates = [96000]
+channels = [8]
+body_secs = 60.0
+profile_file = "../profiles/full-eq.toml"

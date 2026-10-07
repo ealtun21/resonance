@@ -1,0 +1,60 @@
+[[scenario]]
+id = "fx-fidelity"
+tier = "full"
+rates = [48000]
+channels = [2]
+[scenario.profile]
+effects = { fidelity = 0.7 }
+
+[[scenario]]
+id = "fx-ambience"
+tier = "full"
+rates = [48000]
+channels = [2]
+[scenario.profile]
+effects = { ambience = 0.7 }
+
+[[scenario]]
+id = "fx-surround"
+tier = "full"
+rates = [48000]
+channels = [2]
+[scenario.profile]
+effects = { surround = 0.7 }
+
+[[scenario]]
+id = "fx-dynamic-boost"
+tier = "full"
+rates = [48000]
+channels = [2]
+[scenario.profile]
+effects = { dynamic_boost = 0.7 }
+
+[[scenario]]
+id = "fx-bass"
+tier = "full"
+rates = [48000]
+channels = [2]
+[scenario.profile]
+effects = { bass = 0.7 }
+
+[[scenario]]
+id = "fx-crossfeed"
+tier = "full"
+rates = [48000]
+channels = [2]
+[scenario.profile]
+effects = { crossfeed = 0.7 }
+
+[[scenario]]
+id = "fx-all-dithered"
+tier = "quick"
+rates = [48000]
+channels = [2]
+# TPDF dither is random and its RNG advances on every idle graph cycle, so the
+# live noise cannot equal the render; 16-bit TPDF stays within ~6 LSB (-80 dBFS).
+[scenario.expect]
+compare = { tolerance_dbfs = -80 }
+[scenario.profile]
+dither_bits = 16
+effects = { fidelity = 0.5, ambience = 0.5, surround = 0.5, dynamic_boost = 0.5, bass = 0.5, crossfeed = 0.5 }

@@ -1,0 +1,15 @@
+[[scenario]]
+id = "linear-phase"
+tier = "full"
+rates = [48000, 96000]
+channels = [2]
+quick = [[48000, 2]]
+profile_file = "../profiles/full-eq-linear.toml"
+
+[[scenario]]
+id = "convolution"
+tier = "full"
+rates = [48000, 96000]
+channels = [2]
+[scenario.profile]
+ir = "synthetic:room"

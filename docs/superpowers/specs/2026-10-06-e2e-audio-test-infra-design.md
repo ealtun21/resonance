@@ -363,6 +363,8 @@ Each spike is throwaway; results are appended to this spec before milestone 1 st
 - **M4:** self-hosted runner, `e2e.yml`, release gate, release-time arm64 job, `windows-installer`
   trigger change.
 
+**M1 done (2026-10-07):** `cargo xtask e2e --os linux --tier full` green (53 scenarios, three consecutive runs); no `expected_fail` entries needed; 3 findings logged (DSP-E1, DSP-E2, PW-E1 in the audio-robustness findings).
+
 Linux comes first because it is the cheapest environment: the agent, report and checks are proven
 there before the slow VMs are involved.
 

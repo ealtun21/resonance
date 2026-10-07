@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail, ensure};
 use resonance_ipc::DaemonState;
 use serde_json::Value;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub const DEVICE: &str = "e2e_dev";
@@ -174,7 +174,7 @@ pub fn daemon_running() -> bool {
 }
 
 pub struct Daemon {
-    pid: u32,
+    child: Child,
 }
 
 impl Daemon {
@@ -191,7 +191,7 @@ impl Daemon {
             .stderr(out)
             .spawn()
             .with_context(|| format!("start {}", bin.display()))?;
-        let d = Self { pid: child.id() };
+        let d = Self { child };
         wait_for("daemon socket", Duration::from_secs(10), || {
             Ok(resonance_ipc::transport::is_reachable())
         })?;
@@ -200,14 +200,15 @@ impl Daemon {
 
     #[must_use]
     pub fn pid(&self) -> u32 {
-        self.pid
+        self.child.id()
     }
 
-    /// SIGTERM, then wait until no `resonanced` process remains.
-    pub fn stop(self) -> Result<()> {
-        run(Command::new("kill").args(["-TERM", &self.pid.to_string()]))?;
+    /// SIGTERM, then reap the child. (Reaping matters: an unreaped child stays
+    /// a zombie named `resonanced`, which `daemon_running` would still see.)
+    pub fn stop(mut self) -> Result<()> {
+        run(Command::new("kill").args(["-TERM", &self.child.id().to_string()]))?;
         wait_for("daemon exit", Duration::from_secs(10), || {
-            Ok(!daemon_running())
+            Ok(self.child.try_wait()?.is_some())
         })
     }
 }

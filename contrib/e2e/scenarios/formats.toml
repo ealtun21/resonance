@@ -1,0 +1,7 @@
+# Flat chain across every rate × width: bit-exact, no resampling anywhere.
+[[scenario]]
+id = "flat"
+tier = "full"
+rates = [44100, 48000, 88200, 96000, 176400, 192000]
+channels = [1, 2, 6, 8, 16]
+quick = [[48000, 2], [96000, 8]]

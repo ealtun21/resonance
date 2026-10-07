@@ -24,6 +24,7 @@ use std::time::Duration;
 const OS: &str = "linux";
 /// Latency search range; also how long recording continues after the stimulus.
 const MAX_LAG_SECS: f64 = 1.0;
+const TRAINS: usize = 3;
 
 pub struct RunOpts {
     pub scenarios: Vec<Scenario>,
@@ -153,7 +154,16 @@ fn latency_ms(pr: &PlayRec, rec_idx: usize, rate: u32) -> Result<f64> {
     median(ms.collect()).context("no chirps")
 }
 
+/// Latency floor over [`TRAINS`] chirp trains. One train can land 1-2 graph
+/// quanta high (the daemon's ring buffer fill varies run to run); the minimum
+/// is the stable figure a regression gate can use.
 fn play_train(target: &str, s: &Scenario) -> Result<f64> {
+    (0..TRAINS)
+        .map(|_| play_train_once(target, s))
+        .try_fold(f64::INFINITY, |lo, ms| ms.map(|ms| lo.min(ms)))
+}
+
+fn play_train_once(target: &str, s: &Scenario) -> Result<f64> {
     let train = chirp_train(s.rate, s.channels);
     let pr = play_and_record(
         &Play {
