@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>e2e.spike</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>RUST_LOG=info /Applications/Resonance.app/Contents/MacOS/resonanced > /tmp/d.log 2>&1 &amp; sleep 8; for i in 1 2 3 4 5; do afplay /System/Library/Sounds/Submarine.aiff; done; sleep 3; pkill -x resonanced; echo SPIKE-DONE >> /tmp/d.log</string>
+  </array>
+  <key>RunAtLoad</key><false/>
+</dict>
+</plist>
