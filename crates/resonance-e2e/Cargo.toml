@@ -21,7 +21,7 @@ serde_json = { workspace = true }
 toml = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-pipewire = { workspace = true }
+pipewire = { workspace = true, features = ["v0_3_49"] }
 
 [lints]
 workspace = true
