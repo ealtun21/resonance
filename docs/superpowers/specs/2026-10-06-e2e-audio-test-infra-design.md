@@ -380,3 +380,12 @@ this sub-project unless the harness itself cannot work without the fix. Fixing t
   under `$RESONANCE_E2E_HOME`.
 - **Disk:** about 100 GB for images and caches.
 - **First image builds** take about 1–2 hours per VM; later runs reuse them.
+
+## 14. Spike results (2026-10-07)
+
+| # | Result | Consequence |
+|---|---|---|
+| 1 | not run (needs a manual macOS install in a SPICE window) | M3 plan waits for this spike |
+| 2 | not run (Windows 11 VM + driver install) | M2 device choice open |
+| 3 | not run (needs a throwaway branch pushed to origin and a workflow run) | release-job capture tier undecided |
+| 4 | convolution: bit-identical at block sizes 64–4096 and random. Linear-phase EQ: differs at every size tried (max abs diff ~0.57 against block 1024, persisting to the end of the signal) | exact compare is valid for IIR and convolution only; linear-phase scenarios are `expected_fail` until the block-size dependence is fixed (a product finding, not fixable by `tolerance_dbfs`) |
