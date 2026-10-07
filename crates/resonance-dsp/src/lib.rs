@@ -1,3 +1,4 @@
+pub mod analysis;
 pub mod chain;
 pub mod channel;
 pub mod convolution;

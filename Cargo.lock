@@ -4743,6 +4743,7 @@ dependencies = [
  "cpal",
  "hound",
  "libc",
+ "resonance-dsp",
  "resonance-ipc",
  "resonance-preset",
  "rustfft",
