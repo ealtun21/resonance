@@ -442,3 +442,12 @@ Topology and checks are in `contrib/e2e/macos/README.md`. What it took, and what
   -135 ms added latency for the EQ scenario).
 - TCC grants (daemon: microphone and system audio; agent: microphone) survive rebuilds because the signing
   identity is stable; they are answered once while making the image.
+
+### 14.3 Windows image from scratch (2026-10-08)
+
+`cargo xtask e2e image windows` builds the base image with no hand steps (third attempt; ISO and virtio media
+cached) and `--os windows --tier quick` passes 5 of 5 on it with the same latency figures as the hand-made image.
+The first two attempts found: the unattended install powers the VM off at the end of a setup phase instead of
+rebooting (xtask now restarts a guest that is not running while it waits for ssh), and the OpenSSH
+feature-on-demand capability does not install on this image, so sshd never started (the answer file now runs
+`sshd.ps1`, which installs the Win32-OpenSSH release; validated on an overlay of the working image first).

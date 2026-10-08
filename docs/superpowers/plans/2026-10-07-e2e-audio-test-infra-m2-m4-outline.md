@@ -65,7 +65,7 @@ the spike already proved. Latency baselines in `contrib/e2e/baselines/windows.to
 
 ## Status 2026-10-08
 
-W0-W3 and M3 done and verified on all three OSes: Linux, `--os windows` and `--os macos` quick and full tiers pass, latency baselines committed for all three. M4 workflows are written but have not run on a runner (that needs sudo on this host). Windows image from scratch (`image windows`) was exercised separately, see spec 14.1.
+W0-W3 and M3 done and verified on all three OSes: Linux, `--os windows` and `--os macos` quick and full tiers pass, latency baselines committed for all three. M4 workflows are written but have not run on a runner (that needs sudo on this host). The Windows image builds from scratch with `image windows` (spec 14.3); the macOS image is built by hand once (contrib/e2e/macos/README.md).
 
 ## M3: macOS
 
