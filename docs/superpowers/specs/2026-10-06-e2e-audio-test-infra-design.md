@@ -393,3 +393,27 @@ this sub-project unless the harness itself cannot work without the fix. Fixing t
 **W0 result (2026-10-08).** Cause: Scream is a legacy WDM driver that ships no effect slots and no processing modes, and audiodg does not load an EFX (slot 7) APO for such an endpoint. Hypotheses 1 (`Disable_SysFx`: not set on either endpoint) and 2 (format negotiation) were not the cause. Attaching the same CLSID in the legacy GFX slot (`{D04E05A6-...},2` plus `{D3993A3F-...},2` = DEFAULT mode, all other slots removed; `spikes/2026-10-07-windows-vm/attach-slot.ps1 -Slot 2`) makes audiodg log `LockForProcess hr=0x0 ch=8 rate=192000 maxFrames=1920` and `APOProcess first call ... ch=8` on the 8-ch endpoint. Distinguishing signal: the HDA endpoint carried original SFX/MFX entries (slots 5/6) and works on EFX; Scream had none of slots 1/2/5/6/7. `install-apo.ps1` and `attach-endpoint.ps1` currently pick GFX only when a legacy slot exists without a modern one, so an endpoint with no slots at all gets EFX and is silently unprocessed. Decision: the e2e provisioning attaches Scream with `attach-slot.ps1 -Slot 2`; the production installer is left unchanged because changing the no-slots default would move working USB/Bluetooth endpoints off EFX without a way to test them here. Follow-up (separate issue): detect "driver supports no modes" properly before changing the default.
 | 3 | **not viable as-is** (2026-10-07). `macos-15` runner is macOS 15.7.9, SIP disabled, TCC.db writable (a `kTCCServiceAudioCapture` row can be inserted). BlackHole 2ch installs and appears after `sudo killall coreaudiod`. The daemon builds and creates the process tap and aggregate (`Process tap ready`, 48 kHz 2 ch; 44.1 kHz when no BlackHole), then **blocks permanently** on the `resonance-coreaudio` thread inside `AudioObjectGetPropertyData` -> `HAL_HardwarePlugIn_ObjectHasProperty` -> `semaphore_wait` (stack from `sample`), before "CoreAudio ready" is logged and before any `HAL tap IOProc` line. Same hang with output = BlackHole 2ch and with the runner's built-in Null Audio Device, with and without the TCC row, so TCC is not the cause; the VM run shows the real cause: `AudioDeviceCreateIOProcID` blocks in coreaudiod until the "Record Your System Audio" prompt is answered, and nobody can answer it on the runner (a TCC.db row alone did not release it) | the release job cannot run the live quick tier on a GitHub-hosted macOS runner; macOS live e2e = self-hosted/VM only (M3), release job offline-only |
 | 4 | convolution: bit-identical at block sizes 64–4096 and random. Linear-phase EQ: bit-identical when the chain starts in the FIR path (what the harness uses); differs at every size tried (max abs diff ~0.57 against block 1024, persisting to the end of the signal) only across the IIR-to-FIR switch-over (DSP-E2) | exact compare is valid for IIR, convolution and linear phase from a fresh chain; only a live mode switch is block-size dependent (finding DSP-E2, not covered by a scenario) |
+
+### 14.1 Windows leg results (2026-10-08)
+
+`cargo xtask e2e --os windows` boots an overlay of the base image, builds and installs in the guest and
+runs the agent; `--tier full` passes every applicable scenario (22 run, 31 reported as not applicable with
+reasons). What the first full runs taught us, each handled in the harness rather than hidden:
+
+- **Windows' audio engine limits float mixes that approach full scale.** `fx-fidelity` (render peak 1.0),
+  `convolution` (peak 2.1) and `long-full-eq` failed with bursts of small errors around each peak (first
+  attempt: gain 0.59, 4 % residual for the convolution). The APO engine itself is exact: driving the APO FFI
+  directly (`examples/apo_vs_render.rs`) gives output bit-identical to the offline render at 441, 480 and
+  1024 frame blocks. Resolution: the runner renders first and, if the render peaks above -1 dBFS, plays the
+  stimulus attenuated by a power of two (exact in f32) and re-renders; the report notes the attenuation.
+- **DSP-E3 (new, open, benign).** With the APO worker rebuilding the chain after format lock, the
+  linear-phase output differs from the offline render by about 1e-13 (-265 dBFS), vs bit-identical when the
+  engine is driven before the worker's first rebuild. Cause not isolated (kernel built on the worker vs
+  inline). The Windows `linear-phase` scenario therefore uses `compare_by_os.windows = tolerance -240 dBFS`.
+- **QEMU HDA is stereo at 48 kHz only; Scream is 8 channels only** (the registry format is ignored when the
+  driver does not offer it) **and its rate table lacks 176.4 kHz**. A rejected format makes Windows drop the
+  endpoint until it is re-enabled; the runner recovers (`select-endpoint.ps1 -Force`) and reports the failure.
+- **Endpoints change GUID on disable/enable**; the daemon's attach-on-new-endpoint path re-attaches the APO.
+- **Clock skew host/guest broke incremental builds** (tar restored host mtimes older than the guest's build
+  outputs, so cargo reused a stale binary). Source sync uses `tar -m`; guest builds set `CARGO_INCREMENTAL=0`.
+- Latency is not measured on Windows yet (no Resonance-off reference without uninstalling the APO).
