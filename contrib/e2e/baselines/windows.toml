@@ -1,1 +1,6 @@
-# Added latency (ms) per scenario on Windows.
+# Added latency (ms) per scenario. Rewritten by `cargo xtask e2e --update-baseline`.
+"flat@48000x2" = 0.0
+"flat@96000x8" = 0.0
+"full-eq@48000x2" = 0.02
+"fx-all-dithered@48000x2" = 0.75
+"linear-phase@48000x2" = 176.0
