@@ -1462,6 +1462,11 @@ impl GuiApp {
     /// Global keyboard shortcuts: Ctrl-Z undo, Ctrl-Y / Ctrl-Shift-Z redo, and
     /// F1 / `?` to toggle the help overlay (Esc closes it).
     fn handle_keyboard(&mut self, ctx: &egui::Context) {
+        // A focused text field owns the keyboard: `?` / F1 / Esc / Ctrl-Z typed
+        // into it must edit the text, not toggle help or undo the EQ.
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
         let (undo, redo) = ctx.input(|i| {
             let ctrl = i.modifiers.command || i.modifiers.ctrl;
             let undo = ctrl && i.key_pressed(egui::Key::Z) && !i.modifiers.shift;
