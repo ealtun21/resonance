@@ -63,6 +63,10 @@ or the cause is recorded in spec section 14 with a decision.
 Reuse the Linux scenario files; multichannel APO scenarios run on Windows once Scream is attached with GFX (W0). Add flow-through (APO off, bit-exact loopback) scenarios for 8 ch at 44.1/48/96/192 kHz, which
 the spike already proved. Latency baselines in `contrib/e2e/baselines/windows.toml`.
 
+## Status 2026-10-08
+
+W0-W3 done and verified (`cargo xtask e2e --os windows`, quick and full tiers pass). M4 workflows written, not yet run on a runner. M3 written, blocked on guest stability: see spec section 14.2. `image windows` from scratch is untested (the overlay base was hand-built in the spike). Windows latency baselines are not implemented.
+
 ## M3: macOS
 
 ### M0: macOS spike (done 2026-10-07)

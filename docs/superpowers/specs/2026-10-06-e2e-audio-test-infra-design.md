@@ -417,3 +417,18 @@ reasons). What the first full runs taught us, each handled in the harness rather
 - **Clock skew host/guest broke incremental builds** (tar restored host mtimes older than the guest's build
   outputs, so cargo reused a stale binary). Source sync uses `tar -m`; guest builds set `CARGO_INCREMENTAL=0`.
 - Latency is not measured on Windows yet (no Resonance-off reference without uninstalling the APO).
+
+### 14.2 macOS leg status (2026-10-08)
+
+Written but **not yet passing a scenario**. Built and provisioned in the guest (BlackHole 2/16/64 ch from the
+vendor pkgs, `audiodev` helper, stable signing identity, signed `Resonance.app`, LaunchAgents, `kcpassword`
+auto-login), the agent started under launchd and the daemon created its tap and aggregate. Both TCC prompts
+(microphone, "Record Your System Audio") were answered once. The first scenario then timed out waiting for
+the daemon to report the result device, because the run overlapped the second prompt; after that the guest
+**froze twice** (clock stopped, ssh dead, qemu at ~400 % CPU in uninterruptible I/O) shortly after login/
+audio start, the risk spec section 13 names for macOS on this AMD host. Not yet known: whether the freeze
+comes from the 64-channel BlackHole, from audio start under emulation, or from host I/O contention.
+Next steps: retry with the guest's 16 ch device only as the result device, fewer vCPUs, and `-accel` /
+machine options from the spike's working boot; confirm the tap-on-default / render-to-preferred topology
+(`SetOutputTarget` while tapping a different default) with one stereo scenario; then `cargo xtask e2e --os
+macos`. Everything on the host side (`xtask/src/macos.rs`, overlay creation, run script) is unexercised.

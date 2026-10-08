@@ -27,4 +27,18 @@ cc "$SRC/contrib/e2e/macos/audiodev.c" -framework CoreAudio -framework CoreFound
 # Stable local signing identity: the TCC grants (system audio capture for the daemon,
 # microphone for the agent) are keyed to the certificate, so they survive rebuilds.
 bash "$SRC/contrib/macos/make-signing-cert.sh"
+# Auto-login: the agent and daemon only get audio and TCC in a logged-in GUI session
+# (`sysadminctl -autologin` fails on this guest, so write /etc/kcpassword directly:
+# the password XORed with Apple's fixed key, padded to a multiple of 12 bytes).
+python3 - <<'PY' | sudo tee /etc/kcpassword >/dev/null
+import sys
+key = [0x7D, 0x89, 0x52, 0x23, 0xD2, 0xBC, 0xDD, 0xEA, 0xA3, 0xB9, 0x1F]
+pw = list(b"e2etest") + [0]
+pw += [0] * (-len(pw) % 12)
+sys.stdout.buffer.write(bytes(b ^ key[i % len(key)] for i, b in enumerate(pw)))
+PY
+sudo chmod 600 /etc/kcpassword
+sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser e2e
+sudo pmset -a sleep 0 displaysleep 0 disksleep 0
+
 echo PROVISION-DONE
