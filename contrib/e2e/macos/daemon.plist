@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Started and stopped by the agent through launchctl, so the audio-capture grant is
+       evaluated against the daemon itself, not against the agent that asked for it. -->
+  <key>Label</key><string>e2e.resonanced</string>
+  <key>ProgramArguments</key>
+  <array><string>/Applications/Resonance.app/Contents/MacOS/resonanced</string></array>
+  <key>EnvironmentVariables</key><dict><key>RUST_LOG</key><string>info</string></dict>
+  <key>StandardOutPath</key><string>/tmp/e2e-daemon.log</string>
+  <key>StandardErrorPath</key><string>/tmp/e2e-daemon.log</string>
+  <key>RunAtLoad</key><false/>
+</dict>
+</plist>

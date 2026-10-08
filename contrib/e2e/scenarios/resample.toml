@@ -1,0 +1,17 @@
+[[scenario]]
+id = "headset-16k-mono"
+tier = "full"
+rates = [16000]
+channels = [1]
+player_rate = 48000
+[scenario.expect]
+resample = [{ hop = "player->graph", reason = "48 kHz content into a 16 kHz mono headset-profile device; PipeWire's stream adapter converts" }]
+
+[[scenario]]
+id = "content-48k-device-44k1"
+tier = "quick"
+rates = [44100]
+channels = [2]
+player_rate = 48000
+[scenario.expect]
+resample = [{ hop = "player->graph", reason = "48 kHz content into a 44.1 kHz device; PipeWire's stream adapter converts" }]

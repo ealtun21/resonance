@@ -4743,6 +4743,7 @@ dependencies = [
  "cpal",
  "hound",
  "libc",
+ "resonance-dsp",
  "resonance-ipc",
  "resonance-preset",
  "rustfft",
@@ -4796,6 +4797,24 @@ dependencies = [
  "rubato",
  "rustfft",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "resonance-e2e"
+version = "0.10.1"
+dependencies = [
+ "anyhow",
+ "clap 4.6.1",
+ "cpal",
+ "hound",
+ "pipewire",
+ "resonance-apo",
+ "resonance-dsp",
+ "resonance-ipc",
+ "rustfft",
+ "serde",
+ "serde_json",
+ "toml 1.1.2+spec-1.1.0",
 ]
 
 [[package]]
@@ -7374,6 +7393,14 @@ name = "xml-rs"
 version = "0.8.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
+
+[[package]]
+name = "xtask"
+version = "0.10.1"
+dependencies = [
+ "anyhow",
+ "clap 4.6.1",
+]
 
 [[package]]
 name = "yoke"

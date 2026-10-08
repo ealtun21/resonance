@@ -13,8 +13,31 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Publishing requires the local live-audio suite (e2e.yml) to have passed on
+  # exactly this commit. The macOS live tier cannot run on GitHub-hosted
+  # runners (spec section 14, spike 3), so this release's macOS binaries get
+  # the offline tests only; the status below is the live evidence.
+  e2e-gate:
+    name: Require e2e/quick on the tag commit
+    runs-on: ubuntu-24.04
+    permissions:
+      statuses: read
+    steps:
+      - name: Check the commit status
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          state=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/status" \
+            --jq '[.statuses[] | select(.context == "e2e/quick")][0].state')
+          echo "e2e/quick on ${{ github.sha }}: ${state:-missing}"
+          if [ "$state" != success ]; then
+            echo "::error::no successful e2e/quick status on the tagged commit; run the e2e workflow on it first"
+            exit 1
+          fi
+
   build:
     name: Build release binaries
+    needs: e2e-gate
     # 24.04 is the floor: the libspa 0.10 crate needs PipeWire 1.x dev headers,
     # which 22.04 (pipewire 0.3.48) lacks. Sets a glibc 2.39 runtime floor.
     runs-on: ubuntu-24.04
@@ -122,6 +145,7 @@ jobs:
 
   build-macos:
     name: Build macOS .app bundle (arm64)
+    needs: e2e-gate
     strategy:
       matrix:
         # arm64 = Apple Silicon (macos-14 runner). Intel x86_64 dropped —

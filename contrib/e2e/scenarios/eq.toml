@@ -1,0 +1,15 @@
+[[scenario]]
+id = "full-eq"
+tier = "full"
+rates = [48000, 96000]
+channels = [2, 8]
+quick = [[48000, 2]]
+profile_file = "../profiles/full-eq.toml"
+
+[[scenario]]
+id = "apo-all-types"
+tier = "full"
+rates = [48000]
+channels = [2]
+[scenario.profile]
+preset = "../fixtures/all-types.txt"

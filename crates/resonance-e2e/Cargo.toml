@@ -1,0 +1,40 @@
+[package]
+name = "resonance-e2e"
+description = "Live-audio end-to-end test agent (never shipped)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "resonance-e2e"
+path = "src/main.rs"
+
+[dependencies]
+cpal = { workspace = true, optional = true }
+resonance-dsp = { path = "../resonance-dsp" }
+resonance-ipc = { path = "../resonance-ipc" }
+resonance-apo = { path = "../resonance-apo" }
+anyhow = { workspace = true }
+clap = { workspace = true }
+hound = { workspace = true }
+rustfft = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+pipewire = { workspace = true, features = ["v0_3_49"] }
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+cpal = { workspace = true }
+
+[features]
+# Type-checks the Windows and macOS runners on Linux (`cargo check -p resonance-e2e --features cross-check`)
+# so most mistakes surface without booting a guest. Needs the ALSA dev package for cpal.
+cross-check = ["dep:cpal"]
+
+[lints]
+workspace = true

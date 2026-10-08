@@ -407,6 +407,37 @@ impl ChainSnapshot {
         chain
     }
 
+    /// Build the chain exactly as the APO's worker does: parameters
+    /// ([`Self::build_chain`]), then the referenced convolution IR, then the
+    /// linear-phase kernel. Returns one note per rejected stage; that stage is
+    /// then skipped (never silence). The e2e agent uses this same builder for
+    /// its offline render, so the render cannot drift from audiodg.
+    #[must_use]
+    pub fn build_full_chain(
+        &self,
+        channels: usize,
+        sample_rate: f64,
+        ir: Option<&std::sync::Arc<resonance_dsp::convolution::IrData>>,
+    ) -> (ProcessorChain, Vec<String>) {
+        let mut chain = self.build_chain(channels, sample_rate);
+        let mut notes = Vec::new();
+        if let Some(ir) = ir.filter(|_| self.convolution_generation != 0) {
+            match chain.convolution.load_ir(std::sync::Arc::clone(ir)) {
+                Ok(()) => chain.convolution.set_enabled(self.convolution_enabled != 0),
+                Err(e) => notes.push(format!("convolution IR rejected: {e}")),
+            }
+        }
+        let kernel = (chain.phase_mode == resonance_dsp::chain::PhaseMode::Linear)
+            .then(|| resonance_dsp::linphase::render(&chain.filters, channels, sample_rate))
+            .flatten();
+        if let Some(kernel) = kernel {
+            if let Err(e) = chain.eq_fir.load_ir(std::sync::Arc::new(kernel)) {
+                notes.push(format!("linear-phase kernel rejected: {e}"));
+            }
+        }
+        (chain, notes)
+    }
+
     /// Apply these parameters to an EXISTING chain in place, preserving filter
     /// and effect state so live edits (dragging EQ bands) don't reset biquad
     /// history → clicks. Returns `false` if the band structure changed (count
@@ -1012,6 +1043,59 @@ mod tests {
 
     fn temp_path(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("resonance-apo-{tag}-{}.bin", std::process::id()))
+    }
+
+    fn peaking_chain(linear: bool) -> ProcessorChain {
+        let f = resonance_dsp::filter::ApoFilter::builder()
+            .filter_type(resonance_dsp::filter::FilterType::Peaking)
+            .freq(1000.0)
+            .gain_db(6.0)
+            .q(1.0)
+            .enabled(true)
+            .channels(2)
+            .sample_rate(48_000.0)
+            .build()
+            .unwrap();
+        let mut c = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48_000.0)
+            .add_filter(f)
+            .build();
+        if linear {
+            c.set_phase_mode(resonance_dsp::chain::PhaseMode::Linear);
+        }
+        c
+    }
+
+    #[test]
+    fn build_full_chain_attaches_ir_and_linear_phase_kernel() {
+        let mut snap = ChainSnapshot::from_chain(&peaking_chain(true));
+        snap.convolution_generation = 7;
+        snap.convolution_enabled = 1;
+        let ir = std::sync::Arc::new(resonance_dsp::convolution::IrData {
+            name: "t".into(),
+            path: String::new(),
+            sample_rate: 48_000.0,
+            channels: vec![vec![1.0, 0.5, 0.25]],
+        });
+        let (built, notes) = snap.build_full_chain(2, 48_000.0, Some(&ir));
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(built.convolution.info().map(|i| i.taps), Some(3));
+        assert!(built.convolution.enabled());
+        assert!(
+            built.eq_fir.info().is_some(),
+            "linear-phase kernel attached"
+        );
+    }
+
+    #[test]
+    fn build_full_chain_without_ir_or_linear_phase_is_build_chain() {
+        let snap = ChainSnapshot::from_chain(&peaking_chain(false));
+        let (built, notes) = snap.build_full_chain(2, 48_000.0, None);
+        assert!(notes.is_empty());
+        assert!(built.convolution.info().is_none());
+        assert!(built.eq_fir.info().is_none());
+        assert_eq!(built.filters.len(), 1);
     }
 
     #[test]

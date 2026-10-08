@@ -1,0 +1,36 @@
+[[scenario]]
+id = "rate-change-48k-96k"
+tier = "quick"
+rates = [48000]
+channels = [2]
+body_secs = 4.0
+[scenario.expect]
+resample = [{ hop = "player->graph", reason = "graph moved to 96 kHz mid-stream; the 48 kHz player stream is converted" }]
+[[scenario.events]]
+at_secs = 1.5
+kind = "force_rate"
+rate = 96000
+
+[[scenario]]
+id = "switch-stereo-to-8ch"
+tier = "full"
+rates = [48000]
+channels = [2]
+body_secs = 4.0
+[[scenario.events]]
+at_secs = 1.5
+kind = "switch_device"
+rate = 48000
+channels = 8
+
+[[scenario]]
+id = "daemon-restart"
+tier = "full"
+rates = [48000]
+channels = [2]
+body_secs = 5.0
+[scenario.expect]
+max_gap_ms = 3000
+[[scenario.events]]
+at_secs = 1.5
+kind = "restart_daemon"

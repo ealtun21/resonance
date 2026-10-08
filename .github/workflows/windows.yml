@@ -1,8 +1,9 @@
 name: windows-installer
 
+# Tags and manual runs only: the local Windows VM (e2e.yml) builds, lints and
+# tests Windows on every change.
 on:
   push:
-    branches: [master, feat/windows-port]
     tags: ["v*"]
   workflow_dispatch:
 

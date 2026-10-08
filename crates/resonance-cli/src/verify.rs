@@ -29,6 +29,7 @@
 //! mix, post-APO) via cpal — the analysis and comparison are identical.
 
 use anyhow::{Context, Result, bail};
+use resonance_dsp::analysis::{best_integer_lag, fft_peak_hz, power_spectrum};
 use resonance_ipc::{Command, DaemonState, FxEffectId, Response, fr};
 use std::fmt::Write as _;
 
@@ -796,56 +797,6 @@ fn sine_amplitude(samples: &[f32], rate: f64, freq: f64) -> f64 {
     (a * a + b * b).sqrt()
 }
 
-/// Frequency of the strongest spectral component within ±25 % of the probe
-/// tone (Hann-windowed FFT argmax with parabolic interpolation). The window
-/// keeps concurrent programme material (music) from hijacking the peak while
-/// still exposing sample-rate-mismatch shifts (44.1↔48 kHz = 8.8 %, well
-/// inside it; larger shifts move the tone out of the window entirely, which
-/// the amplitude presence check reports as a hard failure).
-fn fft_peak_hz(samples: &[f32], rate: f64, probe_hz: f64) -> f64 {
-    use rustfft::{FftPlanner, num_complex::Complex};
-    let n = samples.len();
-    if n < 16 {
-        return 0.0;
-    }
-    let mut buf: Vec<Complex<f64>> = samples
-        .iter()
-        .enumerate()
-        .map(|(i, &s)| {
-            let w = 0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / n as f64).cos());
-            Complex::new(f64::from(s) * w, 0.0)
-        })
-        .collect();
-    FftPlanner::new().plan_fft_forward(n).process(&mut buf);
-
-    let half = n / 2;
-    let bin = |hz: f64| (hz * n as f64 / rate) as usize;
-    let lo = bin(probe_hz * 0.75).clamp(1, half.saturating_sub(2));
-    let hi = bin(probe_hz * 1.25).clamp(lo + 1, half.saturating_sub(1));
-    let (mut peak, mut peak_mag) = (lo, 0.0f64);
-    for (k, c) in buf.iter().enumerate().take(hi + 1).skip(lo) {
-        let m = c.norm();
-        if m > peak_mag {
-            peak_mag = m;
-            peak = k;
-        }
-    }
-    // Parabolic refinement over log magnitudes of the neighbours.
-    let mag = |k: usize| buf[k].norm().max(1e-30).ln();
-    let delta = if peak > 0 && peak + 1 < half {
-        let (a, b, c) = (mag(peak - 1), mag(peak), mag(peak + 1));
-        let denom = a - 2.0 * b + c;
-        if denom.abs() > 1e-12 {
-            (0.5 * (a - c) / denom).clamp(-0.5, 0.5)
-        } else {
-            0.0
-        }
-    } else {
-        0.0
-    };
-    (peak as f64 + delta) * rate / n as f64
-}
-
 // ── A/B compare analysis (issue #57) ─────────────────────────────────────────
 //
 // Two full-waveform captures of the *same* deterministic broadband stimulus, one
@@ -875,49 +826,6 @@ enum Verdict {
     PhaseOnly,
     /// The magnitude spectrum itself moved — an audible tonal change.
     Tonal,
-}
-
-/// Circular cross-correlation `c[L] = Σ a[i]·b[i+L]` via FFT. Length is the next
-/// power of two ≥ 2·max(len); `c[0]` is lag 0, `c[m-1]` is lag −1 (wrapped).
-fn xcorr_fft(a: &[f64], b: &[f64]) -> Vec<f64> {
-    use rustfft::{FftPlanner, num_complex::Complex};
-    let n = a.len().max(b.len());
-    let m = (2 * n).next_power_of_two();
-    let mut planner = FftPlanner::new();
-    let fwd = planner.plan_fft_forward(m);
-    let inv = planner.plan_fft_inverse(m);
-    let mut fa = vec![Complex::new(0.0, 0.0); m];
-    let mut fb = vec![Complex::new(0.0, 0.0); m];
-    for (dst, &s) in fa.iter_mut().zip(a) {
-        dst.re = s;
-    }
-    for (dst, &s) in fb.iter_mut().zip(b) {
-        dst.re = s;
-    }
-    fwd.process(&mut fa);
-    fwd.process(&mut fb);
-    let mut c: Vec<Complex<f64>> = fa.iter().zip(&fb).map(|(a, b)| a.conj() * b).collect();
-    inv.process(&mut c);
-    c.iter().map(|z| z.re / m as f64).collect()
-}
-
-/// Integer sample lag of `b` relative to `a` (positive = `b` lags `a`), searched
-/// over ±`max_lag`, that maximises their cross-correlation.
-fn best_integer_lag(a: &[f64], b: &[f64], max_lag: usize) -> isize {
-    let c = xcorr_fft(a, b);
-    let m = c.len();
-    let at = |lag: isize| c[(((lag % m as isize) + m as isize) % m as isize) as usize];
-    let range = max_lag.min(m / 2 - 1) as isize;
-    let mut best = 0isize;
-    let mut best_v = f64::NEG_INFINITY;
-    for lag in -range..=range {
-        let v = at(lag);
-        if v > best_v {
-            best_v = v;
-            best = lag;
-        }
-    }
-    best
 }
 
 /// Shift `x` by a fractional number of samples via a frequency-domain phase ramp
@@ -1050,22 +958,6 @@ fn band_deltas(a: &[f64], b: &[f64], rate: f64) -> Vec<BandDelta> {
         center *= 2.0;
     }
     out
-}
-
-/// Hann-windowed power spectrum (`|X[k]|²`), bins `0..n/2`.
-fn power_spectrum(x: &[f64]) -> Vec<f64> {
-    use rustfft::{FftPlanner, num_complex::Complex};
-    let n = x.len();
-    let mut buf: Vec<Complex<f64>> = x
-        .iter()
-        .enumerate()
-        .map(|(i, &s)| {
-            let w = 0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / n as f64).cos());
-            Complex::new(s * w, 0.0)
-        })
-        .collect();
-    FftPlanner::new().plan_fft_forward(n).process(&mut buf);
-    buf[..n / 2].iter().map(Complex::norm_sqr).collect()
 }
 
 /// Classify the difference: a moved band means a TONAL change; otherwise a

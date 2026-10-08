@@ -1,4 +1,4 @@
-.PHONY: check fmt fmt-fix clippy test build clean
+.PHONY: check fmt fmt-fix clippy test build clean e2e
 
 check: fmt clippy test
 
@@ -19,3 +19,6 @@ build:
 
 clean:
 	cargo clean
+
+e2e:
+	cargo xtask e2e

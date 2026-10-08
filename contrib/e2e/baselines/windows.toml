@@ -1,0 +1,22 @@
+# Added latency (ms) per scenario. Rewritten by `cargo xtask e2e --update-baseline`.
+"apo-all-types@48000x2" = 0.04
+"convolution@48000x2" = 5.56
+"flat@192000x8" = 0.0
+"flat@44100x8" = 0.0
+"flat@48000x2" = 0.0
+"flat@48000x8" = 0.0
+"flat@88200x8" = 0.0
+"flat@96000x8" = 0.0
+"full-eq@48000x2" = 0.02
+"full-eq@48000x8" = 0.02
+"full-eq@96000x8" = 0.01
+"fx-all-dithered@48000x2" = 0.75
+"fx-ambience@48000x2" = 0.0
+"fx-bass@48000x2" = 0.0
+"fx-crossfeed@48000x2" = 0.0
+"fx-dynamic-boost@48000x2" = 0.75
+"fx-fidelity@48000x2" = 0.0
+"fx-surround@48000x2" = 0.0
+"linear-phase@48000x2" = 176.0
+"long-flat@48000x2" = 0.0
+"long-full-eq@96000x8" = 0.01

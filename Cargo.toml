@@ -12,6 +12,8 @@ members = [
     "crates/resonance-tui",
     "crates/resonance-gui",
     "crates/resonance-tray",
+    "crates/resonance-e2e",
+    "xtask",
 ]
 
 [workspace.package]
@@ -159,6 +161,17 @@ lto = true
 panic = "abort"
 strip = true
 codegen-units = 1
+
+# Live-audio e2e builds (`cargo xtask e2e`): release-speed DSP so 192 kHz ×
+# 16 ch never xruns, with fast incremental rebuilds. Rust has no fast-math,
+# so output matches release builds bit for bit.
+[profile.e2e-build]
+inherits = "release"
+opt-level = 3
+lto = false
+codegen-units = 16
+incremental = true
+strip = false
 
 # The Windows APO is loaded into Microsoft's audiodg.exe; a panic there must not
 # abort the process. This profile keeps unwinding so the APO's catch_unwind

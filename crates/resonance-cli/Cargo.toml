@@ -22,6 +22,7 @@ ureq = { workspace = true }
 # JSON (serde/serde_json). All pure Rust — keeps the musl static build working.
 hound = { workspace = true }
 rustfft = { workspace = true }
+resonance-dsp = { path = "../resonance-dsp" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

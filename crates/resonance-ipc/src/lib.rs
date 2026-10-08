@@ -328,6 +328,12 @@ pub enum Command {
         index: Option<usize>,
         mode: AuditionMode,
     },
+    /// Test harness (`resonance-e2e`): write the live chain as an APO state
+    /// file at `path` (IR sidecar beside it, see
+    /// `resonance_apo::state::ir_path_for`) and hand the RT thread a zero-state
+    /// copy, so the next audio is processed exactly like an offline render of
+    /// that file from its first sample. Append-only (see note above).
+    ResetAndExportChain { path: String },
 }
 
 /// Per-band audition mode (mirrors `resonance_dsp::chain::AuditionMode`).
@@ -1192,6 +1198,9 @@ mod tests {
         command_round_trip(&Command::SetBandAudition {
             index: None,
             mode: AuditionMode::Solo,
+        });
+        command_round_trip(&Command::ResetAndExportChain {
+            path: "/tmp/chain.bin".into(),
         });
     }
 

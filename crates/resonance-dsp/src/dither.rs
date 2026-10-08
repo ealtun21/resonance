@@ -66,6 +66,13 @@ impl DitherStage {
         self.bits = bits;
     }
 
+    /// Restart every channel's PRNG from its seed (keeps depth and width), so a
+    /// reset chain dithers exactly like a fresh one.
+    pub fn reset(&mut self) {
+        let channels = self.rng.len();
+        self.rng = (0..channels).map(Xorshift::seeded).collect();
+    }
+
     /// Dither + quantise `samples` (interleaved, `channels` wide) in place.
     /// No-op when the target depth is `None` (bit-exact).
     pub fn apply(&mut self, samples: &mut [f64], channels: usize) {
