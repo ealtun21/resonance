@@ -8,7 +8,9 @@ use crate::common::{
     MAX_LAG_SECS, RunOpts, apply_profile, ch0, exact_checks, get_state, ipc, resample_checks,
 };
 use crate::compare::{CompareMode, compare};
-use crate::latency::{arrival_lags, failure, judge, load_baselines, median, save_baselines};
+use crate::latency::{
+    arrival_lags, failure, judge_with_margin, load_baselines, median, save_baselines,
+};
 use crate::linux::env::{self, DEVICE, DEVICE2, Daemon, RESONANCE_SINK};
 use crate::linux::pw::{Play, PlayRec, RecordTarget, Timed, play_and_record};
 use crate::ratechain::{Hop, LINUX_RESONANCE_STEPS, RateChain};
@@ -302,7 +304,11 @@ fn measure(
             .get(&(s.rate, s.channels))
             .context("no Resonance-off latency for this format")?;
         let added = on - off;
-        let v = judge(added, baselines.get(&s.id).copied());
+        // The graph quantises both measurements to its 1024-frame quantum, so on-minus-off can
+        // flip by one quantum between runs (flat@*x6 showed -21.3 and 0.0 ms on the unchanged
+        // M1 code): a margin below that would gate on noise.
+        let quantum_ms = 1024.0 * 1000.0 / f64::from(s.graph_rate);
+        let v = judge_with_margin(added, baselines.get(&s.id).copied(), 0.1, 1.1 * quantum_ms);
         (
             r.latency_on_ms,
             r.latency_off_ms,
