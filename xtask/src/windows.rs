@@ -247,6 +247,9 @@ pub fn image() -> Result<ExitCode> {
     let xml = std::fs::read_to_string(root.join("contrib/e2e/windows/autounattend.xml"))?
         .replace("@SSH_PUBKEY@", &pubkey);
     std::fs::write(ans.join("autounattend.xml"), xml)?;
+    let sshd = std::fs::read_to_string(root.join("contrib/e2e/windows/sshd.ps1"))?
+        .replace("@SSH_PUBKEY@", &pubkey);
+    std::fs::write(ans.join("sshd.ps1"), sshd)?;
     ensure!(
         status(
             Command::new("genisoimage")
