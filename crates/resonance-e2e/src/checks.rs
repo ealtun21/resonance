@@ -2,6 +2,7 @@
 
 use crate::stimulus::PILOT_HZ;
 use resonance_dsp::analysis::{band_levels_db, fft_peak_hz};
+use rustfft::{FftPlanner, num_complex::Complex};
 use std::ops::Range;
 
 /// ±0.01 %: 1/6 of a cent. The 44.1↔48 kHz pitch bug is 8.8 %.
@@ -60,6 +61,30 @@ pub fn last_signal_frame(x: &[f32], channels: usize) -> Option<usize> {
         .find(|&f| !frame_is_zero(x, channels, f))
 }
 
+/// Number of runs of at least `min_len` frames of all-channel digital silence strictly
+/// inside the signal (between its first and last non-zero frame): zero-filled underruns.
+#[must_use]
+pub fn zero_fill_runs(x: &[f32], channels: usize, min_len: usize) -> usize {
+    let (Some(first), Some(last)) = (
+        first_signal_frame(x, channels),
+        last_signal_frame(x, channels),
+    ) else {
+        return 0;
+    };
+    let (mut runs, mut cur) = (0, 0);
+    for f in first..=last {
+        if frame_is_zero(x, channels, f) {
+            cur += 1;
+        } else {
+            if cur >= min_len {
+                runs += 1;
+            }
+            cur = 0;
+        }
+    }
+    runs
+}
+
 /// Longest run of all-channel digital silence inside `frames`, in frames.
 #[must_use]
 pub fn longest_zero_run(x: &[f32], channels: usize, frames: Range<usize>) -> usize {
@@ -89,8 +114,138 @@ pub fn is_flowing(x: &[f32], channels: usize, frames: Range<usize>) -> bool {
             >= n
 }
 
+/// One octave of an estimated transfer function.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TransferBand {
+    pub from_hz: f64,
+    pub gain_db: f64,
+    /// Magnitude-squared coherence (1 = the output is a linear function of the input).
+    pub coherence: f64,
+}
+
+const TRANSFER_BLOCK: usize = 4096;
+
+/// Transfer function from `expected` to `recorded` (`recorded[i + lag]` aligns with
+/// `expected[i]`), averaged over Hann-windowed 4096-frame blocks inside `range` (indices of
+/// `expected`). H1 estimator per octave: `|sum(Pab)| / sum(Paa)`. Blocks of the recording
+/// holding a zero-filled dropout (`>= 16` exactly-zero samples in a row) are skipped and
+/// counted: the caller decides whether that many dropouts is acceptable. Alignment-robust
+/// where per-band levels over shifted windows are not (the stimulus' sweep dwells ~0.5 s
+/// per octave).
+#[must_use]
+pub fn transfer_bands(
+    expected: &[f64],
+    recorded: &[f64],
+    lag: isize,
+    range: Range<usize>,
+    rate: f64,
+    edges: &[f64],
+) -> (Vec<TransferBand>, usize, usize) {
+    let n = TRANSFER_BLOCK;
+    let fft = FftPlanner::<f64>::new().plan_fft_forward(n);
+    let win: Vec<f64> = (0..n)
+        .map(|i| 0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / n as f64).cos()))
+        .collect();
+    let bins = n / 2;
+    let (mut paa, mut pbb) = (vec![0.0; bins], vec![0.0; bins]);
+    let mut pab = vec![Complex::new(0.0, 0.0); bins];
+    let (mut used, mut skipped) = (0usize, 0usize);
+    let mut i = range.start;
+    while i + n <= range.end {
+        let Some(j) = i
+            .checked_add_signed(lag)
+            .filter(|&j| j + n <= recorded.len())
+        else {
+            break;
+        };
+        let rb = &recorded[j..j + n];
+        let dropout = rb.windows(16).any(|w| w.iter().all(|&v| v == 0.0));
+        if dropout {
+            skipped += 1;
+        } else {
+            let spec = |x: &[f64]| -> Vec<Complex<f64>> {
+                let mut b: Vec<Complex<f64>> = x
+                    .iter()
+                    .zip(&win)
+                    .map(|(&v, &w)| Complex::new(v * w, 0.0))
+                    .collect();
+                fft.process(&mut b);
+                b
+            };
+            let (a, b) = (spec(&expected[i..i + n]), spec(rb));
+            for k in 0..bins {
+                paa[k] += a[k].norm_sqr();
+                pbb[k] += b[k].norm_sqr();
+                pab[k] += b[k] * a[k].conj();
+            }
+            used += 1;
+        }
+        i += n / 2;
+    }
+    let bin_hz = rate / n as f64;
+    let out = edges
+        .iter()
+        .map(|&lo| {
+            let ks = ((lo / bin_hz) as usize).max(1)..(((2.0 * lo) / bin_hz) as usize).min(bins);
+            let (saa, sbb): (f64, f64) = (
+                ks.clone().map(|k| paa[k]).sum(),
+                ks.clone().map(|k| pbb[k]).sum(),
+            );
+            let sab: Complex<f64> = ks.map(|k| pab[k]).sum();
+            TransferBand {
+                from_hz: lo,
+                gain_db: 20.0 * (sab.norm() / saa.max(1e-30)).max(1e-30).log10(),
+                coherence: sab.norm_sqr() / (saa * sbb).max(1e-30),
+            }
+        })
+        .collect();
+    (out, used, skipped)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn transfer_of_a_scaled_delayed_copy_is_flat_at_the_scale() {
+        let x: Vec<f64> = (0..40_000u64)
+            .map(|i| ((i.wrapping_mul(2_654_435_761) >> 7) % 2000) as f64 / 1000.0 - 1.0)
+            .collect();
+        let lag = 37usize;
+        let y: Vec<f64> = (0..x.len() + lag)
+            .map(|i| if i >= lag { 0.5 * x[i - lag] } else { 0.0 })
+            .collect();
+        let (bands, used, skipped) = transfer_bands(
+            &x,
+            &y,
+            lag as isize,
+            0..x.len() - 100,
+            48_000.0,
+            &[125.0, 500.0, 2000.0],
+        );
+        assert!(used > 5 && skipped == 0);
+        for b in bands {
+            assert!((b.gain_db + 6.02).abs() < 0.01, "{b:?}");
+            assert!(b.coherence > 0.999, "{b:?}");
+        }
+    }
+
+    #[test]
+    fn zero_fill_runs_counts_only_interior_silence() {
+        let mut x = vec![0.5f32; 100];
+        for v in &mut x[20..60] {
+            *v = 0.0;
+        }
+        for v in &mut x[70..75] {
+            *v = 0.0;
+        }
+        let lead: Vec<f32> = std::iter::repeat_n(0.0, 50)
+            .chain(x)
+            .chain(std::iter::repeat_n(0.0, 50))
+            .collect();
+        assert_eq!(zero_fill_runs(&lead, 1, 32), 1);
+        assert_eq!(zero_fill_runs(&lead, 1, 4), 2);
+        assert_eq!(zero_fill_runs(&[0.0; 10], 1, 1), 0);
+    }
+
     use super::*;
     use crate::stimulus::generate;
 

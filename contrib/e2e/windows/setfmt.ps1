@@ -6,7 +6,7 @@ $renderRoot = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\R
 $Guid = $null
 foreach ($e in Get-ChildItem $renderRoot) {
   $n = (Get-ItemProperty "$($e.PSPath)\Properties" -EA SilentlyContinue).'{b3f8fa53-0004-438e-9003-51a46e139bfc},6'
-  if ($n -like "*$Name*") { $Guid = $e.PSChildName; break }
+  if ($n -like "*$Name*" -and (Get-ItemProperty $e.PSPath).DeviceState -eq 1) { $Guid = $e.PSChildName; break }
 }
 if (-not $Guid) { throw "no render endpoint named *$Name*" }
 # --- privileges needed to take ownership of SYSTEM-owned MMDevices keys ---

@@ -1,6 +1,6 @@
 # Attach the Resonance APO to ONE slot of the endpoint named $Name, removing it from all others.
 # Scream (legacy WDM, no effect modes) only loads GFX (slot 2); see spec section 14.
-param([string]$Slot = "2", [string]$Name = "Scream")
+param([string]$Slot = "2", [string]$Name = "Scream")  # -Slot none detaches the APO entirely
 # --- privileges needed to take ownership of SYSTEM-owned MMDevices keys ---
 Add-Type @"
 using System;
@@ -37,7 +37,7 @@ function Grant-Key([string]$sub) {
 $g = $null
 foreach ($e in Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render') {
   $n = (Get-ItemProperty "$($e.PSPath)\Properties" -EA SilentlyContinue).'{b3f8fa53-0004-438e-9003-51a46e139bfc},6'
-  if ($n -like "*$Name*") { $g = $e.PSChildName; break }
+  if ($n -like "*$Name*" -and (Get-ItemProperty $e.PSPath).DeviceState -eq 1) { $g = $e.PSChildName; break }
 }
 if (-not $g) { throw "no render endpoint named *$Name*" }
 $sub="SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\$g\FxProperties"
@@ -46,7 +46,9 @@ $fxp="HKLM:\$sub"
 $fx='{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D}'; $mode='{D3993A3F-99C2-4402-B5EC-A92A0367664B}'
 $clsid='{7C3D2A1E-9B6F-4E2A-8D5C-1F0A3B4C5D6E}'; $dm='{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}'
 foreach($s in '1','2','5','6','7'){ Remove-ItemProperty -Path $fxp -Name "$fx,$s" -EA SilentlyContinue; Remove-ItemProperty -Path $fxp -Name "$mode,$s" -EA SilentlyContinue }
-Set-ItemProperty -Path $fxp -Name "$fx,$Slot" -Value $clsid
-New-ItemProperty -Force -Path $fxp -Name "$mode,$Slot" -PropertyType MultiString -Value @($dm) | Out-Null
+if ($Slot -ne "none") {
+  Set-ItemProperty -Path $fxp -Name "$fx,$Slot" -Value $clsid
+  New-ItemProperty -Force -Path $fxp -Name "$mode,$Slot" -PropertyType MultiString -Value @($dm) | Out-Null
+}
 Restart-Service AudioEndpointBuilder -Force; Start-Sleep 2; Start-Service Audiosrv
 "slot=$Slot"

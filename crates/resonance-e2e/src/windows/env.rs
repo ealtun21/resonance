@@ -101,6 +101,24 @@ pub fn set_endpoint_format(scripts: &Path, channels: usize, rate: u32) -> Result
     Ok(())
 }
 
+/// Attach the APO to the endpoint named `name` in `slot`, or detach it (`None`), and restart
+/// the audio services (the engine rebuilds its graph).
+pub fn set_apo_slot(scripts: &Path, name: &str, slot: Option<u8>) -> Result<()> {
+    let slot = slot.map_or_else(|| "none".to_string(), |s| s.to_string());
+    script(scripts, "attach-slot.ps1", &["-Slot", &slot, "-Name", name])?;
+    std::thread::sleep(Duration::from_secs(4));
+    Ok(())
+}
+
+/// "APO off" evidence in `log`: audiodg never locked an APO during the run. Pure.
+pub fn verify_apo_absent(log: &str) -> Result<()> {
+    ensure!(
+        !log.contains("LockForProcess"),
+        "the APO was instantiated during a Resonance-off measurement"
+    );
+    Ok(())
+}
+
 pub struct Daemon {
     child: Child,
 }
@@ -143,6 +161,12 @@ mod tests {
     #[test]
     fn accepts_a_lock_followed_by_an_enabled_buffer() {
         assert!(verify_apo_on(LOG, 8, 192_000).is_ok());
+    }
+
+    #[test]
+    fn absence_means_no_lock_line() {
+        assert!(verify_apo_absent("pid=1 cpp: Initialize cbDataSize=56\n").is_ok());
+        assert!(verify_apo_absent(LOG).is_err());
     }
 
     #[test]

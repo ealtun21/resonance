@@ -1,8 +1,8 @@
 //! Execute scenarios against the live daemon inside the e2e container.
 
 use crate::checks::{
-    PITCH_TOLERANCE, first_signal_frame, is_flowing, last_signal_frame, longest_zero_run,
-    pitch_error,
+    BAND_TOLERANCE_DB, PITCH_TOLERANCE, first_signal_frame, is_flowing, last_signal_frame,
+    longest_zero_run, pitch_error,
 };
 use crate::common::{
     MAX_LAG_SECS, RunOpts, apply_profile, ch0, exact_checks, get_state, ipc, resample_checks,
@@ -377,7 +377,15 @@ fn measure(
         let expected = render(&mut chain, &stim.samples, BLOCK_FRAMES);
         exact_checks(r, s, &stim, &pr.recordings[0], &expected, dir)?;
     } else {
-        resample_checks(r, s, &stim, &pr.recordings[0], &export, &state)?;
+        resample_checks(
+            r,
+            s,
+            &stim,
+            &pr.recordings[0],
+            &export,
+            &state,
+            BAND_TOLERANCE_DB,
+        )?;
     }
     Ok(())
 }

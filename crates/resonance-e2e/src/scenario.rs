@@ -30,6 +30,10 @@ pub struct Expect {
     /// Per-OS replacement for `compare` (`std::env::consts::OS` keys), for
     /// differences that are the platform's, e.g. a worker-built FIR kernel
     /// differing from the offline one at the 1e-13 level.
+    /// Per-octave transfer-gain tolerance (dB) on OSes judged by transfer function rather than
+    /// bit-equality (macOS); `None` = the runner's default.
+    #[serde(default)]
+    pub transfer_tolerance_db: Option<f64>,
     #[serde(default)]
     pub compare_by_os: BTreeMap<String, CompareMode>,
     #[serde(default)]
@@ -54,6 +58,7 @@ impl Default for Expect {
     fn default() -> Self {
         Self {
             compare: CompareMode::Exact,
+            transfer_tolerance_db: None,
             compare_by_os: BTreeMap::new(),
             resample: Vec::new(),
             max_gap_ms: default_gap_ms(),

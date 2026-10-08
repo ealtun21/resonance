@@ -1,7 +1,7 @@
 //! OS-independent scenario helpers shared by every backend runner.
 
 use crate::checks::{
-    BAND_TOLERANCE_DB, PITCH_TOLERANCE, first_signal_frame, gain_db, octave_edges, pitch_error,
+    PITCH_TOLERANCE, first_signal_frame, gain_db, octave_edges, pitch_error, transfer_bands,
 };
 use crate::compare::compare;
 use crate::render::{BLOCK_FRAMES, load_exported_chain, render};
@@ -9,6 +9,7 @@ use crate::report::ScenarioResult;
 use crate::scenario::{Scenario, Tier};
 use crate::stimulus::{Stimulus, generate};
 use anyhow::{Context, Result, bail};
+use resonance_dsp::analysis::best_integer_lag;
 use resonance_ipc::transport::SyncClient;
 use resonance_ipc::{Command, DaemonState, Response};
 use std::path::Path;
@@ -175,6 +176,77 @@ pub fn exact_checks(
     Ok(())
 }
 
+/// The path is not bit-transparent by design (macOS: the Process Tap's aggregate resamples),
+/// so judge the recording against the offline render as a system: per-octave transfer gain
+/// must be within `tolerance_db` of 0 dB and the output must stay coherent with the render.
+pub fn transfer_checks(
+    r: &mut ScenarioResult,
+    s: &Scenario,
+    stim: &Stimulus,
+    expected: &[f32],
+    rec: &Recording,
+    default_tolerance_db: f64,
+    max_dropout_fraction: f64,
+) -> Result<()> {
+    let tolerance_db = s
+        .expect
+        .transfer_tolerance_db
+        .unwrap_or(default_tolerance_db);
+    let ch = s.channels;
+    let rate = f64::from(s.rate);
+    let exp0 = ch0(expected, ch);
+    let rec0 = ch0(&rec.samples, rec.channels);
+    let max_lag = (MAX_LAG_SECS * rate) as usize;
+    let lag = best_integer_lag(&exp0, &rec0, max_lag);
+    let (bands, used, skipped) = transfer_bands(
+        &exp0,
+        &rec0,
+        lag,
+        stim.body.clone(),
+        rate,
+        &octave_edges(0.25 * rate),
+    );
+    let total = used + skipped;
+    r.notes.push(format!(
+        "aligned at {lag} frames; {skipped} of {total} blocks hold a zero-filled dropout (excluded from the gain estimate)"
+    ));
+    if used < 8 || skipped as f64 > max_dropout_fraction * total as f64 {
+        r.failures.push(format!(
+            "{skipped} of {total} blocks hold a zero-filled dropout (limit {:.0} %)",
+            max_dropout_fraction * 100.0
+        ));
+    }
+    for b in &bands {
+        if b.gain_db.abs() > tolerance_db {
+            r.failures.push(format!(
+                "octave from {:.0} Hz: transfer gain {:+.2} dB vs the render (limit ±{tolerance_db} dB)",
+                b.from_hz, b.gain_db
+            ));
+        }
+        if b.coherence < MIN_COHERENCE {
+            r.failures.push(format!(
+                "octave from {:.0} Hz: coherence {:.3} with the render (limit {MIN_COHERENCE})",
+                b.from_hz, b.coherence
+            ));
+        }
+    }
+    let seg: Vec<f32> = rec0
+        .get(stim.body.start.saturating_add_signed(lag)..stim.body.end.saturating_add_signed(lag))
+        .unwrap_or_default()
+        .iter()
+        .map(|&v| v as f32)
+        .collect();
+    let pe = pitch_error(&seg, rate);
+    if pe > PITCH_TOLERANCE {
+        r.failures
+            .push(format!("pilot pitch off by {:.4} %", pe * 100.0));
+    }
+    Ok(())
+}
+
+/// Lowest coherence between render and recording per octave that still counts as the same signal.
+pub const MIN_COHERENCE: f64 = 0.95;
+
 /// A rate converter is in the path, so not bit-exact by design: the pilot's
 /// pitch and the path's per-octave gain must match the offline render's
 /// gain at the DSP rate. Windows are aligned on the first arriving sample.
@@ -185,6 +257,7 @@ pub fn resample_checks(
     rec: &Recording,
     export: &Path,
     state: &DaemonState,
+    band_tolerance_db: f64,
 ) -> Result<()> {
     let ch = s.channels;
     let rec_rate = f64::from(rec.rate);
@@ -222,7 +295,7 @@ pub fn resample_checks(
         &edges,
     );
     for ((hz, m), e) in edges.iter().zip(&measured).zip(&expected) {
-        if (m - e).abs() > BAND_TOLERANCE_DB {
+        if (m - e).abs() > band_tolerance_db {
             r.failures.push(format!(
                 "octave from {hz:.0} Hz: path gain {m:+.2} dB, render {e:+.2} dB"
             ));

@@ -49,7 +49,7 @@ fn make_overlay(run: &Path) -> Result<()> {
         run.join(format!("{NAME}.conf")),
         format!(
             "#!/usr/bin/quickemu --vm\nguest_os=\"macos\"\ndisk_img=\"{NAME}/disk.qcow2\"\n\
-             img=\"{NAME}/RecoveryImage.img\"\nmacos_release=\"sequoia\"\ncpu_cores=\"8\"\nram=\"8G\"\n"
+             img=\"{NAME}/RecoveryImage.img\"\nmacos_release=\"sequoia\"\ncpu_cores=\"4\"\nram=\"8G\"\n"
         ),
     )?;
     Ok(())

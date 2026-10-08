@@ -11,8 +11,16 @@ pub mod env;
 #[cfg(target_os = "macos")]
 pub mod runner;
 
-/// Result device: widest BlackHole, so every scenario's channels fit.
-pub const OUT_DEVICE: &str = "BlackHole 64ch";
+/// The device the daemon renders into (and the agent records): one step wider than the
+/// tapped device, so the unprocessed audio never shares a device with the result.
+#[must_use]
+pub fn out_device(channels: usize) -> Option<&'static str> {
+    match channels {
+        2 => Some("BlackHole 16ch"),
+        16 => Some("BlackHole 64ch"),
+        _ => None,
+    }
+}
 
 /// The device the scenario's audio is played into (and tapped from): the tap
 /// takes the device's whole channel layout, so the scenario's channel count
