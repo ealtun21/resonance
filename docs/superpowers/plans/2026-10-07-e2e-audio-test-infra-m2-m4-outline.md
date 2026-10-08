@@ -21,7 +21,9 @@ code-level plan written now would go stale).
 
 ## M2: Windows
 
-### W0: APO on multichannel endpoints (investigation, blocks Windows multichannel APO scenarios)
+### W0: APO on multichannel endpoints (DONE 2026-10-08, see spec section 14)
+
+Result: Scream needs the APO in the GFX slot (2), not EFX (7); with that, `LockForProcess ch=8` appears. The text below is the original plan, kept for the record.
 
 Question: why does audiodg not instantiate `resonance_apo.dll` on the 8-channel Scream endpoint (no
 `LockForProcess` in `apo.log`, although the FxProperties slot is attached and verified)?
@@ -58,8 +60,7 @@ or the cause is recorded in spec section 14 with a decision.
 
 ### W3: Windows scenarios
 
-Reuse the Linux scenario files; mark multichannel APO scenarios `platforms = ["linux"]` until W0 is
-resolved. Add flow-through (APO off, bit-exact loopback) scenarios for 8 ch at 44.1/48/96/192 kHz, which
+Reuse the Linux scenario files; multichannel APO scenarios run on Windows once Scream is attached with GFX (W0). Add flow-through (APO off, bit-exact loopback) scenarios for 8 ch at 44.1/48/96/192 kHz, which
 the spike already proved. Latency baselines in `contrib/e2e/baselines/windows.toml`.
 
 ## M3: macOS
