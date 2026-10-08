@@ -304,10 +304,12 @@ fn measure(
             .get(&(s.rate, s.channels))
             .context("no Resonance-off latency for this format")?;
         let added = on - off;
-        // The graph quantises both measurements to its 1024-frame quantum, so on-minus-off can
-        // flip by one quantum between runs (flat@*x6 showed -21.3 and 0.0 ms on the unchanged
-        // M1 code): a margin below that would gate on noise.
-        let quantum_ms = 1024.0 * 1000.0 / f64::from(s.graph_rate);
+        // The graph quantises both measurements to its quantum, so on-minus-off can flip by one
+        // quantum between runs (flat@*x6 showed -21.3 and 0.0 ms on the unchanged M1 code): a
+        // margin below that would gate on noise. The observed flip is 21.33 ms at 48, 96 and
+        // 192 kHz alike (the quantum scales with the rate), so the floor is time-based.
+        let quantum_ms =
+            (1024.0 * 1000.0 / f64::from(s.graph_rate)).max(1024.0 * 1000.0 / 48_000.0);
         let v = judge_with_margin(added, baselines.get(&s.id).copied(), 0.1, 1.1 * quantum_ms);
         (
             r.latency_on_ms,
