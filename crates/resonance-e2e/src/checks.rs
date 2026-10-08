@@ -136,7 +136,7 @@ const TRANSFER_BLOCK: usize = 4096;
 pub fn transfer_bands(
     expected: &[f64],
     recorded: &[f64],
-    lag: isize,
+    lags: &[(Range<usize>, isize)],
     range: Range<usize>,
     rate: f64,
     edges: &[f64],
@@ -152,6 +152,11 @@ pub fn transfer_bands(
     let (mut used, mut skipped) = (0usize, 0usize);
     let mut i = range.start;
     while i + n <= range.end {
+        let lag = lags
+            .iter()
+            .find(|(seg, _)| seg.contains(&i))
+            .or(lags.last())
+            .map_or(0, |(_, l)| *l);
         let Some(j) = i
             .checked_add_signed(lag)
             .filter(|&j| j + n <= recorded.len())
@@ -202,8 +207,124 @@ pub fn transfer_bands(
     (out, used, skipped)
 }
 
+/// Lag (frames, positive = `b` behind `a`) from the generalised cross-correlation with phase
+/// transform: every frequency votes with unit weight, so the peak is sharp and unambiguous even
+/// for an EQ'd recording of a sweep (plain cross-correlation was fooled by it). Returns the lag
+/// and the peak's height over the median of the correlation.
+#[must_use]
+pub fn phat_lag(a: &[f64], b: &[f64], max_lag: usize) -> (isize, f64) {
+    let n = (a.len() + b.len()).next_power_of_two();
+    let mut planner = FftPlanner::<f64>::new();
+    let (fwd, inv) = (planner.plan_fft_forward(n), planner.plan_fft_inverse(n));
+    let spec = |x: &[f64]| -> Vec<Complex<f64>> {
+        let mut v: Vec<Complex<f64>> = x.iter().map(|&s| Complex::new(s, 0.0)).collect();
+        v.resize(n, Complex::new(0.0, 0.0));
+        fwd.process(&mut v);
+        v
+    };
+    let (fa, fb) = (spec(a), spec(b));
+    let mut g: Vec<Complex<f64>> = fa
+        .iter()
+        .zip(&fb)
+        .map(|(x, y)| {
+            let p = y * x.conj();
+            p / p.norm().max(1e-30)
+        })
+        .collect();
+    inv.process(&mut g);
+    let at = |lag: isize| g[lag.rem_euclid(n as isize) as usize].re;
+    let range = max_lag.min(n / 2 - 1) as isize;
+    let (mut best, mut best_v) = (0isize, f64::NEG_INFINITY);
+    for lag in -range..=range {
+        let v = at(lag);
+        if v > best_v {
+            best_v = v;
+            best = lag;
+        }
+    }
+    let mut mags: Vec<f64> = (-range..=range).map(|l| at(l).abs()).collect();
+    mags.sort_by(f64::total_cmp);
+    let median = mags[mags.len() / 2].max(1e-30);
+    (best, best_v / median)
+}
+
+const SEGMENT_SECS: f64 = 0.5;
+
+/// Per-segment lags of `recorded` behind `expected` over `body` (about 0.5 s each), each
+/// found with GCC-PHAT in a window of ±0.25 s around the `global` lag. A path whose delay
+/// jumps mid-run (a ring buffer dropping its backlog) shows as segments with different lags;
+/// each segment's own lag keeps the transfer estimate valid across the jump. Segments whose
+/// correlation peak is weak fall back to `global`. Also returns how many segments sit more
+/// than `slip_frames` away from `global`.
+#[must_use]
+pub fn segment_lags(
+    expected: &[f64],
+    recorded: &[f64],
+    body: Range<usize>,
+    rate: f64,
+    global: isize,
+    slip_frames: isize,
+) -> (Vec<(Range<usize>, isize)>, usize) {
+    let seg = (SEGMENT_SECS * rate) as usize;
+    let w = (0.25 * rate) as isize;
+    let (mut out, mut slips) = (Vec::new(), 0);
+    let mut a = body.start;
+    while a + seg <= body.end {
+        let b = a + seg;
+        let lo = (a as isize + global - w).max(0) as usize;
+        let hi = ((b as isize + global + w).max(0) as usize).min(recorded.len());
+        let mut lag = global;
+        if hi > lo + seg {
+            let (l, q) = phat_lag(&expected[a..b], &recorded[lo..hi], 2 * w as usize);
+            if q >= 4.0 {
+                lag = l + lo as isize - a as isize;
+            }
+        }
+        if (lag - global).abs() > slip_frames {
+            slips += 1;
+        }
+        out.push((a..b, lag));
+        a = b;
+    }
+    if out.is_empty() {
+        out.push((body, global));
+    }
+    (out, slips)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn segment_lags_follow_a_delay_jump() {
+        let x: Vec<f64> = (0..96_000u64)
+            .map(|i| ((i.wrapping_mul(2_654_435_761) >> 5) % 2000) as f64 / 1000.0 - 1.0)
+            .collect();
+        // Delayed by 100 frames, then 400 frames after the first half.
+        let mut y = vec![0.0; x.len() + 500];
+        for i in 0..x.len() {
+            y[i + if i < 48_000 { 100 } else { 400 }] = x[i];
+        }
+        let (lags, slips) = segment_lags(&x, &y, 0..x.len() - 1000, 48_000.0, 100, 16);
+        assert_eq!(lags.first().map(|l| l.1), Some(100));
+        assert_eq!(lags.last().map(|l| l.1), Some(400));
+        assert!(slips >= 1);
+    }
+
+    #[test]
+    fn phat_lag_finds_a_delay_through_a_filter() {
+        let x: Vec<f64> = (0..20_000u64)
+            .map(|i| ((i.wrapping_mul(2_654_435_761) >> 5) % 2000) as f64 / 1000.0 - 1.0)
+            .collect();
+        let lag = 123usize;
+        let mut y = vec![0.0; x.len() + lag];
+        for i in 1..x.len() {
+            y[i + lag] = 0.7 * x[i] + 0.3 * x[i - 1];
+        }
+        let (l, q) = phat_lag(&x, &y, 1000);
+        assert_eq!(l, 123);
+        assert!(q > 20.0, "{q}");
+    }
+
     #[test]
     fn transfer_of_a_scaled_delayed_copy_is_flat_at_the_scale() {
         let x: Vec<f64> = (0..40_000u64)
@@ -216,7 +337,7 @@ mod tests {
         let (bands, used, skipped) = transfer_bands(
             &x,
             &y,
-            lag as isize,
+            &[(0..x.len() - 100, lag as isize)],
             0..x.len() - 100,
             48_000.0,
             &[125.0, 500.0, 2000.0],

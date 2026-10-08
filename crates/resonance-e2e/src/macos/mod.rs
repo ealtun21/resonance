@@ -8,7 +8,7 @@
 use crate::scenario::Scenario;
 
 pub mod env;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "cross-check"))]
 pub mod runner;
 
 /// The device the daemon renders into (and the agent records): one step wider than the

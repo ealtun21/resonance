@@ -2,11 +2,11 @@
 
 use super::env::{self, Daemon};
 use crate::common::{
-    MAX_LAG_SECS, MIXER_HEADROOM_PEAK, RunOpts, apply_profile, exact_checks, headroom_shift, ipc,
-    peak_abs, scale_pow2, wait_for,
+    MAX_LAG_SECS, MIXER_HEADROOM_PEAK, RunOpts, apply_profile, chain_delay_frames, exact_checks,
+    headroom_shift, ipc, peak_abs, record_latency, scale_pow2, wait_for,
 };
 use crate::compare::compare;
-use crate::latency::{failure, judge, load_baselines, save_baselines};
+use crate::latency::{load_baselines, save_baselines};
 use crate::native::play_and_record;
 use crate::render::{BLOCK_FRAMES, load_exported_chain, render};
 use crate::report::{Report, ScenarioResult, Status, settle};
@@ -14,7 +14,6 @@ use crate::scenario::Scenario;
 use crate::stimulus::{Stimulus, generate};
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait};
-use resonance_dsp::analysis::best_integer_lag;
 use resonance_ipc::Command;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -51,14 +50,6 @@ fn wait_for_default_format(channels: usize, rate: u32) -> Result<()> {
     // Settled: audiodg rebuilds its graph a moment after the format changes.
     std::thread::sleep(Duration::from_secs(2));
     Ok(())
-}
-
-/// Frames the chain itself delays `stim` (render vs input, channel 0): the part of the
-/// live lag that is Resonance's, since the recording is aligned to the render.
-fn chain_delay_frames(stim: &[f32], expected: &[f32], channels: usize, rate: u32) -> isize {
-    let ch0 =
-        |x: &[f32]| -> Vec<f64> { x.iter().step_by(channels).map(|&v| f64::from(v)).collect() };
-    best_integer_lag(&ch0(stim), &ch0(expected), (0.5 * f64::from(rate)) as usize)
 }
 
 /// Total lag (frames) of a Resonance-absent loopback of `s`'s format, with the APO verifiably
@@ -177,31 +168,29 @@ fn measure(
         exact_checks(r, s, &stim, &rec, &expected, dir)?;
         if s.measures_latency() {
             let (name, slot) = endpoint_attach(which);
-            let off = match lat.off.get(&(s.rate, s.channels)) {
-                Some(&v) => v,
-                None => {
-                    let v = measure_off(s, scripts, name, slot)?;
-                    lat.off.insert((s.rate, s.channels), v);
-                    v
-                }
+            let off = if let Some(&v) = lat.off.get(&(s.rate, s.channels)) {
+                v
+            } else {
+                let v = measure_off(s, scripts, name, slot)?;
+                lat.off.insert((s.rate, s.channels), v);
+                v
             };
             let on_lag = r
                 .compare
                 .as_ref()
                 .context("no comparison to take the lag from")?
                 .lag;
-            let total_on =
-                on_lag + chain_delay_frames(&stim.samples, &expected, s.channels, s.rate);
-            let ms = |frames: isize| frames as f64 * 1000.0 / f64::from(s.rate);
-            let added = ms(total_on - off);
-            let v = judge(added, lat.baselines.get(&s.id).copied());
-            (
-                r.latency_on_ms,
-                r.latency_off_ms,
-                r.added_latency_ms,
-                r.latency_verdict,
-            ) = (Some(ms(total_on)), Some(ms(off)), Some(added), Some(v));
-            r.failures.extend(failure(v, added, opts.update_baseline));
+            let delay = chain_delay_frames(&stim.samples, &expected, s.channels, s.rate);
+            record_latency(
+                r,
+                s,
+                on_lag,
+                delay,
+                off,
+                lat.baselines.get(&s.id).copied(),
+                opts.update_baseline,
+                (0.1, 1.0),
+            );
         }
         Ok(())
     })();

@@ -37,14 +37,13 @@ fn make_overlay(run: &Path) -> Result<()> {
         &disk.to_string_lossy(),
         &vmdir.join("disk.qcow2").to_string_lossy(),
     ])?;
-    // Small mutable boot files are copied; the recovery image is only read.
+    // Small mutable boot files are copied. quickemu attaches the recovery image whenever the
+    // overlay "looks unused" (it is a small file), and OpenCore would then boot Recovery; an
+    // empty placeholder satisfies quickemu and leaves the installed disk as the only bootable entry.
     for f in ["OpenCore.qcow2", "OVMF_CODE.fd", "OVMF_VARS-1920x1080.fd"] {
         std::fs::copy(base.join(f), vmdir.join(f))?;
     }
-    std::os::unix::fs::symlink(
-        base.join("RecoveryImage.img"),
-        vmdir.join("RecoveryImage.img"),
-    )?;
+    std::fs::File::create(vmdir.join("RecoveryImage.img"))?.set_len(1 << 20)?;
     std::fs::write(
         run.join(format!("{NAME}.conf")),
         format!(
@@ -123,6 +122,16 @@ pub fn run(o: &Opts) -> Result<ExitCode> {
         };
         println!("{}", g.output("cat $HOME/e2e-agent.log")?);
         g.pull("$HOME/e2e-out", &out)?;
+        if o.update_baseline {
+            let tmp = root
+                .join("target/e2e")
+                .join(format!("baselines-macos-{stamp}"));
+            g.pull("$HOME/resonance/contrib/e2e/baselines", &tmp)?;
+            std::fs::copy(
+                tmp.join("macos.toml"),
+                root.join("contrib/e2e/baselines/macos.toml"),
+            )?;
+        }
         Ok(code == "0")
     })();
     let passed = *result.as_ref().unwrap_or(&false);

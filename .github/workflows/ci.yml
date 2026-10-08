@@ -23,6 +23,7 @@ jobs:
             libpipewire-0.3-dev \
             libspa-0.2-dev \
             libdbus-1-dev \
+            libasound2-dev \
             pkg-config \
             musl-tools
 

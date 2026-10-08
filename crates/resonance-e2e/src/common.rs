@@ -1,7 +1,8 @@
 //! OS-independent scenario helpers shared by every backend runner.
 
 use crate::checks::{
-    PITCH_TOLERANCE, first_signal_frame, gain_db, octave_edges, pitch_error, transfer_bands,
+    PITCH_TOLERANCE, first_signal_frame, gain_db, octave_edges, phat_lag, pitch_error,
+    segment_lags, transfer_bands,
 };
 use crate::compare::compare;
 use crate::render::{BLOCK_FRAMES, load_exported_chain, render};
@@ -9,7 +10,6 @@ use crate::report::ScenarioResult;
 use crate::scenario::{Scenario, Tier};
 use crate::stimulus::{Stimulus, generate};
 use anyhow::{Context, Result, bail};
-use resonance_dsp::analysis::best_integer_lag;
 use resonance_ipc::transport::SyncClient;
 use resonance_ipc::{Command, DaemonState, Response};
 use std::path::Path;
@@ -187,7 +187,7 @@ pub fn transfer_checks(
     rec: &Recording,
     default_tolerance_db: f64,
     max_dropout_fraction: f64,
-) -> Result<()> {
+) -> Result<isize> {
     let tolerance_db = s
         .expect
         .transfer_tolerance_db
@@ -197,19 +197,27 @@ pub fn transfer_checks(
     let exp0 = ch0(expected, ch);
     let rec0 = ch0(&rec.samples, rec.channels);
     let max_lag = (MAX_LAG_SECS * rate) as usize;
-    let lag = best_integer_lag(&exp0, &rec0, max_lag);
+    let (lag, quality) = phat_lag(&exp0, &rec0, max_lag);
+    if quality < MIN_ALIGNMENT_QUALITY {
+        r.failures.push(format!(
+            "the recording does not line up with the render (correlation peak {quality:.1}x the median, need {MIN_ALIGNMENT_QUALITY})"
+        ));
+    }
+    let (lags, slips) = segment_lags(&exp0, &rec0, stim.body.clone(), rate, lag, SLIP_FRAMES);
     let (bands, used, skipped) = transfer_bands(
         &exp0,
         &rec0,
-        lag,
+        &lags,
         stim.body.clone(),
         rate,
         &octave_edges(0.25 * rate),
     );
     let total = used + skipped;
     r.notes.push(format!(
-        "aligned at {lag} frames; {skipped} of {total} blocks hold a zero-filled dropout (excluded from the gain estimate)"
+        "aligned at {lag} frames; {skipped} of {total} blocks hold a zero-filled dropout (excluded from the gain estimate); {slips} segments slipped"
     ));
+    // A delay jump is a dropout of the same kind as a zero fill (the ring dropped its backlog).
+    r.discontinuities += u32::try_from(slips).unwrap_or(u32::MAX);
     if used < 8 || skipped as f64 > max_dropout_fraction * total as f64 {
         r.failures.push(format!(
             "{skipped} of {total} blocks hold a zero-filled dropout (limit {:.0} %)",
@@ -241,8 +249,14 @@ pub fn transfer_checks(
         r.failures
             .push(format!("pilot pitch off by {:.4} %", pe * 100.0));
     }
-    Ok(())
+    Ok(lag)
 }
+
+/// A correlation peak this many times the median means the lag is real.
+pub const MIN_ALIGNMENT_QUALITY: f64 = 8.0;
+
+/// A segment whose delay differs from the run's by more than this many frames slipped.
+pub const SLIP_FRAMES: isize = 16;
 
 /// Lowest coherence between render and recording per octave that still counts as the same signal.
 pub const MIN_COHERENCE: f64 = 0.95;
@@ -333,6 +347,47 @@ pub fn scale_pow2(x: &mut [f32], shift: u32) {
 #[must_use]
 pub fn peak_abs(x: &[f32]) -> f32 {
     x.iter().fold(0.0, |m, v| m.max(v.abs()))
+}
+
+/// Frames the chain itself delays `stim` (render vs input, channel 0): the part of a live
+/// lag that is Resonance's when the recording is aligned to the render.
+#[must_use]
+pub fn chain_delay_frames(stim: &[f32], expected: &[f32], channels: usize, rate: u32) -> isize {
+    // GCC-PHAT: an EQ'd render of a sweep fools plain cross-correlation (-135 ms measured).
+    phat_lag(
+        &ch0(stim, channels),
+        &ch0(expected, channels),
+        (0.5 * f64::from(rate)) as usize,
+    )
+    .0
+}
+
+/// Fill in the latency fields of `r` and judge them against the baseline. `on_lag` is the
+/// recording's lag behind the render, `chain_delay` the render's own delay, `off_lag` the
+/// Resonance-absent path's lag (all frames at `s.rate`).
+#[allow(clippy::too_many_arguments)] // flat numeric inputs read best at the two call sites
+pub fn record_latency(
+    r: &mut ScenarioResult,
+    s: &Scenario,
+    on_lag: isize,
+    chain_delay: isize,
+    off_lag: isize,
+    baseline_ms: Option<f64>,
+    update_baseline: bool,
+    margin: (f64, f64),
+) {
+    let ms = |frames: isize| frames as f64 * 1000.0 / f64::from(s.rate);
+    let total_on = on_lag + chain_delay;
+    let added = ms(total_on - off_lag);
+    let v = crate::latency::judge_with_margin(added, baseline_ms, margin.0, margin.1);
+    (
+        r.latency_on_ms,
+        r.latency_off_ms,
+        r.added_latency_ms,
+        r.latency_verdict,
+    ) = (Some(ms(total_on)), Some(ms(off_lag)), Some(added), Some(v));
+    r.failures
+        .extend(crate::latency::failure(v, added, update_baseline));
 }
 
 #[cfg(test)]

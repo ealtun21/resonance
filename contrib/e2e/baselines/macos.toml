@@ -1,1 +1,5 @@
-# Added latency (ms) per scenario on macOS.
+# Added latency (ms) per scenario. Rewritten by `cargo xtask e2e --update-baseline`.
+"flat@48000x2" = 54.23
+"full-eq@48000x2" = 54.25
+"fx-all-dithered@48000x2" = 54.98
+"linear-phase@48000x2" = 230.23

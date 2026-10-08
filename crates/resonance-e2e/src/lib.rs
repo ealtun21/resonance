@@ -17,7 +17,7 @@ pub mod latency;
 #[cfg(target_os = "linux")]
 pub mod linux;
 pub mod macos;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", feature = "cross-check"))]
 pub mod native;
 pub mod ratechain;
 pub mod render;

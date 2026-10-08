@@ -50,10 +50,22 @@ pub enum LatencyVerdict {
 /// Fail above baseline + max(1 ms, 10 %); report "can lower" below the same margin.
 #[must_use]
 pub fn judge(measured_ms: f64, baseline_ms: Option<f64>) -> LatencyVerdict {
+    judge_with_margin(measured_ms, baseline_ms, 0.1, 1.0)
+}
+
+/// [`judge`] with a margin of `max(min_ms, rel * baseline)`, for paths whose latency jitters
+/// more (a ring buffer whose fill depends on callback phase).
+#[must_use]
+pub fn judge_with_margin(
+    measured_ms: f64,
+    baseline_ms: Option<f64>,
+    rel: f64,
+    min_ms: f64,
+) -> LatencyVerdict {
     let Some(b) = baseline_ms else {
         return LatencyVerdict::NoBaseline;
     };
-    let margin = (0.1 * b.abs()).max(1.0);
+    let margin = (rel * b.abs()).max(min_ms);
     if measured_ms > b + margin {
         LatencyVerdict::Regressed { baseline_ms: b }
     } else if measured_ms < b - margin {

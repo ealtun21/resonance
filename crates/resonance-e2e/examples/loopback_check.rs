@@ -1,6 +1,7 @@
 //! macOS/Windows harness self-check: play the stimulus into `<play device>` and record
 //! `<record device>` (an input device) with no Resonance in the path; the recording must
 //! be bit-exact. usage: loopback_check <play> <record> <channels> <rate>
+#![allow(clippy::doc_markdown)]
 #[cfg(any(windows, target_os = "macos"))]
 mod imp {
     use cpal::traits::{DeviceTrait, HostTrait};

@@ -112,11 +112,13 @@ pub fn run(o: &Opts) -> Result<ExitCode> {
         let ok = g.run(&agent)?;
         g.pull(r"C:\e2e-out", &out)?;
         if o.update_baseline {
-            g.pull(
-                r"C:\src\contrib\e2e\baselines",
-                &root
-                    .join("target/e2e")
-                    .join(format!("baselines-windows-{stamp}")),
+            let tmp = root
+                .join("target/e2e")
+                .join(format!("baselines-windows-{stamp}"));
+            g.pull(r"C:\src\contrib\e2e\baselines", &tmp)?;
+            std::fs::copy(
+                tmp.join("windows.toml"),
+                root.join("contrib/e2e/baselines/windows.toml"),
             )?;
         }
         Ok(ok)

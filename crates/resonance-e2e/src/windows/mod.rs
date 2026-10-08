@@ -5,7 +5,7 @@
 use crate::scenario::Scenario;
 
 pub mod env;
-#[cfg(windows)]
+#[cfg(any(windows, feature = "cross-check"))]
 pub mod runner;
 
 /// The two playback devices in the e2e VM.

@@ -13,6 +13,7 @@ name = "resonance-e2e"
 path = "src/main.rs"
 
 [dependencies]
+cpal = { workspace = true, optional = true }
 resonance-dsp = { path = "../resonance-dsp" }
 resonance-ipc = { path = "../resonance-ipc" }
 resonance-apo = { path = "../resonance-apo" }
@@ -29,6 +30,11 @@ pipewire = { workspace = true, features = ["v0_3_49"] }
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 cpal = { workspace = true }
+
+[features]
+# Type-checks the Windows and macOS runners on Linux (`cargo check -p resonance-e2e --features cross-check`)
+# so most mistakes surface without booting a guest. Needs the ALSA dev package for cpal.
+cross-check = ["dep:cpal"]
 
 [lints]
 workspace = true

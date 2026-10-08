@@ -1,6 +1,7 @@
 //! Diagnostic: how much does the render's output level move when the input is scaled by
 //! `<scale_db>`? (A nonlinear chain, e.g. with Dynamic Boost, amplifies small input gain errors.)
 //! usage: render_sensitivity <chain.bin> <rate> <channels> <scale_db> [render-out.wav]
+#![allow(clippy::doc_markdown)]
 use resonance_e2e::render::{BLOCK_FRAMES, load_exported_chain, render};
 use resonance_e2e::stimulus::generate;
 

@@ -1,5 +1,6 @@
 //! Windows-only diagnostic: run the APO engine (the exact object audiodg calls) on a
 //! stimulus and compare with the offline render of the same exported chain.
+#![allow(clippy::doc_markdown)]
 #[cfg(windows)]
 mod imp {
     use resonance_e2e::render::{load_exported_chain, render};
