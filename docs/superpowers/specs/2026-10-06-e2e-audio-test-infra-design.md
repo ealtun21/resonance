@@ -418,17 +418,27 @@ reasons). What the first full runs taught us, each handled in the harness rather
   outputs, so cargo reused a stale binary). Source sync uses `tar -m`; guest builds set `CARGO_INCREMENTAL=0`.
 - Latency is not measured on Windows yet (no Resonance-off reference without uninstalling the APO).
 
-### 14.2 macOS leg status (2026-10-08)
+### 14.2 macOS leg results (2026-10-08)
 
-Written but **not yet passing a scenario**. Built and provisioned in the guest (BlackHole 2/16/64 ch from the
-vendor pkgs, `audiodev` helper, stable signing identity, signed `Resonance.app`, LaunchAgents, `kcpassword`
-auto-login), the agent started under launchd and the daemon created its tap and aggregate. Both TCC prompts
-(microphone, "Record Your System Audio") were answered once. The first scenario then timed out waiting for
-the daemon to report the result device, because the run overlapped the second prompt; after that the guest
-**froze twice** (clock stopped, ssh dead, qemu at ~400 % CPU in uninterruptible I/O) shortly after login/
-audio start, the risk spec section 13 names for macOS on this AMD host. Not yet known: whether the freeze
-comes from the 64-channel BlackHole, from audio start under emulation, or from host I/O contention.
-Next steps: retry with the guest's 16 ch device only as the result device, fewer vCPUs, and `-accel` /
-machine options from the spike's working boot; confirm the tap-on-default / render-to-preferred topology
-(`SetOutputTarget` while tapping a different default) with one stereo scenario; then `cargo xtask e2e --os
-macos`. Everything on the host side (`xtask/src/macos.rs`, overlay creation, run script) is unexercised.
+`cargo xtask e2e --os macos` works end to end on the base image: quick tier 4 of 4 on repeated runs, full tier
+27 scenarios (2 and 16 channels, 44.1 to 192 kHz; 26 not applicable with reasons) all pass, one flake.
+Topology and checks are in `contrib/e2e/macos/README.md`. What it took, and what it found:
+
+- **The earlier "freezes" were my diagnosis, not the guest.** Screenshots came from a stale file when the
+  screendump failed, and ssh banner timeouts under load looked like a hang. The guest stayed up through the
+  full tier with 4 vCPUs.
+- **MAC-E1 (finding): the Process Tap is not bit-transparent.** Playing into BlackHole 2ch and recording the same
+  device is bit-exact, but through tap and daemon the recording matches the render only to coherence about
+  0.985, with a flat -0.1 dB passband and a roll-off above 20 kHz: the aggregate's drift compensation
+  resamples. macOS is therefore judged by transfer function, not bit equality.
+- **MAC-E2 (finding): the daemon underruns under VM scheduling jitter.** About 30 % of 4096-frame blocks held a
+  zero-filled underrun in some runs, and the delay occasionally jumps mid-run (the ring dropping its backlog
+  beyond the 4096-frame slack). Per-segment alignment and dropout accounting keep the gain estimate valid; a
+  failure with dropouts reruns once.
+- **MAC-E3 (finding): the ring's latency is set by callback phase at start**, 0-85 ms of slack plus occasional
+  startup excess, so the same chain measured 29 to 228 ms across daemon starts. The harness reports the floor
+  over five starts plus the chain's exact delay.
+- Alignment uses GCC-PHAT: plain cross-correlation locked onto the wrong lag for EQ'd sweeps (it reported
+  -135 ms added latency for the EQ scenario).
+- TCC grants (daemon: microphone and system audio; agent: microphone) survive rebuilds because the signing
+  identity is stable; they are answered once while making the image.

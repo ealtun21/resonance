@@ -65,7 +65,7 @@ the spike already proved. Latency baselines in `contrib/e2e/baselines/windows.to
 
 ## Status 2026-10-08
 
-W0-W3 done and verified (`cargo xtask e2e --os windows`, quick and full tiers pass). M4 workflows written, not yet run on a runner. M3 written, blocked on guest stability: see spec section 14.2. `image windows` from scratch is untested (the overlay base was hand-built in the spike). Windows latency baselines are not implemented.
+W0-W3 and M3 done and verified on all three OSes: Linux, `--os windows` and `--os macos` quick and full tiers pass, latency baselines committed for all three. M4 workflows are written but have not run on a runner (that needs sudo on this host). Windows image from scratch (`image windows`) was exercised separately, see spec 14.1.
 
 ## M3: macOS
 
