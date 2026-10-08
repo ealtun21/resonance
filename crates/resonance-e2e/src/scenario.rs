@@ -27,10 +27,23 @@ pub struct AllowedHop {
 pub struct Expect {
     #[serde(default)]
     pub compare: CompareMode,
+    /// Per-OS replacement for `compare` (`std::env::consts::OS` keys), for
+    /// differences that are the platform's, e.g. a worker-built FIR kernel
+    /// differing from the offline one at the 1e-13 level.
+    #[serde(default)]
+    pub compare_by_os: BTreeMap<String, CompareMode>,
     #[serde(default)]
     pub resample: Vec<AllowedHop>,
     #[serde(default = "default_gap_ms")]
     pub max_gap_ms: f64,
+}
+
+impl Expect {
+    /// The comparison mode that applies on `os`.
+    #[must_use]
+    pub fn compare_for(&self, os: &str) -> CompareMode {
+        self.compare_by_os.get(os).copied().unwrap_or(self.compare)
+    }
 }
 
 fn default_gap_ms() -> f64 {
@@ -41,6 +54,7 @@ impl Default for Expect {
     fn default() -> Self {
         Self {
             compare: CompareMode::Exact,
+            compare_by_os: BTreeMap::new(),
             resample: Vec::new(),
             max_gap_ms: default_gap_ms(),
         }

@@ -27,5 +27,8 @@ toml = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 pipewire = { workspace = true, features = ["v0_3_49"] }
 
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+cpal = { workspace = true }
+
 [lints]
 workspace = true

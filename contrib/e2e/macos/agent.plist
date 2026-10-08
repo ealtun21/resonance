@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- The agent runs inside the logged-in session (audio and TCC only work there, not in
+       an ssh session). `args` is rewritten by xtask into ~/e2e-run.sh before kickstart. -->
+  <key>Label</key><string>e2e.agent</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/bash</string><string>@HOME@/e2e-run.sh</string></array>
+  <key>RunAtLoad</key><false/>
+</dict>
+</plist>

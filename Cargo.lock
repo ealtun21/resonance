@@ -4805,6 +4805,7 @@ version = "0.10.1"
 dependencies = [
  "anyhow",
  "clap 4.6.1",
+ "cpal",
  "hound",
  "pipewire",
  "resonance-apo",

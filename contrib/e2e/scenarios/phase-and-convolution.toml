@@ -5,6 +5,10 @@ rates = [48000, 96000]
 channels = [2]
 quick = [[48000, 2]]
 profile_file = "../profiles/full-eq-linear.toml"
+# Windows: the APO's worker thread builds the FIR kernel, the offline render builds it
+# inline; the outputs differ at the 1e-13 level (finding DSP-E3), far below any audible effect.
+[scenario.expect]
+compare_by_os = { windows = { tolerance_dbfs = -240 } }
 
 [[scenario]]
 id = "convolution"

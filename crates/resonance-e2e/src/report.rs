@@ -85,6 +85,8 @@ pub struct Report {
     pub os: String,
     pub tier: String,
     pub results: Vec<ScenarioResult>,
+    /// `(scenario id, reason)` for scenarios this OS cannot run, so omissions are visible.
+    pub skipped: Vec<(String, String)>,
 }
 
 impl Report {
@@ -123,6 +125,23 @@ impl Report {
                     .join(", ")
             };
             let _ = writeln!(md, "| {} | {} | {lat} | {rs} |", r.id, r.status.label());
+        }
+        if !self.skipped.is_empty() {
+            let _ = write!(
+                md,
+                "\n{} scenarios not applicable on {}:",
+                self.skipped.len(),
+                self.os
+            );
+            let mut reasons: std::collections::BTreeMap<&str, usize> =
+                std::collections::BTreeMap::new();
+            for (_, why) in &self.skipped {
+                *reasons.entry(why).or_default() += 1;
+            }
+            for (why, n) in reasons {
+                let _ = write!(md, " {n} × {why};");
+            }
+            md.push('\n');
         }
         let failing: Vec<_> = self
             .results
@@ -203,6 +222,7 @@ mod tests {
             (Status::UnexpectedPass, true),
         ] {
             let r = Report {
+                skipped: Vec::new(),
                 os: "linux".into(),
                 tier: "quick".into(),
                 results: vec![result("x", s)],
@@ -232,6 +252,7 @@ mod tests {
             reason: None,
         });
         let md = Report {
+            skipped: Vec::new(),
             os: "linux".into(),
             tier: "quick".into(),
             results: vec![bad, rs],

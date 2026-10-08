@@ -1,95 +1,30 @@
 //! Execute scenarios against the live daemon inside the e2e container.
 
 use crate::checks::{
-    BAND_TOLERANCE_DB, PITCH_TOLERANCE, first_signal_frame, gain_db, is_flowing, last_signal_frame,
-    longest_zero_run, octave_edges, pitch_error,
+    PITCH_TOLERANCE, first_signal_frame, is_flowing, last_signal_frame, longest_zero_run,
+    pitch_error,
+};
+use crate::common::{
+    MAX_LAG_SECS, RunOpts, apply_profile, ch0, exact_checks, get_state, ipc, resample_checks,
 };
 use crate::compare::{CompareMode, compare};
 use crate::latency::{arrival_lags, failure, judge, load_baselines, median, save_baselines};
 use crate::linux::env::{self, DEVICE, DEVICE2, Daemon, RESONANCE_SINK};
-use crate::linux::pw::{Play, PlayRec, RecordTarget, Recording, Timed, play_and_record};
+use crate::linux::pw::{Play, PlayRec, RecordTarget, Timed, play_and_record};
 use crate::ratechain::{Hop, LINUX_RESONANCE_STEPS, RateChain};
 use crate::render::{BLOCK_FRAMES, load_exported_chain, render};
 use crate::report::{Report, ScenarioResult, Status, settle};
-use crate::scenario::{EventKind, Scenario, Tier};
+use crate::scenario::{EventKind, Scenario};
 use crate::stimulus::{Stimulus, chirp_train, generate};
 use anyhow::{Context, Result, bail, ensure};
-use resonance_ipc::transport::SyncClient;
-use resonance_ipc::{Command, DaemonState, Response};
+use resonance_ipc::Command;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const OS: &str = "linux";
-/// Latency search range; also how long recording continues after the stimulus.
-const MAX_LAG_SECS: f64 = 1.0;
 const TRAINS: usize = 3;
-
-pub struct RunOpts {
-    pub scenarios: Vec<Scenario>,
-    pub tier: Tier,
-    pub out_dir: PathBuf,
-    pub daemon_bin: PathBuf,
-    pub baselines_path: PathBuf,
-    pub update_baseline: bool,
-}
-
-#[allow(clippy::needless_pass_by_value)] // call sites build the command inline
-fn ipc(cmd: Command) -> Result<()> {
-    match SyncClient::connect()?.send_recv(cmd.clone())? {
-        Response::Ok => Ok(()),
-        Response::Error(e) => bail!("{cmd:?}: {e}"),
-        other => bail!("{cmd:?}: unexpected {other:?}"),
-    }
-}
-
-fn get_state() -> Result<DaemonState> {
-    Ok(SyncClient::connect()?.get_state()?)
-}
-
-/// Deterministic stereo IR (exponentially decaying noise, 4096 taps) for
-/// `ir = "synthetic:room"`, written as float WAV at `rate`.
-pub fn synthetic_ir(path: &Path, rate: u32) -> Result<()> {
-    let spec = hound::WavSpec {
-        channels: 2,
-        sample_rate: rate,
-        bits_per_sample: 32,
-        sample_format: hound::SampleFormat::Float,
-    };
-    let mut w = hound::WavWriter::create(path, spec)?;
-    let mut s = 0x0123_4567_89AB_CDEFu64;
-    for i in 0..4096 {
-        for _ in 0..2 {
-            s ^= s << 13;
-            s ^= s >> 7;
-            s ^= s << 17;
-            let n = (s >> 40) as f32 / (1u32 << 24) as f32 - 0.5;
-            w.write_sample(n * (-(i as f32) / 600.0).exp())?;
-        }
-    }
-    w.finalize()?;
-    Ok(())
-}
-
-fn ch0(x: &[f32], channels: usize) -> Vec<f64> {
-    x.iter().step_by(channels).map(|&v| f64::from(v)).collect()
-}
-
-fn write_wav(path: &Path, x: &[f32], channels: usize, rate: u32) -> Result<()> {
-    let spec = hound::WavSpec {
-        channels: u16::try_from(channels)?,
-        sample_rate: rate,
-        bits_per_sample: 32,
-        sample_format: hound::SampleFormat::Float,
-    };
-    let mut w = hound::WavWriter::create(path, spec)?;
-    for &v in x {
-        w.write_sample(v)?;
-    }
-    w.finalize()?;
-    Ok(())
-}
 
 /// The harness itself must be bit-exact before Resonance is judged: a null
 /// sink's own loopback (no Resonance in the path) has to compare equal.
@@ -202,38 +137,6 @@ fn reset_devices(s: &Scenario) -> Result<()> {
     env::set_default_sink(DEVICE)
 }
 
-fn apply_profile(s: &Scenario, dir: &Path) -> Result<()> {
-    let p = &s.profile;
-    match &p.preset {
-        Some(preset) => ipc(Command::LoadPreset {
-            path: preset.to_string_lossy().into_owned(),
-        })?,
-        None => ipc(Command::ApplyState {
-            preamp_db: p.preamp_db,
-            enabled: true,
-            bands: p.bands.clone(),
-            effects: p.effects.clone(),
-        })?,
-    }
-    ipc(Command::SetDither {
-        bits: p.dither_bits,
-    })?;
-    ipc(Command::SetPhaseMode {
-        linear: p.linear_phase,
-    })?;
-    if let Some(ir) = &p.ir {
-        let path = if ir.starts_with("synthetic:") {
-            let path = dir.join("synthetic-ir.wav");
-            synthetic_ir(&path, s.rate)?;
-            path.to_string_lossy().into_owned()
-        } else {
-            ir.clone()
-        };
-        ipc(Command::SetConvolutionIr { path })?;
-    }
-    Ok(())
-}
-
 /// Wait until the daemon reports the scenario's format on the scenario's
 /// device; on timeout, fail with the actual mismatch.
 fn await_format(s: &Scenario) -> Result<()> {
@@ -309,98 +212,6 @@ fn event_actions(
         timed.push(Timed { at_frame, action });
     }
     (records, timed)
-}
-
-/// Steady matched-rate path: every sample must equal the offline render.
-fn exact_checks(
-    r: &mut ScenarioResult,
-    s: &Scenario,
-    stim: &Stimulus,
-    rec: &Recording,
-    expected: &[f32],
-    dir: &Path,
-) -> Result<()> {
-    // Body plus up to 0.25 s of processed tail (reverb, FIR, IR).
-    let window = stim.body.start..stim.body.end + stim.body.len().min(s.rate as usize / 4);
-    let o = compare(
-        expected,
-        &rec.samples,
-        s.channels,
-        window,
-        (MAX_LAG_SECS * f64::from(s.rate)) as usize,
-    );
-    if !o.passes(s.expect.compare) {
-        r.failures.push(o.describe());
-        write_wav(&dir.join("recorded.wav"), &rec.samples, s.channels, s.rate)?;
-        write_wav(&dir.join("expected.wav"), expected, s.channels, s.rate)?;
-        let shift = usize::try_from(o.lag).unwrap_or(0) * s.channels;
-        let diff: Vec<f32> = rec
-            .samples
-            .iter()
-            .skip(shift)
-            .zip(expected)
-            .map(|(a, b)| a - b)
-            .collect();
-        write_wav(&dir.join("diff.wav"), &diff, s.channels, s.rate)?;
-    }
-    r.compare = Some(o);
-    Ok(())
-}
-
-/// A rate converter is in the path, so not bit-exact by design: the pilot's
-/// pitch and the path's per-octave gain must match the offline render's
-/// gain at the DSP rate. Windows are aligned on the first arriving sample.
-fn resample_checks(
-    r: &mut ScenarioResult,
-    s: &Scenario,
-    stim: &Stimulus,
-    rec: &Recording,
-    export: &Path,
-    state: &DaemonState,
-) -> Result<()> {
-    let ch = s.channels;
-    let rec_rate = f64::from(rec.rate);
-    let start = first_signal_frame(&rec.samples, rec.channels).context("recording is silent")?;
-    let len = (stim.body.len() as f64 * rec_rate / f64::from(s.player_rate)) as usize;
-    let end = (start + len).min(rec.samples.len() / rec.channels);
-    let rec0 = ch0(
-        &rec.samples[start * rec.channels..end * rec.channels],
-        rec.channels,
-    );
-    let rec0_f32: Vec<f32> = rec0.iter().map(|&v| v as f32).collect();
-    let pe = pitch_error(&rec0_f32, rec_rate);
-    if pe > PITCH_TOLERANCE {
-        r.failures
-            .push(format!("pilot pitch off by {:.4} %", pe * 100.0));
-    }
-    let dsp_rate = state.sample_rate;
-    let stim_dsp = generate(dsp_rate as u32, ch, s.body_secs);
-    let (mut chain, _) = load_exported_chain(export, state.channels, dsp_rate)?;
-    let rendered = render(&mut chain, &stim_dsp.samples, BLOCK_FRAMES);
-    let body = |x: &[f32], st: &Stimulus| ch0(&x[st.body.start * ch..st.body.end * ch], ch);
-    let edges = octave_edges(0.45 * f64::from(s.player_rate.min(s.rate)).min(dsp_rate));
-    let measured = gain_db(
-        &body(&stim.samples, stim),
-        f64::from(s.player_rate),
-        &rec0,
-        rec_rate,
-        &edges,
-    );
-    let expected = gain_db(
-        &body(&stim_dsp.samples, &stim_dsp),
-        dsp_rate,
-        &body(&rendered, &stim_dsp),
-        dsp_rate,
-        &edges,
-    );
-    for ((hz, m), e) in edges.iter().zip(&measured).zip(&expected) {
-        if (m - e).abs() > BAND_TOLERANCE_DB {
-            r.failures.push(format!(
-                "octave from {hz:.0} Hz: path gain {m:+.2} dB, render {e:+.2} dB"
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// Mid-stream events: correct pitch after the last event, gap within the
@@ -655,12 +466,14 @@ pub fn run(opts: &RunOpts) -> Result<Report> {
         os: OS.into(),
         tier: format!("{:?}", opts.tier).to_lowercase(),
         results,
+        skipped: Vec::new(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::synthetic_ir;
 
     #[test]
     fn synthetic_ir_is_a_decaying_stereo_float_wav() {

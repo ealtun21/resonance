@@ -30,15 +30,7 @@ pub struct Timed {
     pub action: Box<dyn FnOnce() + Send>,
 }
 
-#[derive(Debug, Clone)]
-pub struct Recording {
-    pub node: String,
-    pub channels: usize,
-    pub rate: u32,
-    pub first_tick: Option<u64>,
-    pub samples: Vec<f32>,
-    pub discontinuities: u32,
-}
+pub use crate::common::Recording;
 
 #[derive(Debug, Clone)]
 pub struct PlayRec {

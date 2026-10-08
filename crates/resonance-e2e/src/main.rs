@@ -48,7 +48,6 @@ fn main() -> Result<ExitCode> {
     )
 }
 
-#[cfg(target_os = "linux")]
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)] // mirrors the CLI fields 1:1
 fn run(
     scenarios: PathBuf,
@@ -59,7 +58,7 @@ fn run(
     filter: Option<String>,
     update_baseline: bool,
 ) -> Result<ExitCode> {
-    use resonance_e2e::{runner, scenario};
+    use resonance_e2e::{common::RunOpts, scenario};
     // This agent creates devices and changes the default sink: refuse to run
     // anywhere but the e2e container/VM, whose entrypoint sets this.
     anyhow::ensure!(
@@ -67,20 +66,22 @@ fn run(
         "refusing to run outside the e2e sandbox (RESONANCE_E2E_SANDBOX unset): \
          it would reconfigure this machine's audio"
     );
+    let os = std::env::consts::OS;
     let all = scenario::load_dir(&scenarios)?;
-    let selected = scenario::select(&all, tier, filter.as_deref(), "linux")
+    let selected = scenario::select(&all, tier, filter.as_deref(), os)
         .into_iter()
         .cloned()
         .collect();
     std::fs::create_dir_all(&out)?;
-    let report = runner::run(&runner::RunOpts {
+    let opts = RunOpts {
         scenarios: selected,
         tier,
         out_dir: out.clone(),
         daemon_bin: daemon,
         baselines_path: baselines,
         update_baseline,
-    })?;
+    };
+    let report = run_os(&opts, &scenarios)?;
     std::fs::write(out.join("report.json"), serde_json::to_vec_pretty(&report)?)?;
     let md = report.to_markdown();
     std::fs::write(out.join("report.md"), &md)?;
@@ -92,16 +93,41 @@ fn run(
     })
 }
 
-#[cfg(not(target_os = "linux"))]
-#[allow(clippy::too_many_arguments)] // mirrors the CLI fields 1:1
-fn run(
-    _: PathBuf,
-    _: PathBuf,
-    _: PathBuf,
-    _: PathBuf,
-    _: resonance_e2e::scenario::Tier,
-    _: Option<String>,
-    _: bool,
-) -> Result<ExitCode> {
-    anyhow::bail!("resonance-e2e: only Linux is implemented so far (Windows: M2, macOS: M3)")
+#[cfg(target_os = "linux")]
+fn run_os(
+    opts: &resonance_e2e::common::RunOpts,
+    _scenarios: &std::path::Path,
+) -> Result<resonance_e2e::report::Report> {
+    resonance_e2e::runner::run(opts)
+}
+
+#[cfg(windows)]
+fn run_os(
+    opts: &resonance_e2e::common::RunOpts,
+    scenarios: &std::path::Path,
+) -> Result<resonance_e2e::report::Report> {
+    // `contrib/e2e/windows` sits next to `contrib/e2e/scenarios`.
+    let scripts = scenarios.join("..").join("windows");
+    resonance_e2e::windows::runner::run(opts, &scripts)
+}
+
+#[cfg(target_os = "macos")]
+fn run_os(
+    opts: &resonance_e2e::common::RunOpts,
+    _scenarios: &std::path::Path,
+) -> Result<resonance_e2e::report::Report> {
+    // The CoreAudio helper (`audiodev`) is compiled into this directory by the guest provisioning.
+    let dir = std::env::var_os("RESONANCE_E2E_AUDIODEV").map_or_else(
+        || PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("e2e-bin"),
+        PathBuf::from,
+    );
+    resonance_e2e::macos::runner::run(opts, &dir)
+}
+
+#[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
+fn run_os(
+    _: &resonance_e2e::common::RunOpts,
+    _: &std::path::Path,
+) -> Result<resonance_e2e::report::Report> {
+    anyhow::bail!("resonance-e2e: unsupported OS")
 }

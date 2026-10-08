@@ -1,0 +1,78 @@
+name: e2e
+
+# Live-audio end-to-end tests on the maintainer's self-hosted runner (podman
+# container for Linux, quickemu VMs for Windows and macOS). Design:
+# docs/superpowers/specs/2026-10-06-e2e-audio-test-infra-design.md section 10.2.
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: "quick or full"
+        default: quick
+
+# One run at a time: the runner owns the host's KVM and audio-free VMs.
+concurrency:
+  group: e2e
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  e2e:
+    # Same-repo branches run automatically; fork PRs only when a maintainer
+    # adds the `run-e2e` label after reading the diff (it executes on the host).
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository ||
+      contains(github.event.pull_request.labels.*.name, 'run-e2e')
+    runs-on: [self-hosted, resonance-e2e]
+    timeout-minutes: 150
+    env:
+      TIER: ${{ github.event_name == 'schedule' && 'full' || github.event.inputs.tier || 'quick' }}
+      # PR runs report on the PR head, not on the synthetic merge commit.
+      STATUS_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (version pinned in rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - name: Run the live-audio suite
+        run: cargo xtask e2e --os linux,windows,macos --tier "$TIER"
+
+      - name: Job summary
+        if: always()
+        run: |
+          for f in target/e2e/run-*/*/report.md; do
+            [ -f "$f" ] && cat "$f" >> "$GITHUB_STEP_SUMMARY"
+          done || true
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-run
+          path: target/e2e/
+          retention-days: 14
+
+      # The release workflow requires this status on the tag's commit. Only the
+      # quick tier (or better) counts, so a nightly `full` also satisfies it.
+      - name: Post commit status
+        if: always() && github.event_name != 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          state=failure; [ "$JOB_STATUS" = success ] && state=success
+          gh api -X POST "repos/${{ github.repository }}/statuses/$STATUS_SHA" \
+            -f state="$state" -f context="e2e/quick" \
+            -f description="live-audio e2e ($TIER tier): $JOB_STATUS" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

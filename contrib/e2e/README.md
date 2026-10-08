@@ -12,7 +12,10 @@ render of the daemon's own chain. Design:
     cargo xtask e2e --scenario 'full-eq*'
     cargo xtask e2e --keep               # keep the container after a failure
 
-Prerequisites: rootless podman. The container has its own PipeWire with no
+    cargo xtask e2e --os linux,windows   # Windows leg: see windows/README.md
+    cargo xtask e2e image windows        # one-time base image build
+
+Prerequisites: rootless podman (Linux); quickemu, qemu-img, genisoimage (VM legs). The container has its own PipeWire with no
 real devices and never touches your desktop audio.
 
 Reports: `target/e2e/run-<time>/linux/report.md` (+ `report.json`, and per

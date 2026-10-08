@@ -6,14 +6,19 @@
 #![allow(
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
-    clippy::doc_markdown
+    clippy::doc_markdown,
+    clippy::must_use_candidate
 )]
 
 pub mod checks;
+pub mod common;
 pub mod compare;
 pub mod latency;
 #[cfg(target_os = "linux")]
 pub mod linux;
+pub mod macos;
+#[cfg(any(windows, target_os = "macos"))]
+pub mod native;
 pub mod ratechain;
 pub mod render;
 pub mod report;
@@ -21,3 +26,4 @@ pub mod report;
 pub mod runner;
 pub mod scenario;
 pub mod stimulus;
+pub mod windows;

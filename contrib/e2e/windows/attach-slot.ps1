@@ -1,4 +1,6 @@
-param([int]$Ch, [int]$Rate, [int]$Mask, [string]$Guid = "{aeec7bce-53f9-4a27-87fc-ae4e0583bf82}")
+# Attach the Resonance APO to ONE slot of the endpoint named $Name, removing it from all others.
+# Scream (legacy WDM, no effect modes) only loads GFX (slot 2); see spec section 14.
+param([string]$Slot = "2", [string]$Name = "Scream")
 # --- privileges needed to take ownership of SYSTEM-owned MMDevices keys ---
 Add-Type @"
 using System;
@@ -32,19 +34,19 @@ function Grant-Key([string]$sub) {
   $a.AddAccessRule($rule); $k.SetAccessControl($a); $k.Close()
 }
 
-$sub = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\$Guid\Properties"
+$g = $null
+foreach ($e in Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render') {
+  $n = (Get-ItemProperty "$($e.PSPath)\Properties" -EA SilentlyContinue).'{b3f8fa53-0004-438e-9003-51a46e139bfc},6'
+  if ($n -like "*$Name*") { $g = $e.PSChildName; break }
+}
+if (-not $g) { throw "no render endpoint named *$Name*" }
+$sub="SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\$g\FxProperties"
 Grant-Key $sub
-$k = "HKLM:\$sub"
-$name = '{f19f064d-082c-4e27-bc73-6882a1bb8e4c},0'
-$b = [byte[]](Get-ItemProperty $k).$name
-function Put([int]$off, [uint32]$v, [int]$n) { for ($i = 0; $i -lt $n; $i++) { $b[$off + $i] = ($v -shr (8 * $i)) -band 0xff } }
-Put 10 $Ch 2
-Put 12 $Rate 4
-Put 16 ($Rate * $Ch * 4) 4
-Put 20 ($Ch * 4) 2
-Put 28 $Mask 4
-Set-ItemProperty -Path $k -Name $name -Value $b -Type Binary
-Restart-Service AudioEndpointBuilder -Force
-Start-Sleep 2
-Start-Service Audiosrv
-"set ch=$Ch rate=$Rate mask=$Mask"
+$fxp="HKLM:\$sub"
+$fx='{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D}'; $mode='{D3993A3F-99C2-4402-B5EC-A92A0367664B}'
+$clsid='{7C3D2A1E-9B6F-4E2A-8D5C-1F0A3B4C5D6E}'; $dm='{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}'
+foreach($s in '1','2','5','6','7'){ Remove-ItemProperty -Path $fxp -Name "$fx,$s" -EA SilentlyContinue; Remove-ItemProperty -Path $fxp -Name "$mode,$s" -EA SilentlyContinue }
+Set-ItemProperty -Path $fxp -Name "$fx,$Slot" -Value $clsid
+New-ItemProperty -Force -Path $fxp -Name "$mode,$Slot" -PropertyType MultiString -Value @($dm) | Out-Null
+Restart-Service AudioEndpointBuilder -Force; Start-Sleep 2; Start-Service Audiosrv
+"slot=$Slot"
