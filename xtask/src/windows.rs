@@ -96,7 +96,7 @@ pub fn run(o: &Opts) -> Result<ExitCode> {
     println!("windows: booting {}", run_dir.display());
     let g = Guest::boot(&run_dir, NAME, USER)?;
     let result = (|| -> Result<bool> {
-        g.wait_ssh(Duration::from_secs(600))?;
+        g.wait_ssh(Duration::from_secs(60 * 30))?;
         g.sync_source(&root, r"C:\src")?;
         prepare(&g)?;
         let mut agent = format!(
@@ -294,7 +294,7 @@ pub fn image() -> Result<ExitCode> {
         );
         g.run("shutdown /r /t 0")?;
         std::thread::sleep(Duration::from_secs(30));
-        g.wait_ssh(Duration::from_secs(600))?;
+        g.wait_ssh(Duration::from_secs(60 * 30))?;
         ensure!(
             g.run(r"cd /d C:\scream\Install && Install-x64.bat")?,
             "Scream install failed"

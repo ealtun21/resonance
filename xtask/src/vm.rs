@@ -87,9 +87,38 @@ impl Guest {
         c
     }
 
+    fn alive(&self) -> bool {
+        std::fs::read_to_string(self.dir.join(format!("{}/{}.pid", self.name, self.name)))
+            .ok()
+            .and_then(|p| p.trim().parse::<u32>().ok())
+            .is_some_and(|pid| Path::new(&format!("/proc/{pid}")).exists())
+    }
+
+    /// Start the guest again on the same disk and ssh port (an unattended Windows install
+    /// powers the machine off at the end of a setup phase instead of rebooting it).
+    fn relaunch(&self) {
+        let _ = Command::new("quickemu")
+            .current_dir(&self.dir)
+            .args([
+                "--vm",
+                &format!("{}.conf", self.name),
+                "--display",
+                "none",
+                "--ssh-port",
+            ])
+            .arg(self.port.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
     pub fn wait_ssh(&self, timeout: Duration) -> Result<()> {
         let end = Instant::now() + timeout;
         loop {
+            if !self.alive() {
+                eprintln!("guest {} is not running; starting it again", self.name);
+                self.relaunch();
+            }
             let up = self
                 .ssh_cmd()
                 .arg("echo up")
