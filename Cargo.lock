@@ -4722,7 +4722,7 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "resonance-apo"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "memmap2",
  "resonance-dsp",
@@ -4731,11 +4731,11 @@ dependencies = [
 
 [[package]]
 name = "resonance-autoeq"
-version = "0.10.1"
+version = "0.11.0"
 
 [[package]]
 name = "resonance-cli"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "clap 4.6.1",
@@ -4754,7 +4754,7 @@ dependencies = [
 
 [[package]]
 name = "resonance-daemon"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "cpal",
@@ -4789,7 +4789,7 @@ dependencies = [
 
 [[package]]
 name = "resonance-dsp"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "approx",
  "biquad",
@@ -4801,7 +4801,7 @@ dependencies = [
 
 [[package]]
 name = "resonance-e2e"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "clap 4.6.1",
@@ -4819,7 +4819,7 @@ dependencies = [
 
 [[package]]
 name = "resonance-gui"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "eframe",
@@ -4842,7 +4842,7 @@ dependencies = [
 
 [[package]]
 name = "resonance-ipc"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "libc",
  "postcard",
@@ -4855,7 +4855,7 @@ dependencies = [
 
 [[package]]
 name = "resonance-preset"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "resonance-dsp",
  "serde",
@@ -4865,7 +4865,7 @@ dependencies = [
 
 [[package]]
 name = "resonance-reference"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "resonance-ipc",
  "serde",
@@ -4875,7 +4875,7 @@ dependencies = [
 
 [[package]]
 name = "resonance-tray"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "image",
@@ -4887,7 +4887,7 @@ dependencies = [
 
 [[package]]
 name = "resonance-tui"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -7396,7 +7396,7 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 
 [[package]]
 name = "xtask"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "clap 4.6.1",
