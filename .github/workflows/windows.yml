@@ -6,10 +6,6 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Existing release tag to rebuild the installer for and attach it to (optional)"
-        required: false
 
 permissions:
   contents: write
@@ -24,8 +20,6 @@ jobs:
       RUSTFLAGS: "-C target-feature=+crt-static"
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.ref }}
 
       - name: Install Rust toolchain (version pinned in rust-toolchain.toml)
         run: rustup toolchain install
@@ -80,9 +74,6 @@ jobs:
           $ver = ($meta.packages | Where-Object { $_.name -eq 'resonance-daemon' }).version
           if (-not $ver) { throw "could not read version from cargo metadata" }
           Write-Host "installer version $ver (from Cargo.toml)"
-          # The installer must carry the version of the release it is attached to.
-          $tag = if ('${{ inputs.tag }}') { '${{ inputs.tag }}' } elseif ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { '' }
-          if ($tag -and $tag -ne "v$ver") { throw "tag $tag does not match Cargo.toml version $ver" }
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$ver" contrib\windows\resonance.iss
 
       - name: Upload installer artifact
@@ -92,8 +83,7 @@ jobs:
           path: contrib/windows/Output/resonance-setup.exe
 
       - name: Attach installer to release
-        if: startsWith(github.ref, 'refs/tags/') || inputs.tag != ''
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
           files: contrib/windows/Output/resonance-setup.exe
