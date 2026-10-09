@@ -39,6 +39,9 @@ enum Cli {
         /// Rewrite contrib/e2e/baselines/<os>.toml from this run.
         #[arg(long)]
         update_baseline: bool,
+        /// Run the OS legs one after another instead of in parallel.
+        #[arg(long)]
+        serial: bool,
     },
 }
 
@@ -95,6 +98,7 @@ fn main() -> Result<ExitCode> {
             scenario,
             keep,
             update_baseline,
+            serial,
             ..
         } => {
             let o = Opts {
@@ -103,14 +107,25 @@ fn main() -> Result<ExitCode> {
                 keep,
                 update_baseline,
             };
+            let run = |os: Os| match os {
+                Os::Linux => linux::run(&o),
+                Os::Windows => windows::run(&o),
+                Os::Macos => macos::run(&o),
+            };
+            // Each leg has its own run dir and a free ssh port, so the legs are independent.
+            let codes: Vec<Result<ExitCode>> = if serial || os.len() < 2 {
+                os.iter().map(|&os| run(os)).collect()
+            } else {
+                std::thread::scope(|s| {
+                    let legs: Vec<_> = os.iter().map(|&os| s.spawn(move || run(os))).collect();
+                    legs.into_iter()
+                        .map(|h| h.join().unwrap_or_else(|_| bail!("an e2e leg panicked")))
+                        .collect()
+                })
+            };
             let mut ok = true;
-            for os in os {
-                let code = match os {
-                    Os::Linux => linux::run(&o)?,
-                    Os::Windows => windows::run(&o)?,
-                    Os::Macos => macos::run(&o)?,
-                };
-                ok &= code == ExitCode::SUCCESS;
+            for code in codes {
+                ok &= code? == ExitCode::SUCCESS;
             }
             Ok(if ok {
                 ExitCode::SUCCESS

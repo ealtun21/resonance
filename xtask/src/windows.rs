@@ -52,7 +52,7 @@ fn make_overlay(run: &Path) -> Result<()> {
         run.join(format!("{NAME}.conf")),
         format!(
             "#!/usr/bin/quickemu --vm\nguest_os=\"windows\"\ndisk_img=\"{NAME}/disk.qcow2\"\n\
-             iso=\"{NAME}/boot.iso\"\ntpm=\"off\"\nsecureboot=\"off\"\ncpu_cores=\"8\"\nram=\"8G\"\n"
+             iso=\"{NAME}/boot.iso\"\ntpm=\"off\"\nsecureboot=\"off\"\ncpu_cores=\"16\"\nram=\"10G\"\n"
         ),
     )?;
     Ok(())
@@ -98,7 +98,9 @@ pub fn run(o: &Opts) -> Result<ExitCode> {
     let result = (|| -> Result<bool> {
         g.wait_ssh(Duration::from_secs(60 * 30))?;
         g.sync_source(&root, r"C:\src")?;
+        let t = std::time::Instant::now();
         prepare(&g)?;
+        println!("windows: guest build+prepare took {:.0?}", t.elapsed());
         let mut agent = format!(
             r"set RESONANCE_E2E_SANDBOX=1& C:\src\target\e2e-build\resonance-e2e.exe run --scenarios C:\src\contrib\e2e\scenarios --baselines C:\src\contrib\e2e\baselines\windows.toml --daemon C:\src\target\e2e-build\resonanced.exe --out C:\e2e-out --tier {}",
             o.tier
@@ -266,7 +268,7 @@ pub fn image() -> Result<ExitCode> {
         format!(
             "#!/usr/bin/quickemu --vm\nguest_os=\"windows\"\ndisk_img=\"{NAME}/disk.qcow2\"\n\
              iso=\"{NAME}/windows-11.iso\"\nfixed_iso=\"{NAME}/virtio-win.iso\"\n\
-             disk_size=\"64G\"\ntpm=\"off\"\nsecureboot=\"off\"\ncpu_cores=\"8\"\nram=\"8G\"\n"
+             disk_size=\"64G\"\ntpm=\"off\"\nsecureboot=\"off\"\ncpu_cores=\"16\"\nram=\"10G\"\n"
         ),
     )?;
     println!("windows image: installing (unattended, 20-40 min)");

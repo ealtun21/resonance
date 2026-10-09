@@ -563,3 +563,19 @@ Findings while building it: `reset_devices` created the second device once per `
 scenario with two switches got two nodes of the same name and the audio went to the other one (fixed:
 one device however many events). A daemon switch from a mono device back to stereo takes up to ~1.6 s
 (reconnect backoff), longer than the 500 ms default gap; `bt-rate-stress` states `max_gap_ms = 2500`.
+
+## 16. Parallel legs, guest sizing, macOS latency (2026-10-09)
+
+- `cargo xtask e2e --os linux,windows,macos` runs the legs in parallel (each has its own run
+  directory and a free ssh port); `--serial` restores one-after-another. A full nightly drops from
+  about 66 min serial to about 44 min, bounded by the longest leg (Linux, because of the soaks).
+  The legs are wall-clock bound (real-time audio, ssh, boots), so the host stays about 95 % idle.
+- The Windows and macOS guests are 16 vCPUs / 10 GB each. They compile in the guest on every run
+  (warm cache from the image); with 16 vCPUs the Windows prepare step takes about 73 s.
+- macOS added latency is report-only. The same scenario measured anywhere from -100 to +100 ms
+  between runs (the tap ring starts at a different offset each run, MAC-E2), so a baseline gate
+  only fails on noise; refreshing `baselines/macos.toml` was tried and gives another random sample.
+  Windows and Linux still gate on latency.
+- Observed once under parallel load at 8 vCPUs: Windows `long-full-eq@96000x8` differed from the
+  render at frame 3931392 (-13.2 dBFS). It passed twice alone at 16 vCPUs.
+
