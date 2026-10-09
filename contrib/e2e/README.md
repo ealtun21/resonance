@@ -35,6 +35,20 @@ or `synthetic:room`.
 any other resampling fails. Known product bugs: `expected_fail = "<finding id>"`
 from `docs/superpowers/plans/2026-09-19-audio-robustness-findings.md`.
 
+## Steady-tone scenarios
+
+`kind = "thdn" | "soak" | "stress"` (`scenarios/tone.toml`) play a pure tone instead of the render
+stimulus and judge the recording on its own, not against the offline render (spec section 15):
+
+- `thdn`: THD+N and SNR of a bin-centred tone (`tone_hz`, default the 997 Hz pilot); the scenario
+  states `expect.max_thdn_db` and `expect.min_snr_db`. Measured numbers are in the report notes.
+- `soak`: 600 s of pilot, full tier only; pitch per 10 s window, level span, dropouts.
+- `stress`: pilot through `events` (graph rate flips, device switches); pitch, level and gaps after
+  each event settles (`expect.max_gap_ms` + 0.5 s). Event `switch_back` returns to the first device.
+
+Linux and (`thdn`/`soak` on matched-rate stereo) Windows; macOS lists them as not applicable with the
+reason. They have no latency baseline.
+
 ## Latency baselines
 
 `baselines/linux.toml` holds each scenario's added latency (ms). A run fails

@@ -1,11 +1,12 @@
 //! Execute scenarios against the live daemon inside the e2e container.
 
 use crate::checks::{
-    BAND_TOLERANCE_DB, PITCH_TOLERANCE, first_signal_frame, is_flowing, last_signal_frame,
-    longest_zero_run, pitch_error,
+    BAND_TOLERANCE_DB, PITCH_TOLERANCE, block_rms_db, first_signal_frame, is_flowing,
+    last_signal_frame, longest_zero_run, pitch_error,
 };
 use crate::common::{
     MAX_LAG_SECS, RunOpts, apply_profile, ch0, exact_checks, get_state, ipc, resample_checks,
+    stimulus_for, tone_checks, write_wav,
 };
 use crate::compare::{CompareMode, compare};
 use crate::latency::{
@@ -16,7 +17,7 @@ use crate::linux::pw::{Play, PlayRec, RecordTarget, Timed, play_and_record};
 use crate::ratechain::{Hop, LINUX_RESONANCE_STEPS, RateChain};
 use crate::render::{BLOCK_FRAMES, load_exported_chain, render};
 use crate::report::{Report, ScenarioResult, Status, settle};
-use crate::scenario::{EventKind, Scenario};
+use crate::scenario::{EventKind, Kind, Scenario};
 use crate::stimulus::{Stimulus, chirp_train, generate};
 use anyhow::{Context, Result, bail, ensure};
 use resonance_ipc::Command;
@@ -131,10 +132,13 @@ fn reset_devices(s: &Scenario) -> Result<()> {
         .iter()
         .any(|e| matches!(e.kind, EventKind::ForceRate { .. }));
     env::create_device(DEVICE, (!follows_graph).then_some(s.rate), s.channels)?;
-    for e in &s.events {
-        if let EventKind::SwitchDevice { rate, channels } = e.kind {
-            env::create_device(DEVICE2, Some(rate), channels)?;
-        }
+    // One second device however many times the scenario switches to it (a duplicate node of the
+    // same name would take the audio away from the recording).
+    if let Some((rate, channels)) = s.events.iter().find_map(|e| match e.kind {
+        EventKind::SwitchDevice { rate, channels } => Some((rate, channels)),
+        _ => None,
+    }) {
+        env::create_device(DEVICE2, Some(rate), channels)?;
     }
     env::set_default_sink(DEVICE)
 }
@@ -182,17 +186,24 @@ fn event_actions(
                 let _ = env::force_graph_rate(Some(rate));
             }),
             EventKind::SwitchDevice { rate, channels } => {
-                records.push(RecordTarget {
-                    node: DEVICE2,
-                    rate,
-                    channels,
-                });
+                if !records.iter().any(|t| t.node == DEVICE2) {
+                    records.push(RecordTarget {
+                        node: DEVICE2,
+                        rate,
+                        channels,
+                    });
+                }
                 Box::new(|| {
                     let _ = ipc(Command::SetOutputTarget {
                         node_name: DEVICE2.into(),
                     });
                 })
             }
+            EventKind::SwitchBack => Box::new(|| {
+                let _ = ipc(Command::SetOutputTarget {
+                    node_name: DEVICE.into(),
+                });
+            }),
             EventKind::RestartDaemon => {
                 let (d, bin, log) = (
                     Arc::clone(daemon),
@@ -276,6 +287,130 @@ fn event_checks(r: &mut ScenarioResult, s: &Scenario, stim: &Stimulus, pr: &Play
     }
 }
 
+/// An event's outage may last `max_gap_ms`; the chain then gets this much longer to settle
+/// before the stretch after it is judged.
+const SETTLE_MARGIN_SECS: f64 = 0.5;
+/// The first stretch is analysed from here after the stimulus starts; every stretch ends this
+/// long before the next event (the player runs ahead of the recording, so an event can show up
+/// in the recording ~0.1 s before its nominal time).
+const FIRST_SEGMENT_START_SECS: f64 = 1.0;
+const SEGMENT_END_MARGIN_SECS: f64 = 0.3;
+/// How far before its nominal time an event can already show in the recording.
+const EVENT_EARLY_SECS: f64 = 0.15;
+/// Shortest stretch the pilot's pitch resolves in to well under [`PITCH_TOLERANCE`].
+const MIN_SEGMENT_SECS: f64 = 1.5;
+/// Settled stretches may differ from the first by at most this many dB in level.
+const SEGMENT_LEVEL_DB: f64 = 0.5;
+/// Longest all-channel silence allowed inside a settled stretch, in seconds.
+const SEGMENT_MAX_GAP_SECS: f64 = 0.001;
+
+/// Rate and device renegotiations under a steady pilot: every stretch between events, once the
+/// chain has had its allowed outage plus [`SETTLE_MARGIN_SECS`], must carry the pilot at the right pitch and level with no
+/// gap, on whichever device the daemon is feeding at that time (recording 0 = the primary,
+/// recording 1 = the second device).
+fn stress_checks(r: &mut ScenarioResult, s: &Scenario, stim: &Stimulus, pr: &PlayRec) {
+    let settle = s.expect.max_gap_ms / 1000.0 + SETTLE_MARGIN_SECS;
+    let mut events: Vec<_> = s.events.iter().collect();
+    events.sort_by(|a, b| a.at_secs.total_cmp(&b.at_secs));
+    let mut active = 0usize;
+    let mut starts = vec![(FIRST_SEGMENT_START_SECS, 0usize)];
+    let mut ends = Vec::new();
+    for e in &events {
+        ends.push(e.at_secs);
+        match e.kind {
+            EventKind::SwitchDevice { .. } => active = 1,
+            EventKind::SwitchBack | EventKind::RestartDaemon => active = 0,
+            EventKind::ForceRate { .. } => {}
+        }
+        starts.push((e.at_secs + settle, active));
+    }
+    ends.push(s.body_secs);
+    let body0 = stim.body.start as f64 / f64::from(s.player_rate);
+    // Outage after each event: silence on the recording that carries the audio afterwards.
+    for (k, e) in events.iter().enumerate() {
+        let Some(rec) = pr.recordings.get(starts[k + 1].1) else {
+            continue;
+        };
+        let rate = f64::from(rec.rate);
+        let lo = ((body0 + e.at_secs - EVENT_EARLY_SECS) * rate) as usize;
+        let hi =
+            (((body0 + e.at_secs + settle) * rate) as usize).min(rec.samples.len() / rec.channels);
+        let outage_ms = longest_zero_run(&rec.samples, rec.channels, lo..hi) as f64 * 1000.0 / rate;
+        r.notes.push(format!(
+            "event {k} ({:?} at {:.0} s): outage {outage_ms:.0} ms",
+            e.kind, e.at_secs
+        ));
+        if outage_ms > s.expect.max_gap_ms {
+            r.failures.push(format!(
+                "event {k} ({:?} at {:.0} s): audio gap {outage_ms:.0} ms > {} ms",
+                e.kind, e.at_secs, s.expect.max_gap_ms
+            ));
+        }
+    }
+    let mut first_level: Option<f64> = None;
+    for (k, (&(from, idx), &to)) in starts.iter().zip(&ends).enumerate() {
+        let to = to - SEGMENT_END_MARGIN_SECS;
+        if to - from < MIN_SEGMENT_SECS {
+            r.failures.push(format!(
+                "segment {k}: only {:.2} s settled, need {MIN_SEGMENT_SECS} s (scenario events too close)",
+                to - from
+            ));
+            continue;
+        }
+        let Some(rec) = pr.recordings.get(idx) else {
+            r.failures.push(format!("segment {k}: no recording {idx}"));
+            continue;
+        };
+        let rate = f64::from(rec.rate);
+        let lo = ((body0 + from) * rate) as usize;
+        let hi = (((body0 + to) * rate) as usize).min(rec.samples.len() / rec.channels);
+        if hi <= lo {
+            r.failures
+                .push(format!("segment {k}: recording ends early"));
+            continue;
+        }
+        let x: Vec<f32> = rec.samples[lo * rec.channels..hi * rec.channels]
+            .iter()
+            .step_by(rec.channels)
+            .copied()
+            .collect();
+        let pe = pitch_error(&x, rate);
+        let level = block_rms_db(&x, x.len())[0];
+        let first = *first_level.get_or_insert(level);
+        let gap = longest_zero_run(&x, 1, 0..x.len()) as f64 / rate;
+        r.notes.push(format!(
+            "segment {k} ({from:.1}-{to:.1} s, {} @ {} Hz x{}): pitch error {:.5} %, level {:+.3} dB vs first, longest gap {:.1} ms",
+            rec.node,
+            rec.rate,
+            rec.channels,
+            pe * 100.0,
+            level - first,
+            gap * 1000.0
+        ));
+        if pe > PITCH_TOLERANCE {
+            r.failures.push(format!(
+                "segment {k}: pilot pitch off by {:.4} % after settling",
+                pe * 100.0
+            ));
+        }
+        if !is_flowing(&x, 1, 0..x.len()) {
+            r.failures
+                .push(format!("segment {k}: no audio after settling"));
+        } else if (level - first).abs() > SEGMENT_LEVEL_DB {
+            r.failures.push(format!(
+                "segment {k}: level {:+.2} dB vs the first stretch (limit +-{SEGMENT_LEVEL_DB} dB)",
+                level - first
+            ));
+        }
+        if gap > SEGMENT_MAX_GAP_SECS {
+            r.failures.push(format!(
+                "segment {k}: {:.1} ms gap after settling",
+                gap * 1000.0
+            ));
+        }
+    }
+}
+
 /// Everything between "daemon started" and "daemon stopped" for one scenario.
 fn measure(
     r: &mut ScenarioResult,
@@ -322,7 +457,7 @@ fn measure(
 
     ipc(Command::ResetAndExportChain { path: export_str })?;
     let state = get_state()?;
-    let stim = generate(s.player_rate, s.channels, s.body_secs);
+    let stim = stimulus_for(s);
     let (records, timed) =
         event_actions(s, &stim, daemon, &opts.daemon_bin, &dir.join("daemon.log"));
     let timeout =
@@ -343,7 +478,11 @@ fn measure(
         pr.play_discontinuities + pr.recordings.iter().map(|x| x.discontinuities).sum::<u32>();
 
     let end_state = get_state()?;
-    let device_node = pr.recordings.last().map_or(DEVICE, |x| x.node.as_str());
+    // A stress run ends back on the primary device; other event runs end on the last one.
+    let device_node = match (s.kind, pr.recordings.last()) {
+        (Kind::Stress, _) | (_, None) => DEVICE,
+        (_, Some(x)) => x.node.as_str(),
+    };
     let rates = RateChain {
         hops: vec![
             Hop {
@@ -377,7 +516,23 @@ fn measure(
     }
     r.rate_chain = Some(rates);
 
-    if !s.events.is_empty() {
+    if s.kind == Kind::Stress {
+        stress_checks(r, s, &stim, &pr);
+        if !r.failures.is_empty() {
+            for (i, rec) in pr.recordings.iter().enumerate() {
+                write_wav(
+                    &dir.join(format!("recorded-{i}.wav")),
+                    &rec.samples,
+                    rec.channels,
+                    rec.rate,
+                )?;
+            }
+        }
+        // The daemon must still answer: a wedged control thread would fail here.
+        get_state().context("daemon unresponsive after the rate stress")?;
+    } else if s.kind != Kind::Render {
+        tone_checks(r, s, &stim, &pr.recordings[0]);
+    } else if !s.events.is_empty() {
         event_checks(r, s, &stim, &pr);
     } else if s.player_rate == s.rate && s.graph_rate == s.rate {
         let (mut chain, notes) = load_exported_chain(&export, state.channels, state.sample_rate)?;

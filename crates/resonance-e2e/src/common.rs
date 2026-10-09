@@ -1,14 +1,15 @@
 //! OS-independent scenario helpers shared by every backend runner.
 
 use crate::checks::{
-    PITCH_TOLERANCE, first_signal_frame, gain_db, octave_edges, phat_lag, pitch_error,
-    segment_lags, transfer_bands,
+    PITCH_TOLERANCE, THDN_FRAMES, block_rms_db, coherent_hz, first_signal_frame, gain_db,
+    octave_edges, phat_lag, pitch_error, pitch_error_at, segment_lags, tone_quality,
+    transfer_bands, zero_fill_runs,
 };
 use crate::compare::compare;
 use crate::render::{BLOCK_FRAMES, load_exported_chain, render};
 use crate::report::ScenarioResult;
-use crate::scenario::{Scenario, Tier};
-use crate::stimulus::{Stimulus, generate};
+use crate::scenario::{Kind, Scenario, Tier};
+use crate::stimulus::{PILOT_HZ, Stimulus, generate, tone};
 use anyhow::{Context, Result, bail};
 use resonance_ipc::transport::SyncClient;
 use resonance_ipc::{Command, DaemonState, Response};
@@ -252,6 +253,171 @@ pub fn transfer_checks(
     Ok(lag)
 }
 
+/// The stimulus a scenario plays: the render stimulus, or a steady tone for the tone kinds.
+#[must_use]
+pub fn stimulus_for(s: &Scenario) -> Stimulus {
+    match s.kind {
+        Kind::Render => generate(s.player_rate, s.channels, s.body_secs),
+        Kind::Thdn => tone(
+            s.player_rate,
+            s.channels,
+            s.body_secs,
+            thdn_hz(s, f64::from(s.rate)),
+        ),
+        Kind::Soak | Kind::Stress => tone(s.player_rate, s.channels, s.body_secs, PILOT_HZ),
+    }
+}
+
+/// The bin-centred frequency a THD+N scenario plays and measures at the recording `rate`.
+fn thdn_hz(s: &Scenario, rate: f64) -> f64 {
+    coherent_hz(rate, s.tone_hz.unwrap_or(PILOT_HZ))
+}
+
+/// Soak windows: long enough that the pilot's pitch resolves far below [`PITCH_TOLERANCE`].
+pub const SOAK_WINDOW_SECS: f64 = 10.0;
+/// The tone's level may not move between windows by more than this (dB). A steady chain holds
+/// it to a few thousandths.
+pub const LEVEL_TOLERANCE_DB: f64 = 0.05;
+/// A 20 ms block whose level differs from the run's median by more than this (dB) is a dropout
+/// or a glitch (a 1 ms hole in a 20 ms block already reads -0.4 dB).
+pub const BLOCK_DIP_DB: f64 = 0.25;
+const BLOCK_SECS: f64 = 0.02;
+/// Frames of all-channel digital silence inside a tone that count as a dropout.
+const DROPOUT_FRAMES: usize = 16;
+
+/// Judge one channel of a steady-tone recording in [`SOAK_WINDOW_SECS`] windows: pitch drift,
+/// level change, short dropouts. `x` is the steady part only.
+pub fn soak_channel(r: &mut ScenarioResult, label: &str, x: &[f32], rate: f64) {
+    let win = (SOAK_WINDOW_SECS * rate) as usize;
+    let windows: Vec<&[f32]> = x.chunks_exact(win).collect();
+    if windows.is_empty() {
+        r.failures
+            .push(format!("{label}: recording shorter than one soak window"));
+        return;
+    }
+    let pitch: Vec<f64> = windows.iter().map(|w| pitch_error(w, rate)).collect();
+    let level: Vec<f64> = windows
+        .iter()
+        .map(|w| block_rms_db(w, w.len())[0])
+        .collect();
+    let worst_pitch = pitch.iter().copied().fold(0.0, f64::max);
+    let span = level.iter().copied().fold(f64::MIN, f64::max)
+        - level.iter().copied().fold(f64::MAX, f64::min);
+    let mut blocks = block_rms_db(x, (BLOCK_SECS * rate) as usize);
+    blocks.sort_by(f64::total_cmp);
+    let median = blocks[blocks.len() / 2];
+    let dips = blocks
+        .iter()
+        .filter(|&&b| (b - median).abs() > BLOCK_DIP_DB)
+        .count();
+    let worst_block = blocks
+        .iter()
+        .map(|&b| (b - median).abs())
+        .fold(0.0, f64::max);
+    let holes = zero_fill_runs(x, 1, DROPOUT_FRAMES);
+    r.notes.push(format!(
+        "soak {label}: {} windows of {SOAK_WINDOW_SECS} s, worst pitch error {:.5} %, level span {span:.4} dB, \
+         worst 20 ms block {worst_block:.3} dB from the median, {dips} dipped blocks, {holes} zero-filled gaps",
+        windows.len(),
+        worst_pitch * 100.0
+    ));
+    if let Some((i, p)) = pitch
+        .iter()
+        .enumerate()
+        .find(|(_, p)| **p > PITCH_TOLERANCE)
+    {
+        r.failures.push(format!(
+            "{label}: pilot pitch drifted by {:.4} % in window {i} (limit {:.4} %)",
+            p * 100.0,
+            PITCH_TOLERANCE * 100.0
+        ));
+    }
+    if span > LEVEL_TOLERANCE_DB {
+        r.failures.push(format!(
+            "{label}: level moved by {span:.3} dB across windows (limit {LEVEL_TOLERANCE_DB} dB)"
+        ));
+    }
+    if dips > 0 || holes > 0 {
+        r.failures.push(format!(
+            "{label}: {holes} zero-filled gaps and {dips} dipped 20 ms blocks (worst {worst_block:.2} dB): dropouts"
+        ));
+    }
+}
+
+fn channel_of(x: &[f32], channels: usize, c: usize) -> Vec<f32> {
+    x.iter().skip(c).step_by(channels).copied().collect()
+}
+
+/// Recording frames that hold the steady tone: one second in from each end of the body.
+fn steady_part(stim: &Stimulus, rec: &Recording, player_rate: u32) -> (usize, usize) {
+    let to_rec =
+        |frame: usize| (frame as f64 * f64::from(rec.rate) / f64::from(player_rate)) as usize;
+    let margin = rec.rate as usize;
+    let a = to_rec(stim.body.start) + margin;
+    let b = to_rec(stim.body.end)
+        .saturating_sub(margin)
+        .min(rec.samples.len() / rec.channels);
+    (a, b.max(a))
+}
+
+/// Steady-tone judgement for [`Kind::Soak`] and [`Kind::Thdn`], per channel. The measured
+/// numbers go into the result's notes either way.
+pub fn tone_checks(r: &mut ScenarioResult, s: &Scenario, stim: &Stimulus, rec: &Recording) {
+    let (a, b) = steady_part(stim, rec, s.player_rate);
+    let rate = f64::from(rec.rate);
+    let steady = &rec.samples[a * rec.channels..b * rec.channels];
+    for c in 0..rec.channels {
+        let label = format!("ch{c}");
+        let x = channel_of(steady, rec.channels, c);
+        match s.kind {
+            Kind::Soak => soak_channel(r, &label, &x, rate),
+            Kind::Thdn => thdn_channel(r, s, &label, &x, rate),
+            Kind::Render | Kind::Stress => {}
+        }
+    }
+}
+
+fn thdn_channel(r: &mut ScenarioResult, s: &Scenario, label: &str, x: &[f32], rate: f64) {
+    if x.len() < THDN_FRAMES {
+        r.failures.push(format!(
+            "{label}: only {} steady frames, need {THDN_FRAMES}",
+            x.len()
+        ));
+        return;
+    }
+    let hz = thdn_hz(s, rate);
+    let x = &x[..THDN_FRAMES];
+    let q = tone_quality(x, rate, hz);
+    let pe = pitch_error_at(x, rate, hz);
+    r.notes.push(format!(
+        "thd+n {label}: {:.1} dB, thd {:.1} dB, snr {:.1} dB at {hz:.3} Hz (pitch error {:.5} %)",
+        q.thd_n_db,
+        q.thd_db,
+        q.snr_db,
+        pe * 100.0
+    ));
+    let (max_thdn, min_snr) = (
+        s.expect.max_thdn_db.unwrap_or(f64::INFINITY),
+        s.expect.min_snr_db.unwrap_or(f64::NEG_INFINITY),
+    );
+    if q.thd_n_db > max_thdn {
+        r.failures.push(format!(
+            "{label}: THD+N {:.1} dB above the {max_thdn} dB limit",
+            q.thd_n_db
+        ));
+    }
+    if q.snr_db < min_snr {
+        r.failures.push(format!(
+            "{label}: SNR {:.1} dB below the {min_snr} dB limit",
+            q.snr_db
+        ));
+    }
+    if pe > PITCH_TOLERANCE {
+        r.failures
+            .push(format!("{label}: tone pitch off by {:.4} %", pe * 100.0));
+    }
+}
+
 /// A correlation peak this many times the median means the lag is real.
 pub const MIN_ALIGNMENT_QUALITY: f64 = 8.0;
 
@@ -411,5 +577,41 @@ mod tests {
         scale_pow2(&mut x, 0);
         let back: Vec<f32> = x.iter().map(|v| v * 8.0).collect();
         assert_eq!(back, orig);
+    }
+
+    fn pilot(rate: u32, secs: f64, hz: f64) -> Vec<f32> {
+        tone(rate, 1, secs, hz).samples[(0.5 * f64::from(rate)) as usize..]
+            [..(secs * f64::from(rate)) as usize]
+            .to_vec()
+    }
+
+    #[test]
+    fn a_clean_tone_passes_the_soak_and_a_hole_fails_it() {
+        let mut r = ScenarioResult::new("t", "linux");
+        let mut x = pilot(48_000, 30.0, PILOT_HZ);
+        soak_channel(&mut r, "ch0", &x, 48_000.0);
+        assert!(r.failures.is_empty(), "{:?}", r.failures);
+        for v in &mut x[700_000..700_100] {
+            *v = 0.0;
+        }
+        soak_channel(&mut r, "ch0", &x, 48_000.0);
+        assert!(
+            r.failures.iter().any(|f| f.contains("dropouts")),
+            "{:?}",
+            r.failures
+        );
+    }
+
+    #[test]
+    fn a_slow_clock_fails_the_soak_on_pitch() {
+        let mut r = ScenarioResult::new("t", "linux");
+        // 0.02 % slow: twice the tolerance.
+        let x = pilot(48_000, 20.0, PILOT_HZ * 0.9998);
+        soak_channel(&mut r, "ch0", &x, 48_000.0);
+        assert!(
+            r.failures.iter().any(|f| f.contains("pitch")),
+            "{:?}",
+            r.failures
+        );
     }
 }

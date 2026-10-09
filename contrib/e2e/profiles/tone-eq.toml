@@ -1,0 +1,31 @@
+# Plain linear bands (no dynamic band), so a steady tone stays steady. The pilot sits on a +3 dB
+# peak: a level or pitch change anywhere in the chain shows.
+preamp_db = -3.0
+
+[[bands]]
+band_type = "LowShelf"
+freq = 105.0
+gain_db = 4.0
+q = 0.7
+enabled = true
+
+[[bands]]
+band_type = "Peaking"
+freq = 1000.0
+gain_db = 3.0
+q = 1.41
+enabled = true
+
+[[bands]]
+band_type = "Peaking"
+freq = 3000.0
+gain_db = -4.0
+q = 2.0
+enabled = true
+
+[[bands]]
+band_type = "HighShelf"
+freq = 8000.0
+gain_db = -3.0
+q = 0.7
+enabled = true

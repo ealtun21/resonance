@@ -78,6 +78,29 @@ pub fn generate(rate: u32, channels: usize, body_secs: f64) -> Stimulus {
     }
 }
 
+/// A steady sine at `hz` (−12 dBFS, every channel) for `body_secs`, framed like [`generate`].
+/// Phase is computed from the frame index, so it stays exact over a ten-minute run.
+#[must_use]
+pub fn tone(rate: u32, channels: usize, body_secs: f64, hz: f64) -> Stimulus {
+    let r = f64::from(rate);
+    let lead = (LEAD_SECS * r) as usize;
+    let body = (body_secs * r) as usize;
+    let tail = (TAIL_SECS * r) as usize;
+    let mut samples = vec![0.0f32; (lead + body + tail) * channels];
+    for (i, frame) in samples[lead * channels..(lead + body) * channels]
+        .chunks_exact_mut(channels)
+        .enumerate()
+    {
+        frame.fill((0.25 * (2.0 * PI * hz * (i as f64 / r)).sin()) as f32);
+    }
+    Stimulus {
+        rate,
+        channels,
+        samples,
+        body: lead..lead + body,
+    }
+}
+
 pub const CHIRPS: usize = 5;
 
 /// [`CHIRPS`] identical 50 ms linear chirps (200 Hz → 8 kHz, −12 dBFS, all
