@@ -92,6 +92,10 @@ struct SinkNode {
     /// Registry id of the owning `Device` global (`device.id` on the node) —
     /// the key into [`GraphState::route_reads`].
     device_id: u32,
+    /// The node's card profile device: which of the device's routes is this
+    /// sink's (a card can carry several sinks, e.g. HDMI1-3 + Headphones on
+    /// SOF/UCM laptops). `None` → take any output route of the device.
+    profile_device: Option<i32>,
     /// Active output route's `index` + `device` fields, latched from read-back
     /// (`-1` until known); both required to write the `Route` param back.
     route_index: i32,
@@ -147,7 +151,7 @@ struct GraphState {
     /// output route here, keyed by the device global id (= a sink node's
     /// `device.id`). The timer folds it into `sink_nodes`. A separate `Arc` (not
     /// `gs`) so the callbacks never re-lock the graph mutex from the main loop.
-    route_reads: Arc<Mutex<HashMap<u32, RouteRead>>>,
+    route_reads: Arc<Mutex<HashMap<(u32, i32), RouteRead>>>,
     /// Backend → IPC: the live output-sink volume list (control-plane).
     sinks_vol_tx: tokio::sync::mpsc::UnboundedSender<Vec<SinkVolume>>,
     /// IPC → backend: per-sink volume/mute requests, drained in the timer.
@@ -831,12 +835,21 @@ fn on_global(
                     .get("device.id")
                     .and_then(|s| s.parse::<u32>().ok())
                     .unwrap_or(u32::MAX);
+                // `card.profile.device` isn't in the registry global's props, but
+                // ACP's `object.path` (`alsa:acp:<card>:<profile-device>:playback`)
+                // carries it. Other backends (bluez) have one route per device.
+                let profile_device = props
+                    .get("object.path")
+                    .filter(|p| p.starts_with("alsa:acp:"))
+                    .and_then(|p| p.rsplit(':').nth(1))
+                    .and_then(|s| s.parse::<i32>().ok());
                 g.sink_nodes.insert(
                     obj.id,
                     SinkNode {
                         name,
                         description,
                         device_id,
+                        profile_device,
                         route_index: -1,
                         route_device: -1,
                         channels: 2,
@@ -988,7 +1001,7 @@ fn on_global(
                 .param(move |_seq, _ty, _idx, _next, pod| {
                     if let Some(pod) = pod {
                         if let Some(r) = parse_route(pod) {
-                            inbox.lock().unwrap().insert(dev_id, r);
+                            inbox.lock().unwrap().insert((dev_id, r.device), r);
                         }
                     }
                 })
@@ -1023,7 +1036,7 @@ fn on_global_remove(g: &mut GraphState, id: u32) {
     // A bound `Device` global went away — release its proxy + listener and its
     // route read-back (keyed by the device global id).
     if g.devices.remove(&id).is_some() {
-        g.route_reads.lock().unwrap().remove(&id);
+        g.route_reads.lock().unwrap().retain(|(d, _), _| *d != id);
     }
     if was_real_sink {
         reroute(g);
@@ -1409,7 +1422,7 @@ fn apply_sink_volumes(g: &mut GraphState) {
     // an empty inbox means "nothing new". The route index/device is latched into
     // the `SinkNode` below, so draining doesn't lose it — and crucially it stops
     // a stale cached read from reverting our own optimistic set on the next tick.
-    let updates: Vec<(u32, RouteRead)> = {
+    let updates: Vec<((u32, i32), RouteRead)> = {
         let mut map = g.route_reads.lock().unwrap();
         if map.is_empty() {
             return;
@@ -1417,8 +1430,12 @@ fn apply_sink_volumes(g: &mut GraphState) {
         map.drain().collect()
     };
     let mut changed = false;
-    for (device_id, r) in updates {
-        if let Some(sink) = g.sink_nodes.values_mut().find(|s| s.device_id == device_id) {
+    for ((device_id, card_device), r) in updates {
+        if let Some(sink) = g
+            .sink_nodes
+            .values_mut()
+            .find(|s| s.device_id == device_id && s.profile_device.is_none_or(|p| p == card_device))
+        {
             sink.route_index = r.index;
             sink.route_device = r.device;
             sink.channels = r.channels;
