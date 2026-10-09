@@ -803,7 +803,8 @@ fn num_field_impl(
                 .margin(egui::Margin::symmetric(6, 2))
                 .horizontal_align(egui::Align::Center),
         );
-        out.request_focus();
+        // Focus is requested once, on entry (below). Re-requesting every frame
+        // resets egui's focus-lock filter, so arrows/Tab/Esc leak out of the field.
         if out.lost_focus() {
             if let Ok(v) = buf.trim().parse::<f64>() {
                 let nv = v.clamp(*range.start(), *range.end());
@@ -848,6 +849,7 @@ fn num_field_impl(
         }
         if resp.double_clicked() {
             ui.data_mut(|d| d.insert_temp(edit_key, format!("{:.*}", decimals, *value)));
+            ui.memory_mut(|m| m.request_focus(id));
         }
     }
     changed
