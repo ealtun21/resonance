@@ -3,6 +3,10 @@ id = "fx-fidelity"
 tier = "full"
 rates = [48000]
 channels = [2]
+# The harmonic exciter is nonlinear: a little residual against the render moves its per-octave
+# SNR to 39-49 dB on macOS (linear chains measure 57 dB and up).
+[scenario.expect]
+transfer_min_snr_db = 30.0
 [scenario.profile]
 effects = { fidelity = 0.7 }
 
@@ -59,6 +63,7 @@ compare = { tolerance_dbfs = -80 }
 # macOS judges by transfer function; Dynamic Boost's limiter makes the path nonlinear, so
 # a small input difference moves the per-octave gain more than for linear chains.
 transfer_tolerance_db = 1.0
+transfer_min_snr_db = 15.0
 [scenario.profile]
 dither_bits = 16
 effects = { fidelity = 0.5, ambience = 0.5, surround = 0.5, dynamic_boost = 0.5, bass = 0.5, crossfeed = 0.5 }

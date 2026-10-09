@@ -20,12 +20,18 @@ The result goes to a *different* BlackHole so the unprocessed audio is never in 
 
 - Harness: playing into a BlackHole and recording the same one is bit-exact (`examples/loopback_check.rs`,
   also run as the Resonance-off reference of every format).
-- Through the Process Tap the recording is **not** bit-equal to the offline render: the tap's aggregate
-  drift-compensates (resamples). Measured against the render: flat within about 0.1 dB from 50 Hz to 16 kHz,
-  coherence about 0.985, a roll-off above 20 kHz. So macOS is judged by per-octave transfer gain (±0.3 dB,
-  GCC-PHAT aligned per 0.5 s segment), coherence, and the pilot's pitch.
-- The daemon drains its ring to its slack and zero-fills on underrun, so scheduling jitter shows as dropouts;
-  blocks holding one are excluded from the gain estimate and counted, and a failing run with dropouts is rerun
+- Through the Process Tap the recording is **not** bit-equal to the offline render, and cannot be: the tap's
+  leg of the aggregate device contains a sample-rate converter (a low-pass at about 0.85 of Nyquist, no
+  drift or clock option turns it off) while a sub-device of the same aggregate is bit-exact. Evidence and
+  the options tried: spec section 14.4; `tapcap.m` is the tool (build it with
+  `clang -fobjc-arc -framework Foundation -framework CoreAudio tapcap.m -o tapcap`, sign it into the
+  `Resonance.app` bundle like the daemon, run it from the GUI session with `SECS=n OUT=file`, and play
+  a noise stimulus from another process while it runs).
+- So macOS is judged against the render per octave on every channel: transfer gain within 0.03 dB and
+  in-band SNR of at least 50 dB (measured: below 0.001 dB and 57-86 dB), plus the pilot's pitch. Octaves stop at
+  0.33 of the sample rate, below the converter's roll-off.
+- The VM's audio threads drop whole 512-frame buffers now and then (zero blocks in the recording; the daemon's ring
+  reported no underrun, spec section 14.4); blocks holding one are excluded from the gain estimate and counted, and a failing run with dropouts is rerun
   once (a passing rerun is a flake).
 - Latency = the daemon path's floor over five fresh daemon starts minus the bare BlackHole loopback, plus the
   chain's own delay from the render. The floor is a property of the ring (0-85 ms of slack by callback phase),

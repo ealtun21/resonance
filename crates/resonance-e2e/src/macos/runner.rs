@@ -22,9 +22,11 @@ use std::time::Duration;
 
 const OS: &str = "macos";
 
-/// Per-octave transfer-gain tolerance vs the render. The tap's resampler measured -0.09 to
-/// -0.14 dB flat from 50 Hz to 16 kHz, so ±0.3 dB leaves room without hiding a real change.
-const MAC_BAND_TOLERANCE_DB: f64 = 0.3;
+/// Per-octave limits against the render: transfer gain within ±0.03 dB and in-band SNR of at
+/// least 50 dB. The full tier measured |gain| below 0.001 dB and SNR of 57 to 86 dB for every
+/// linear chain on every channel and rate (the tap's resampler is the whole error, spec section
+/// 14.4); the nonlinear Fidelity effect reaches 0.012 dB and 39 dB, which its scenario relaxes.
+const MAC_BAND_LIMITS_DB: (f64, f64) = (0.03, 50.0);
 
 /// Share of 4096-frame blocks that may hold a zero-filled underrun before the run fails.
 /// The daemon drains its ring to the minimum, so ordinary scheduling jitter in this VM
@@ -238,16 +240,16 @@ fn measure(
             "daemon output changed during the run: {:?}",
             st.active_output
         );
-        // The Process Tap's aggregate drift-compensates, i.e. resamples: the recording is the
-        // render to within a fraction of a dB, never bit-equal (spec section 14.2, MAC-E1).
-        // So judge pitch and per-octave gain against the render, as for any resampled path.
+        // The tap's leg of the aggregate contains a resampler that no option disables, so the
+        // recording is never bit-equal to the render (spec section 14.4, MAC-E1): judge per-octave
+        // gain and in-band SNR against the render, on every channel.
         let transfer = transfer_checks(
             r,
             s,
             &stim,
             &expected,
             &rec,
-            MAC_BAND_TOLERANCE_DB,
+            MAC_BAND_LIMITS_DB,
             MAC_MAX_DROPOUT_FRACTION,
         );
         if transfer.is_err() || !r.failures.is_empty() {
