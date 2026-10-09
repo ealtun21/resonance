@@ -63,13 +63,32 @@ pub fn play_and_record(
         "playback device is {play_width} ch, scenario wants exactly {channels}"
     );
     let (rec_cfg, rec_width) = f32_config(record, channels, rate, record_input)?;
-    let rec = Arc::new(Mutex::new(Vec::<f32>::new()));
+    // The capture callback must never allocate: growing a hundreds-of-MiB Vec there (the
+    // realloc copy, or the page faults of a fresh 2x block) stalls the loopback reader for
+    // tens of ms, the engine's loopback buffer overruns and a few ms of audio are lost (a
+    // "slip": spec section 16). Reserve the whole recording, committed, before it starts.
+    let n = (samples.len() / channels + tail_frames + 2 * rate as usize) * rec_width;
+    let mut buf = vec![0.0f32; n];
+    buf.fill(1.0); // touch every page now, not in the callback
+    buf.clear();
+    let rec = Arc::new(Mutex::new(buf));
     let errors = Arc::new(AtomicUsize::new(0));
     let (rec2, err2) = (Arc::clone(&rec), Arc::clone(&errors));
+    let worst = Arc::new(Mutex::new((Duration::ZERO, 0usize)));
+    let worst2 = Arc::clone(&worst);
     let rec_stream = record
         .build_input_stream(
             &rec_cfg,
-            move |d: &[f32], _| rec2.lock().expect("rec lock").extend_from_slice(d),
+            move |d: &[f32], _| {
+                let t = Instant::now();
+                let mut v = rec2.lock().expect("rec lock");
+                let before = v.capacity();
+                v.extend_from_slice(d);
+                let grew = usize::from(v.capacity() != before);
+                let mut w = worst2.lock().expect("worst lock");
+                w.0 = w.0.max(t.elapsed());
+                w.1 += grew;
+            },
             move |e| {
                 eprintln!("record stream error: {e}");
                 err2.fetch_add(1, Ordering::Relaxed);
@@ -119,6 +138,8 @@ pub fn play_and_record(
     std::thread::sleep(Duration::from_millis(300));
     drop(play_stream);
     drop(rec_stream);
+    let (slowest, grows) = *worst.lock().expect("worst lock");
+    eprintln!("record: slowest capture callback {slowest:?}, {grows} buffer growths");
     let wide = std::mem::take(&mut *rec.lock().expect("rec lock"));
     let samples = if rec_width == channels {
         wide

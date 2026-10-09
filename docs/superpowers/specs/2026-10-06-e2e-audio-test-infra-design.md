@@ -563,3 +563,17 @@ Findings while building it: `reset_devices` created the second device once per `
 scenario with two switches got two nodes of the same name and the audio went to the other one (fixed:
 one device however many events). A daemon switch from a mono device back to stereo takes up to ~1.6 s
 (reconnect backoff), longer than the 500 ms default gap; `bt-rate-stress` states `max_gap_ms = 2500`.
+
+## 16. Windows long-run slip: the recorder, not the product (2026-10-09)
+
+`long-full-eq@96000x8` (60 s, 8 ch) failed deterministically after the soaks: the recording was bit-exact
+against the render, then at one fixed frame lost 768 frames (8 ms) and was bit-exact again, shifted.
+The frame is 3,932,160 = 3840 * 2^10 stimulus-plus-pre-roll frames: exactly where the recorder's
+`Vec<f32>`, which doubles from the first callback's size (3840 samples) and grows inside the WASAPI
+loopback capture callback, outgrows its 120 MiB block and reallocates to 240 MiB. That callback stalled for
+up to 28 ms (instrumented: 1-3 ms otherwise); the engine's loopback buffer overran and dropped a few
+ms. Whether the realloc is slow depends on guest memory state after the soaks, hence "passes alone".
+Fix: the recording buffer is reserved and page-committed before the stream starts, so the callback never
+allocates. A recording that still slips is now reported as `slip of N frames (skipped) at frame F`
+(re-aligning the last 16384 frames of the window), the slowest capture callback is logged, and a failing
+Windows scenario also saves `apo.log`.

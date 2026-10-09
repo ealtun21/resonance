@@ -190,10 +190,14 @@ fn measure(
         r.discontinuities = rec.discontinuities;
         // Let audiodg flush its log line for the last buffers.
         std::thread::sleep(Duration::from_millis(500));
-        if let Err(e) = env::verify_apo_on(&env::apo_log_since(mark), s.channels, s.rate) {
+        let apo_log = env::apo_log_since(mark);
+        if let Err(e) = env::verify_apo_on(&apo_log, s.channels, s.rate) {
             r.failures.push(format!("{e:#}"));
         }
         exact_checks(r, s, &stim, &rec, &expected, dir)?;
+        if !r.failures.is_empty() {
+            std::fs::write(dir.join("apo.log"), &apo_log)?;
+        }
         if s.measures_latency() {
             let (name, slot) = endpoint_attach(which);
             let off = if let Some(&v) = lat.off.get(&(s.rate, s.channels)) {
