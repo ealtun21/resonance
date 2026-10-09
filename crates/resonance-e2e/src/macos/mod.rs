@@ -5,7 +5,7 @@
 //! output), whose input the agent records. A different device for the result
 //! keeps the unprocessed audio out of the recording.
 
-use crate::scenario::Scenario;
+use crate::scenario::{Kind, Scenario};
 
 pub mod env;
 #[cfg(any(target_os = "macos", feature = "cross-check"))]
@@ -37,7 +37,11 @@ pub fn in_device(channels: usize) -> Option<&'static str> {
 /// Why this scenario cannot run here, if it cannot.
 #[must_use]
 pub fn ineligible(s: &Scenario) -> Option<&'static str> {
-    if !s.events.is_empty() {
+    if s.kind != Kind::Render {
+        Some(
+            "steady-tone soak / THD+N need a gap-free, bit-transparent tap: the VM underruns the daemon (MAC-E2) and the tap's aggregate resamples (MAC-E1), so no floor can be set yet",
+        )
+    } else if !s.events.is_empty() {
         Some("mid-stream events need a steerable audio graph (Linux only)")
     } else if s.player_rate != s.rate || s.graph_rate != s.rate {
         Some("rate conversion is CoreAudio's, not observable per hop")

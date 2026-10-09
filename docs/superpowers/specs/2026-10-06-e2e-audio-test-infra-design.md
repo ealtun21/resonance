@@ -451,3 +451,63 @@ The first two attempts found: the unattended install powers the VM off at the en
 rebooting (xtask now restarts a guest that is not running while it waits for ssh), and the OpenSSH
 feature-on-demand capability does not install on this image, so sshd never started (the answer file now runs
 `sshd.ps1`, which installs the Win32-OpenSSH release; validated on an overlay of the working image first).
+
+## 15. Steady-tone scenarios: soak, THD+N and SNR, rate stress (2026-10-09)
+
+Pitch and quality regressions that a bit-exact compare cannot see (a rate renegotiation that leaves the
+pitch wrong, slow drift, a resampler that is merely mediocre) are caught by scenarios that play a pure
+tone and judge the recording on its own. `kind` in the scenario file selects them (`render` is the
+default: everything in sections 7-9); they live in `contrib/e2e/scenarios/tone.toml`, have no latency
+baseline, and the analysis is in `checks.rs` / `common.rs` (shared by every OS).
+
+| kind | stimulus | judged |
+|---|---|---|
+| `soak` | 600 s of the 997 Hz pilot at -12 dBFS (`full` only) | per 10 s window: pilot pitch error <= `PITCH_TOLERANCE` (0.01 %); level span across windows <= 0.05 dB; per 20 ms block: level within 0.25 dB of the run's median; no run of >= 16 all-zero frames |
+| `thdn` | 8 s tone snapped to an FFT bin (`tone_hz`, default 997 Hz; 65536-frame rectangular window, so no leakage), steady middle of the recording | THD+N (everything but DC and the fundamental, harmonics 2-10 included) and SNR (everything that is not a harmonic) per channel against `expect.max_thdn_db` / `expect.min_snr_db`; pitch within tolerance |
+| `stress` | the pilot through `events` (`force_rate`, `switch_device`, `switch_back`) | after each event, outage (longest zero run within `max_gap_ms` + 0.5 s) <= `max_gap_ms`; then each settled stretch, on whichever device carries the audio: pitch, level within 0.5 dB of the first stretch, no gap over 1 ms; the daemon still answers IPC at the end |
+
+Scenarios: `soak-flat`, `soak-eq` (four linear bands, `profiles/tone-eq.toml`); `thdn-flat` (also in the
+quick tier: about 12 s), `thdn-eq`, `thdn-content-48k-device-44k1` and `thdn-headset-16k-mono` (48 kHz
+content converted by PipeWire's stream adapter), plus `thdn-hf-*` variants of those two with the tone at
+0.4 x the lower rate (17.6 kHz and 6.4 kHz) where imaging and aliasing show; `bt-rate-stress`: 66 s, graph
+rate 48 -> 44.1 -> 48 -> 44.1 -> 48 kHz, two round trips to a 16 kHz mono device, then 44.1 -> 48 kHz
+again, one event every 6 s.
+
+**Measured (2026-10-09, Linux container, and Windows APO on the HDA endpoint) and limits.**
+
+| scenario | measured THD+N / SNR | limit |
+|---|---|---|
+| `thdn-flat`, Linux and Windows | -153.7 dB / 153.8 dB (the f32 quantisation floor of the tone) | <= -140 dB / >= 140 dB |
+| `thdn-eq` (4 bands), Linux and Windows | -152.5 dB / 152.5 dB | <= -140 dB / >= 140 dB |
+| `thdn-content-48k-device-44k1` | -144.2 dB / 144.2 dB | <= -110 dB / >= 110 dB |
+| `thdn-hf-content-48k-device-44k1` (17.6 kHz) | -143.6 dB / 143.6 dB | <= -110 dB / >= 110 dB |
+| `thdn-headset-16k-mono` | -146.2 dB / 146.5 dB | <= -110 dB / >= 110 dB |
+| `thdn-hf-headset-16k-mono` (6.4 kHz) | -144.6 dB / 144.6 dB | <= -110 dB / >= 110 dB |
+
+The flat and EQ paths are bit-exact to the offline render, so THD+N is the render's, i.e. the stimulus's
+own: the limit sits 13 dB above it. The resampled paths are not bit-exact; PipeWire's resampler measures
+-144 dB, and the limit (-110 dB) is far below what a linear or low-order interpolator gives (-60 to -80 dB)
+yet well above run-to-run noise. Soak: both runs 59 windows per channel, worst pitch error below
+0.00001 %, level span 0.0000 dB, worst 20 ms block 0.013 dB from the median (limit 0.25 dB), no gaps. On
+Windows (APO in audiodg, HDA endpoint) the same two soaks pass with worst pitch error 0.00094 % (flat) and
+0.00052 % (EQ), against the 0.01 % tolerance: the VM's loopback clock is not the player's.
+Rate stress: pitch error 0.0001-0.0005 % in every settled stretch, level within 0.001 dB, outages of 11-43 ms
+for a graph-rate flip, 43-64 ms for returning to the stereo device, 0.43-1.0 s going to the mono device
+(the daemon's reconnect after a channel-count change).
+
+What this does not cover: the player and the null sink share the graph clock, so slow drift between a
+real device clock and the player (what a Bluetooth link adds) cannot appear on Linux; the soak proves that
+Resonance itself adds no drift, dropouts or level change over ten minutes. On Windows the same holds for
+the VM's HDA endpoint. The rate stress changes the rate the daemon follows and its channel count; it cannot
+reproduce a codec's own clock.
+
+Platforms: `soak` and `thdn` run on Linux and on Windows when the format is a VM endpoint's (stereo 48 kHz
+HDA; resampled variants are "not applicable" there as for every rate-conversion scenario); `stress` is
+Linux only (needs a steerable graph). macOS lists all three as not applicable: its tap's aggregate resamples
+(MAC-E1) and the daemon underruns under VM scheduling (MAC-E2), so no floor could be set honestly; revisit
+once those are fixed.
+
+Findings while building it: `reset_devices` created the second device once per `switch_device` event, so a
+scenario with two switches got two nodes of the same name and the audio went to the other one (fixed:
+one device however many events). A daemon switch from a mono device back to stereo takes up to ~1.6 s
+(reconnect backoff), longer than the 500 ms default gap; `bt-rate-stress` states `max_gap_ms = 2500`.

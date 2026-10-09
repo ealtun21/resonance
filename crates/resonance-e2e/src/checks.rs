@@ -12,7 +12,75 @@ pub const BAND_TOLERANCE_DB: f64 = 0.1;
 /// Relative pilot-frequency error of a mono recording at `rate`.
 #[must_use]
 pub fn pitch_error(samples_ch0: &[f32], rate: f64) -> f64 {
-    ((fft_peak_hz(samples_ch0, rate, PILOT_HZ) - PILOT_HZ) / PILOT_HZ).abs()
+    pitch_error_at(samples_ch0, rate, PILOT_HZ)
+}
+
+/// Relative error of the tone found near `hz` in a mono recording at `rate`.
+#[must_use]
+pub fn pitch_error_at(samples_ch0: &[f32], rate: f64, hz: f64) -> f64 {
+    ((fft_peak_hz(samples_ch0, rate, hz) - hz) / hz).abs()
+}
+
+/// Length of the THD+N analysis window (frames at the recording rate).
+pub const THDN_FRAMES: usize = 65_536;
+
+/// The frequency nearest `near_hz` that lands exactly on a bin of a [`THDN_FRAMES`] FFT at
+/// `rate`, so a rectangular window has no leakage and the floor is the signal's own.
+#[must_use]
+pub fn coherent_hz(rate: f64, near_hz: f64) -> f64 {
+    (near_hz * THDN_FRAMES as f64 / rate).round() * rate / THDN_FRAMES as f64
+}
+
+/// Quality of a steady tone at a bin-centred `hz` (see [`coherent_hz`]); `x.len()` must be
+/// [`THDN_FRAMES`]. All values are relative to the fundamental's power.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ToneQuality {
+    /// Harmonics 2..=10 plus everything else but DC, dB.
+    pub thd_n_db: f64,
+    /// Harmonics 2..=10 only, dB.
+    pub thd_db: f64,
+    /// Fundamental over everything that is not a harmonic, dB (positive = good).
+    pub snr_db: f64,
+}
+
+#[must_use]
+pub fn tone_quality(x: &[f32], rate: f64, hz: f64) -> ToneQuality {
+    let n = x.len();
+    let mut buf: Vec<Complex<f64>> = x.iter().map(|&v| Complex::new(f64::from(v), 0.0)).collect();
+    FftPlanner::new().plan_fft_forward(n).process(&mut buf);
+    let half = n / 2;
+    let fund = (hz / rate * n as f64).round() as usize;
+    let near = |k: usize, c: usize| k.abs_diff(c) <= 1;
+    let (mut sig, mut harm, mut noise) = (0.0f64, 0.0f64, 0.0f64);
+    for (k, c) in buf.iter().enumerate().take(half).skip(1) {
+        let p = c.norm_sqr();
+        if near(k, fund) {
+            sig += p;
+        } else if (2..=10).any(|h| near(k, h * fund)) {
+            harm += p;
+        } else {
+            noise += p;
+        }
+    }
+    let db = |num: f64, den: f64| {
+        10.0 * (num.max(f64::MIN_POSITIVE) / den.max(f64::MIN_POSITIVE)).log10()
+    };
+    ToneQuality {
+        thd_n_db: db(harm + noise, sig),
+        thd_db: db(harm, sig),
+        snr_db: db(sig, noise),
+    }
+}
+
+/// RMS of consecutive `block`-frame blocks of a mono signal, in dBFS.
+#[must_use]
+pub fn block_rms_db(x: &[f32], block: usize) -> Vec<f64> {
+    x.chunks_exact(block)
+        .map(|b| {
+            let ms = b.iter().map(|&v| f64::from(v) * f64::from(v)).sum::<f64>() / block as f64;
+            10.0 * ms.max(1e-30).log10()
+        })
+        .collect()
 }
 
 /// Octave band edges from 125 Hz up to `max_hz` (below 125 Hz a 3 s window
@@ -424,5 +492,43 @@ mod tests {
         let e = octave_edges(10_000.0);
         assert!((e[0] - 125.0).abs() < 1e-9);
         assert!(*e.last().unwrap() <= 10_000.0);
+    }
+
+    #[test]
+    fn tone_quality_reads_a_known_noise_and_distortion_floor() {
+        let rate = 48_000.0;
+        let hz = coherent_hz(rate, PILOT_HZ);
+        let w = 2.0 * std::f64::consts::PI * hz / rate;
+        let mut seed = 1u64;
+        let mut noise = || {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            ((seed >> 33) as f64 / f64::from(1u32 << 31)) - 0.5
+        };
+        let x: Vec<f32> = (0..THDN_FRAMES)
+            .map(|i| {
+                let t = i as f64;
+                (0.25 * (w * t).sin() + 0.25 * 1e-3 * (2.0 * w * t).sin() + 1e-4 * noise()) as f32
+            })
+            .collect();
+        let q = tone_quality(&x, rate, hz);
+        assert!((q.thd_db + 60.0).abs() < 0.1, "{q:?}");
+        assert!((q.snr_db - 75.7).abs() < 0.5, "{q:?}");
+        assert!(q.thd_n_db > q.thd_db, "{q:?}");
+    }
+
+    #[test]
+    fn coherent_hz_is_a_bin_near_the_pilot() {
+        for r in [16_000.0, 44_100.0, 48_000.0, 96_000.0] {
+            let hz = coherent_hz(r, PILOT_HZ);
+            assert!((hz - PILOT_HZ).abs() < r / THDN_FRAMES as f64);
+            let bin = hz * THDN_FRAMES as f64 / r;
+            assert!((bin - bin.round()).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn block_rms_of_a_half_scale_square_is_minus_six_db() {
+        let x = [0.5f32, -0.5, 0.5, -0.5];
+        assert!((block_rms_db(&x, 4)[0] + 6.02).abs() < 0.01);
     }
 }

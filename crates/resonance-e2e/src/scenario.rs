@@ -1,6 +1,7 @@
 //! Scenario files (`contrib/e2e/scenarios/*.toml`): schema, expansion of
 //! rate/channel lists into concrete scenarios, and tier/platform selection.
 
+use crate::checks::THDN_FRAMES;
 use crate::compare::CompareMode;
 use anyhow::{Context, Result, bail, ensure};
 use resonance_ipc::{BandState, EffectsState};
@@ -13,6 +14,23 @@ use std::path::{Path, PathBuf};
 pub enum Tier {
     Quick,
     Full,
+}
+
+/// What a scenario plays and judges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    /// Noise + sweep + pilot, judged against the offline render (bit-exact or resampled).
+    #[default]
+    Render,
+    /// A steady pilot tone for `body_secs`, tracked in windows: pitch drift, level change and
+    /// dropouts over the whole run.
+    Soak,
+    /// A steady tone at a bin-centred frequency; THD+N and SNR of the live output.
+    Thdn,
+    /// The pilot tone through `events` (rate and device renegotiations): pitch, level and flow
+    /// after each one settles.
+    Stress,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -40,6 +58,12 @@ pub struct Expect {
     pub resample: Vec<AllowedHop>,
     #[serde(default = "default_gap_ms")]
     pub max_gap_ms: f64,
+    /// `thdn` only: THD+N (dB, negative) must be at or below this.
+    #[serde(default)]
+    pub max_thdn_db: Option<f64>,
+    /// `thdn` only: SNR (dB) must be at or above this.
+    #[serde(default)]
+    pub min_snr_db: Option<f64>,
 }
 
 impl Expect {
@@ -62,6 +86,8 @@ impl Default for Expect {
             compare_by_os: BTreeMap::new(),
             resample: Vec::new(),
             max_gap_ms: default_gap_ms(),
+            max_thdn_db: None,
+            min_snr_db: None,
         }
     }
 }
@@ -78,6 +104,8 @@ pub enum EventKind {
         rate: u32,
         channels: usize,
     },
+    /// Point the daemon back at `e2e_dev` after a [`EventKind::SwitchDevice`].
+    SwitchBack,
     RestartDaemon,
 }
 
@@ -113,10 +141,11 @@ impl TryFrom<EventToml> for Event {
                 rate: need(t.rate, "rate")?,
                 channels: t.channels.ok_or("event `switch_device` needs `channels`")?,
             },
+            "switch_back" => EventKind::SwitchBack,
             "restart_daemon" => EventKind::RestartDaemon,
             other => {
                 return Err(format!(
-                    "unknown event kind `{other}` (force_rate, switch_device, restart_daemon)"
+                    "unknown event kind `{other}` (force_rate, switch_device, switch_back, restart_daemon)"
                 ));
             }
         };
@@ -177,6 +206,10 @@ struct ScenarioToml {
     #[serde(default = "default_body_secs")]
     body_secs: f64,
     #[serde(default)]
+    kind: Kind,
+    #[serde(default)]
+    tone_hz: Option<f64>,
+    #[serde(default)]
     platforms: Option<Vec<String>>,
     #[serde(default)]
     expected_fail: Option<String>,
@@ -209,6 +242,9 @@ pub struct Scenario {
     pub player_rate: u32,
     pub graph_rate: u32,
     pub body_secs: f64,
+    pub kind: Kind,
+    /// `thdn` only: the tone's frequency before snapping to an FFT bin (default: the pilot).
+    pub tone_hz: Option<f64>,
     pub in_quick: bool,
     pub platforms: Option<Vec<String>>,
     pub expected_fail: Option<String>,
@@ -221,7 +257,10 @@ impl Scenario {
     /// Latency is measured only on steady, matched-rate scenarios.
     #[must_use]
     pub fn measures_latency(&self) -> bool {
-        self.events.is_empty() && self.player_rate == self.rate && self.graph_rate == self.rate
+        self.kind == Kind::Render
+            && self.events.is_empty()
+            && self.player_rate == self.rate
+            && self.graph_rate == self.rate
     }
 }
 
@@ -276,6 +315,18 @@ fn expand(s: ScenarioToml, dir: &Path) -> Result<Vec<Scenario>> {
         s.id
     );
     ensure!(s.body_secs > 0.0, "`{}`: body_secs must be positive", s.id);
+    ensure!(
+        s.kind != Kind::Thdn || (s.expect.max_thdn_db.is_some() && s.expect.min_snr_db.is_some()),
+        "`{}`: a thdn scenario needs expect.max_thdn_db and expect.min_snr_db",
+        s.id
+    );
+    ensure!(
+        s.kind != Kind::Thdn
+            || s.body_secs
+                >= 2.0 + THDN_FRAMES as f64 / f64::from(*s.rates.iter().min().unwrap_or(&1)),
+        "`{}`: body_secs too short for the THD+N analysis window",
+        s.id
+    );
     let profile_toml = match (s.profile, s.profile_file) {
         (Some(_), Some(_)) => bail!("`{}`: use either [profile] or profile_file, not both", s.id),
         (Some(p), None) => p,
@@ -304,6 +355,8 @@ fn expand(s: ScenarioToml, dir: &Path) -> Result<Vec<Scenario>> {
                 player_rate: s.player_rate.unwrap_or(rate),
                 graph_rate: s.graph_rate.unwrap_or(rate),
                 body_secs: s.body_secs,
+                kind: s.kind,
+                tone_hz: s.tone_hz,
                 in_quick: s.tier == Tier::Quick || s.quick.contains(&(rate, channels)),
                 platforms: s.platforms.clone(),
                 expected_fail: s.expected_fail.clone(),
@@ -522,6 +575,23 @@ kind = "restart_daemon"
         let scn = format!("{FLAT}{}", band.repeat(33));
         let err = load_dir(&dir_with(&[("h.toml", &scn)])).unwrap_err();
         assert!(format!("{err:#}").contains("32"), "{err:#}");
+    }
+
+    #[test]
+    fn tone_kinds_parse_and_thdn_needs_its_limits() {
+        let ok = format!(
+            "{FLAT}kind = \"thdn\"\nbody_secs = 8.0\n[scenario.expect]\nmax_thdn_db = -100.0\nmin_snr_db = 100.0\n"
+        )
+        .replace("rates = [44100, 48000]", "rates = [48000]");
+        let s = &load_dir(&dir_with(&[("k1.toml", &ok)])).unwrap()[0];
+        assert_eq!(s.kind, Kind::Thdn);
+        assert!(!s.measures_latency(), "tone kinds have no latency baseline");
+        let bad = format!("{FLAT}kind = \"thdn\"\nbody_secs = 8.0\n");
+        let err = load_dir(&dir_with(&[("k2.toml", &bad)])).unwrap_err();
+        assert!(format!("{err:#}").contains("max_thdn_db"), "{err:#}");
+        let ev = "[[scenario.events]]\nat_secs = 1.0\nkind = \"switch_back\"\n";
+        let s = &load_dir(&dir_with(&[("k3.toml", &format!("{FLAT}{ev}"))])).unwrap()[0];
+        assert_eq!(s.events[0].kind, EventKind::SwitchBack);
     }
 
     #[test]

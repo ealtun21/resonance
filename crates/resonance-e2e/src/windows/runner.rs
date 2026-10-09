@@ -3,14 +3,14 @@
 use super::env::{self, Daemon};
 use crate::common::{
     MAX_LAG_SECS, MIXER_HEADROOM_PEAK, RunOpts, apply_profile, chain_delay_frames, exact_checks,
-    headroom_shift, ipc, peak_abs, record_latency, scale_pow2, wait_for,
+    headroom_shift, ipc, peak_abs, record_latency, scale_pow2, stimulus_for, tone_checks, wait_for,
 };
 use crate::compare::compare;
 use crate::latency::{load_baselines, save_baselines};
 use crate::native::play_and_record;
 use crate::render::{BLOCK_FRAMES, load_exported_chain, render};
 use crate::report::{Report, ScenarioResult, Status, settle};
-use crate::scenario::Scenario;
+use crate::scenario::{Kind, Scenario};
 use crate::stimulus::{Stimulus, generate};
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait};
@@ -99,6 +99,31 @@ fn endpoint_attach(which: super::Endpoint) -> (&'static str, u8) {
     }
 }
 
+/// Soak / THD+N: a steady tone through the APO, judged on the loopback alone (no render).
+fn tone_run(r: &mut ScenarioResult, s: &Scenario) -> Result<()> {
+    let stim = stimulus_for(s);
+    let dev = cpal::default_host()
+        .default_output_device()
+        .context("no default output device")?;
+    let mark = env::apo_log_mark();
+    let rec = play_and_record(
+        &dev,
+        &dev,
+        false,
+        &stim.samples,
+        s.channels,
+        s.rate,
+        (MAX_LAG_SECS * f64::from(s.rate)) as usize,
+    )?;
+    r.discontinuities = rec.discontinuities;
+    std::thread::sleep(Duration::from_millis(500));
+    if let Err(e) = env::verify_apo_on(&env::apo_log_since(mark), s.channels, s.rate) {
+        r.failures.push(format!("{e:#}"));
+    }
+    tone_checks(r, s, &stim, &rec);
+    Ok(())
+}
+
 fn measure(
     r: &mut ScenarioResult,
     s: &Scenario,
@@ -128,6 +153,9 @@ fn measure(
         })?;
         // The APO polls the shared state every 30 ms; give it a few polls.
         std::thread::sleep(Duration::from_millis(300));
+        if s.kind != Kind::Render {
+            return tone_run(r, s);
+        }
         let mut stim = generate(s.rate, s.channels, s.body_secs);
         let render_stim = |stim: &Stimulus| -> Result<(Vec<f32>, Vec<String>)> {
             let (mut chain, notes) = load_exported_chain(&export, s.channels, f64::from(s.rate))?;

@@ -1,0 +1,160 @@
+# Steady-tone scenarios (spec section 15). THD+N / SNR limits are set from measured runs with
+# margin; the report notes of every run carry the measured numbers.
+
+[[scenario]]
+id = "thdn-flat"
+tier = "full"
+kind = "thdn"
+rates = [48000]
+channels = [2]
+quick = [[48000, 2]]
+body_secs = 8.0
+[scenario.expect]
+max_thdn_db = -140.0
+min_snr_db = 140.0
+
+# THD+N of an EQ'd live path: linear bands only, so a steady tone stays a steady tone.
+[[scenario]]
+id = "thdn-eq"
+tier = "full"
+kind = "thdn"
+rates = [48000]
+channels = [2]
+body_secs = 8.0
+profile_file = "../profiles/tone-eq.toml"
+[scenario.expect]
+max_thdn_db = -140.0
+min_snr_db = 140.0
+
+# THD+N / SNR through the unavoidable resampling paths (PipeWire's stream adapter converts), so
+# the resampler's own floor is gated, not just the pitch.
+[[scenario]]
+id = "thdn-content-48k-device-44k1"
+tier = "full"
+kind = "thdn"
+rates = [44100]
+channels = [2]
+player_rate = 48000
+body_secs = 8.0
+[scenario.expect]
+max_thdn_db = -110.0
+min_snr_db = 110.0
+resample = [{ hop = "player->graph", reason = "48 kHz content into a 44.1 kHz device; PipeWire's stream adapter converts" }]
+
+[[scenario]]
+id = "thdn-headset-16k-mono"
+tier = "full"
+kind = "thdn"
+rates = [16000]
+channels = [1]
+player_rate = 48000
+body_secs = 8.0
+[scenario.expect]
+max_thdn_db = -110.0
+min_snr_db = 110.0
+resample = [{ hop = "player->graph", reason = "48 kHz content into a 16 kHz mono headset-profile device; PipeWire's stream adapter converts" }]
+
+# The same two paths with a tone near the top of the passband (0.4 x the lower rate), where a
+# resampler's imaging and aliasing show; the 1 kHz tone above sits where any resampler is clean.
+[[scenario]]
+id = "thdn-hf-content-48k-device-44k1"
+tier = "full"
+kind = "thdn"
+tone_hz = 17600.0
+rates = [44100]
+channels = [2]
+player_rate = 48000
+body_secs = 8.0
+[scenario.expect]
+max_thdn_db = -110.0
+min_snr_db = 110.0
+resample = [{ hop = "player->graph", reason = "48 kHz content into a 44.1 kHz device; PipeWire's stream adapter converts" }]
+
+[[scenario]]
+id = "thdn-hf-headset-16k-mono"
+tier = "full"
+kind = "thdn"
+tone_hz = 6400.0
+rates = [16000]
+channels = [1]
+player_rate = 48000
+body_secs = 8.0
+[scenario.expect]
+max_thdn_db = -110.0
+min_snr_db = 110.0
+resample = [{ hop = "player->graph", reason = "48 kHz content into a 16 kHz mono headset-profile device; PipeWire's stream adapter converts" }]
+
+# Ten-minute soak with the pilot tone (full tier only): pitch drift in 10 s windows, level
+# change, dropouts. Flat, then with EQ bands.
+[[scenario]]
+id = "soak-flat"
+tier = "full"
+kind = "soak"
+rates = [48000]
+channels = [2]
+body_secs = 600.0
+
+[[scenario]]
+id = "soak-eq"
+tier = "full"
+kind = "soak"
+rates = [48000]
+channels = [2]
+body_secs = 600.0
+profile_file = "../profiles/tone-eq.toml"
+
+# Bluetooth-style renegotiation: the graph rate flips 44.1 <-> 48 kHz, and the daemon is moved to
+# a 16 kHz mono device (the headset profile) and back, twice, under a steady pilot. After each
+# event settles, the pilot's pitch and level must be right and the audio gap-free.
+[[scenario]]
+id = "bt-rate-stress"
+tier = "full"
+kind = "stress"
+rates = [48000]
+channels = [2]
+body_secs = 66.0
+[scenario.expect]
+# The daemon's reconnect backoff after a channel-count change is up to ~1.7 s; settled stretches
+# are judged 0.5 s after that allowance.
+max_gap_ms = 2500
+resample = [{ hop = "player->graph", reason = "the graph moves to 44.1 kHz mid-stream; the 48 kHz player stream is converted" }]
+[[scenario.events]]
+at_secs = 3.0
+kind = "force_rate"
+rate = 44100
+[[scenario.events]]
+at_secs = 9.0
+kind = "force_rate"
+rate = 48000
+[[scenario.events]]
+at_secs = 15.0
+kind = "force_rate"
+rate = 44100
+[[scenario.events]]
+at_secs = 21.0
+kind = "force_rate"
+rate = 48000
+[[scenario.events]]
+at_secs = 27.0
+kind = "switch_device"
+rate = 16000
+channels = 1
+[[scenario.events]]
+at_secs = 33.0
+kind = "switch_back"
+[[scenario.events]]
+at_secs = 39.0
+kind = "switch_device"
+rate = 16000
+channels = 1
+[[scenario.events]]
+at_secs = 45.0
+kind = "switch_back"
+[[scenario.events]]
+at_secs = 51.0
+kind = "force_rate"
+rate = 44100
+[[scenario.events]]
+at_secs = 57.0
+kind = "force_rate"
+rate = 48000
