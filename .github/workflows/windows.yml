@@ -32,12 +32,12 @@ jobs:
       # linted or run in CI. This catches a cross-platform change breaking the
       # Windows backend before it merges.
       - name: Clippy (Windows targets)
-        run: cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+        run: cargo clippy --workspace --exclude xtask --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 
       - name: Test (Windows targets)
         # The APO tests share a single state file (apo_state.bin), so serialise
         # the per-binary test run.
-        run: cargo test --all --target x86_64-pc-windows-msvc -- --test-threads=1
+        run: cargo test --workspace --exclude xtask --target x86_64-pc-windows-msvc -- --test-threads=1
 
       - name: Build release binaries
         run: cargo build --release --target x86_64-pc-windows-msvc -p resonance-daemon -p resonance-cli -p resonance-tui -p resonance-gui -p resonance-tray
