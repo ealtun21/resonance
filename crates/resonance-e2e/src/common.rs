@@ -91,7 +91,16 @@ pub fn synthetic_ir(path: &Path, rate: u32) -> Result<()> {
 }
 
 pub fn ch0(x: &[f32], channels: usize) -> Vec<f64> {
-    x.iter().step_by(channels).map(|&v| f64::from(v)).collect()
+    chan(x, channels, 0)
+}
+
+/// Channel `c` of an interleaved buffer.
+pub fn chan(x: &[f32], channels: usize, c: usize) -> Vec<f64> {
+    x.iter()
+        .skip(c)
+        .step_by(channels)
+        .map(|&v| f64::from(v))
+        .collect()
 }
 
 pub fn write_wav(path: &Path, x: &[f32], channels: usize, rate: u32) -> Result<()> {
@@ -177,22 +186,31 @@ pub fn exact_checks(
     Ok(())
 }
 
-/// The path is not bit-transparent by design (macOS: the Process Tap's aggregate resamples),
-/// so judge the recording against the offline render as a system: per-octave transfer gain
-/// must be within `tolerance_db` of 0 dB and the output must stay coherent with the render.
+/// In-band signal-to-error ratio (dB) implied by a magnitude-squared coherence.
+#[must_use]
+pub fn coherence_snr_db(coherence: f64) -> f64 {
+    10.0 * (coherence / (1.0 - coherence).max(1e-12)).log10()
+}
+
+/// The path is not bit-transparent by design (macOS: the Process Tap resamples, see spec
+/// section 14.4), so judge the recording against the offline render as a system, on every
+/// channel: per-octave transfer gain must be within `tolerance_db` of 0 dB and the in-band
+/// signal-to-error ratio against the render at least `min_snr_db`. The octaves stop well below
+/// the tap's roll-off (about 0.85 of Nyquist), where its response is flat to a few millidB.
 pub fn transfer_checks(
     r: &mut ScenarioResult,
     s: &Scenario,
     stim: &Stimulus,
     expected: &[f32],
     rec: &Recording,
-    default_tolerance_db: f64,
+    (default_tolerance_db, default_min_snr_db): (f64, f64),
     max_dropout_fraction: f64,
 ) -> Result<isize> {
     let tolerance_db = s
         .expect
         .transfer_tolerance_db
         .unwrap_or(default_tolerance_db);
+    let min_snr_db = s.expect.transfer_min_snr_db.unwrap_or(default_min_snr_db);
     let ch = s.channels;
     let rate = f64::from(s.rate);
     let exp0 = ch0(expected, ch);
@@ -205,14 +223,55 @@ pub fn transfer_checks(
         ));
     }
     let (lags, slips) = segment_lags(&exp0, &rec0, stim.body.clone(), rate, lag, SLIP_FRAMES);
-    let (bands, used, skipped) = transfer_bands(
-        &exp0,
-        &rec0,
-        &lags,
-        stim.body.clone(),
-        rate,
-        &octave_edges(0.25 * rate),
-    );
+    let ex = crate::checks::segment_exactness(expected, &rec.samples, rec.channels, &lags);
+    r.notes.push(format!(
+        "{} of {} segments bit-exact, {:.4} of samples equal, worst difference {:.1} dBFS",
+        ex.exact_segments, ex.segments, ex.equal_fraction, ex.max_err_dbfs
+    ));
+    let edges = octave_edges(0.25 * rate);
+    let (mut used, mut skipped) = (0, 0);
+    // Worst case over channels per octave: (largest |gain|, lowest SNR).
+    let mut worst = vec![(0.0f64, f64::INFINITY); edges.len()];
+    let mut failures = Vec::new();
+    for c in 0..ch {
+        let (bands, u, sk) = transfer_bands(
+            &chan(expected, ch, c),
+            &chan(&rec.samples, rec.channels, c),
+            &lags,
+            stim.body.clone(),
+            rate,
+            &edges,
+        );
+        if c == 0 {
+            (used, skipped) = (u, sk);
+        }
+        for (b, w) in bands.iter().zip(&mut worst) {
+            let snr = coherence_snr_db(b.coherence);
+            w.0 = w.0.max(b.gain_db.abs());
+            w.1 = w.1.min(snr);
+            if b.gain_db.abs() > tolerance_db {
+                failures.push(format!(
+                    "channel {c}, octave from {:.0} Hz: transfer gain {:+.3} dB vs the render (limit ±{tolerance_db} dB)",
+                    b.from_hz, b.gain_db
+                ));
+            }
+            if snr < min_snr_db {
+                failures.push(format!(
+                    "channel {c}, octave from {:.0} Hz: in-band SNR {snr:.1} dB against the render (limit {min_snr_db} dB)",
+                    b.from_hz
+                ));
+            }
+        }
+    }
+    r.notes.push(format!(
+        "worst over channels per octave (from kHz: |gain| dB, SNR dB): {}",
+        edges
+            .iter()
+            .zip(&worst)
+            .map(|(f, w)| format!("{:.2}k: {:.3}, {:.0}", f / 1000.0, w.0, w.1))
+            .collect::<Vec<_>>()
+            .join("; ")
+    ));
     let total = used + skipped;
     r.notes.push(format!(
         "aligned at {lag} frames; {skipped} of {total} blocks hold a zero-filled dropout (excluded from the gain estimate); {slips} segments slipped"
@@ -225,19 +284,10 @@ pub fn transfer_checks(
             max_dropout_fraction * 100.0
         ));
     }
-    for b in &bands {
-        if b.gain_db.abs() > tolerance_db {
-            r.failures.push(format!(
-                "octave from {:.0} Hz: transfer gain {:+.2} dB vs the render (limit ±{tolerance_db} dB)",
-                b.from_hz, b.gain_db
-            ));
-        }
-        if b.coherence < MIN_COHERENCE {
-            r.failures.push(format!(
-                "octave from {:.0} Hz: coherence {:.3} with the render (limit {MIN_COHERENCE})",
-                b.from_hz, b.coherence
-            ));
-        }
+    let more = failures.len().saturating_sub(8);
+    r.failures.extend(failures.into_iter().take(8));
+    if more > 0 {
+        r.failures.push(format!("... and {more} more"));
     }
     let seg: Vec<f32> = rec0
         .get(stim.body.start.saturating_add_signed(lag)..stim.body.end.saturating_add_signed(lag))
@@ -423,9 +473,6 @@ pub const MIN_ALIGNMENT_QUALITY: f64 = 8.0;
 
 /// A segment whose delay differs from the run's by more than this many frames slipped.
 pub const SLIP_FRAMES: isize = 16;
-
-/// Lowest coherence between render and recording per octave that still counts as the same signal.
-pub const MIN_COHERENCE: f64 = 0.95;
 
 /// A rate converter is in the path, so not bit-exact by design: the pilot's
 /// pitch and the path's per-octave gain must match the offline render's

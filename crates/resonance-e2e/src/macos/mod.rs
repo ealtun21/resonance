@@ -39,7 +39,7 @@ pub fn in_device(channels: usize) -> Option<&'static str> {
 pub fn ineligible(s: &Scenario) -> Option<&'static str> {
     if s.kind != Kind::Render {
         Some(
-            "steady-tone soak / THD+N need a gap-free, bit-transparent tap: the VM underruns the daemon (MAC-E2) and the tap's aggregate resamples (MAC-E1), so no floor can be set yet",
+            "steady-tone soak / THD+N need a gap-free recording, and this VM's audio threads drop whole 512-frame buffers (MAC-E2, measured: 11 in 8 s, THD+N -18 dB); the tap's resampler also sets a floor near -60 dB (MAC-E1)",
         )
     } else if !s.events.is_empty() {
         Some("mid-stream events need a steerable audio graph (Linux only)")

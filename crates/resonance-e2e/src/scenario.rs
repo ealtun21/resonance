@@ -52,6 +52,9 @@ pub struct Expect {
     /// bit-equality (macOS); `None` = the runner's default.
     #[serde(default)]
     pub transfer_tolerance_db: Option<f64>,
+    /// Lowest per-octave in-band SNR (dB) against the render on the same OSes.
+    #[serde(default)]
+    pub transfer_min_snr_db: Option<f64>,
     #[serde(default)]
     pub compare_by_os: BTreeMap<String, CompareMode>,
     #[serde(default)]
@@ -83,6 +86,7 @@ impl Default for Expect {
         Self {
             compare: CompareMode::Exact,
             transfer_tolerance_db: None,
+            transfer_min_snr_db: None,
             compare_by_os: BTreeMap::new(),
             resample: Vec::new(),
             max_gap_ms: default_gap_ms(),

@@ -429,8 +429,9 @@ Topology and checks are in `contrib/e2e/macos/README.md`. What it took, and what
   full tier with 4 vCPUs.
 - **MAC-E1 (finding): the Process Tap is not bit-transparent.** Playing into BlackHole 2ch and recording the same
   device is bit-exact, but through tap and daemon the recording matches the render only to coherence about
-  0.985, with a flat -0.1 dB passband and a roll-off above 20 kHz: the aggregate's drift compensation
-  resamples. macOS is therefore judged by transfer function, not bit equality.
+  0.985, with a flat -0.1 dB passband and a roll-off above 20 kHz. Cause and measurements: section 14.4 (the
+  tap's leg of the aggregate resamples; the 0.985 and -0.1 dB were dropout and alignment artefacts of the old
+  check, the converter itself is flat to 0.001 dB in band).
 - **MAC-E2 (finding): the daemon underruns under VM scheduling jitter.** About 30 % of 4096-frame blocks held a
   zero-filled underrun in some runs, and the delay occasionally jumps mid-run (the ring dropping its backlog
   beyond the 4096-frame slack). Per-segment alignment and dropout accounting keep the gain estimate valid; a
@@ -451,6 +452,57 @@ The first two attempts found: the unattended install powers the VM off at the en
 rebooting (xtask now restarts a guest that is not running while it waits for ssh), and the OpenSSH
 feature-on-demand capability does not install on this image, so sshd never started (the answer file now runs
 `sshd.ps1`, which installs the Win32-OpenSSH release; validated on an overlay of the working image first).
+
+### 14.4 macOS: can the recording be bit-equal? (2026-10-09)
+
+Answer: **no, and not only in the test.** The Process Tap's leg of an aggregate device contains a
+sample-rate converter that cannot be switched off, so the product path (tap, daemon, output) is not
+bit-transparent either. MAC-E1 stands, now with its cause and numbers.
+
+Method: `contrib/e2e/macos/tapcap.m` creates the tap and aggregate the way the daemon does, with
+every option settable from the environment, and records all input channels of the aggregate. A
+broadband noise stimulus was played into BlackHole 2ch from another process and compared with the
+source sample by sample (48 kHz unless noted).
+
+| Question | Result |
+|---|---|
+| Is the aggregate or the tap the culprit? | Same aggregate (`SUB=BlackHole2ch_UID MASTER=1 MUTE=0`), same IOProc buffer: the BlackHole **sub-device channels are bit-exact** (100 % of samples equal, error -600 dBFS); the **tap channels are not** (0 % equal, error -19 dBFS broadband). |
+| Shape of the tap leg | Flat to 0.00 dB with coherence 1.000 up to 16.8 kHz, -0.7 dB at 19.2-20.2 kHz, -4.5 dB at 20.2-21.1, -12.5 at 21.1-22.1, -31 at 22.1-23, -65 dB above: a linear-phase low-pass at about 0.85 of Nyquist plus 1632 frames (34 ms) of extra delay. At 44.1 kHz and 96 kHz the same shape sits at the same fraction of Nyquist (96 kHz: -0.4 dB at 38.4-40.3 kHz, -27 dB at 44.2-46.1 kHz). The aggregate's nominal rate does matter: setting it to 96 kHz over a 48 kHz tap resamples and doubles the callbacks. |
+| In-band error | After removing everything above 16 kHz from both signals: -95 dBFS rms in clean stretches (80 dB below a -15 dBFS signal), bursts of -35 dBFS peak where the VM drops a buffer. Per 4096-sample octave averages in the runner: 57-86 dB SNR, gain within 0.001 dB. |
+| `kAudioSubTapDriftCompensationKey` = 0 | No change at all (identical numbers to 1 digit). The composition read back from the device confirms `drift = 0`. |
+| Drift quality 0 / 127 | No change. |
+| Aggregate clock device / main sub-device = the tapped device, = the tap UID, stacked | Clock = the tapped device or main sub-device: a steeper filter (-1.6 dB at 19.2-20.2, -11 at 20.2-21.1, -37 at 21.1-22.1, -80 above) but still not exact (in-band SNR 58-70 dB, not better). Clock or main = the tap UID, stacked: the original filter. |
+| Tap kind | Device-bound, global stereo, global mono: identical response. |
+| `CATapMuteBehavior` unmuted / muted / muted-when-tapped | Identical. |
+| Rate | The tap inherits the device rate (tap format reads 44.1/48/96/192 kHz) and the daemon's own `HalInputStream` takes the bypass path in every run (`capture matches output - no resampling`), so the daemon adds no conversion. |
+
+So the resampling is in CoreAudio, between the tap and the aggregate's IOProc, for any tap
+description and any aggregate description the public API accepts. The only bit-exact capture on this
+machine is the sub-device input of a loopback driver, which is a different product (a virtual
+device the user routes to) and is what the harness already uses for its Resonance-off reference.
+
+What else keeps a macOS recording from matching the render:
+
+- 512-frame zero blocks in the recording, about one per 0.7 s in this VM (11 in an 8 s tone,
+  THD+N -18 dB). They are not the daemon's ring: with a counter in the output callback the daemon
+  reported 0 underruns, 0 late callbacks and a 0 us lock wait, and the tap IOProc saw no zero block
+  inside the stimulus, so the buffers are lost after the tap (the daemon's write into BlackHole 16ch
+  or the agent's recording) when the VM's audio threads miss a deadline. A fixed 2048-frame buffer on
+  the agent's streams cut the affected blocks from 22 of 69 to 4 of 69. A change in the daemon's output
+  callback to read the ring all-or-nothing made no difference and was dropped. Same-device topology (tap and render to
+  one BlackHole) did not change it either.
+- This is why the soak, THD+N and rate-stress scenarios stay "not applicable" on macOS: the steady
+  tone cannot be gap-free here, and a floor would only measure the VM.
+
+What is checked instead (and what changed): the recording is judged against the offline render on
+**every channel** (it was channel 0 only), per octave up to 0.33 of the sample rate, which is
+well below the converter's roll-off. Limits, from the full tier (all linear chains, 2 and 16
+channels, 44.1-192 kHz): gain within 0.03 dB (measured below 0.001 dB; was 0.3 dB) and in-band SNR
+at least 50 dB (measured 57-86 dB; was coherence 0.95, about 13 dB). Fidelity (nonlinear, measured
+0.012 dB / 39 dB) and the dithered all-effects chain (0.5 dB / 26 dB: DynBoost's limiter and the
+dither PRNG do not line up with the render) have their own limits in `effects.toml`. Every run's notes
+carry the per-octave worst case, and a "n of m segments bit-exact" line that reads 0 of 6 and keeps
+the answer to this section visible.
 
 ## 15. Steady-tone scenarios: soak, THD+N and SNR, rate stress (2026-10-09)
 

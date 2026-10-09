@@ -360,8 +360,77 @@ pub fn segment_lags(
     (out, slips)
 }
 
+/// How close a recording is to the render, per aligned segment: a resampler in the path changes
+/// nearly every sample by a little (no segment is exact), while a ring dropout leaves the
+/// segments around it exact. Tells the two apart where a single global compare cannot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Exactness {
+    pub segments: usize,
+    /// Segments in which every sample of every channel equals the render.
+    pub exact_segments: usize,
+    /// Share of all compared samples that are equal.
+    pub equal_fraction: f64,
+    /// Largest absolute difference over all segments, dBFS (`-inf` when exact).
+    pub max_err_dbfs: f64,
+}
+
+/// Compare `recorded` with `expected` (both interleaved, `channels` wide) over each segment at
+/// that segment's own lag, bit for bit.
+#[must_use]
+#[allow(clippy::float_cmp)] // bit-exactness is the point of this function
+pub fn segment_exactness(
+    expected: &[f32],
+    recorded: &[f32],
+    channels: usize,
+    segments: &[(Range<usize>, isize)],
+) -> Exactness {
+    let (mut exact, mut equal, mut total, mut worst) = (0, 0usize, 0usize, 0.0f32);
+    for (r, lag) in segments {
+        let mut seg_exact = true;
+        for f in r.clone() {
+            let Some(rf) = f
+                .checked_add_signed(*lag)
+                .filter(|&rf| (rf + 1) * channels <= recorded.len())
+            else {
+                seg_exact = false;
+                continue;
+            };
+            for c in 0..channels {
+                let (e, v) = (expected[f * channels + c], recorded[rf * channels + c]);
+                total += 1;
+                if e == v {
+                    equal += 1;
+                } else {
+                    seg_exact = false;
+                    worst = worst.max((e - v).abs());
+                }
+            }
+        }
+        exact += usize::from(seg_exact);
+    }
+    Exactness {
+        segments: segments.len(),
+        exact_segments: exact,
+        equal_fraction: equal as f64 / total.max(1) as f64,
+        max_err_dbfs: 20.0 * f64::from(worst).log10(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn segment_exactness_separates_a_dropout_from_a_resampler() {
+        let x: Vec<f32> = (0..8000u32).map(|i| (i % 97) as f32 / 97.0).collect();
+        let segs = vec![(0..1000, 0isize), (1000..2000, 0)];
+        let e = super::segment_exactness(&x, &x, 1, &segs);
+        assert_eq!((e.exact_segments, e.equal_fraction), (2, 1.0));
+        let mut y = x.clone();
+        y[1500] += 1e-3;
+        let e = super::segment_exactness(&x, &y, 1, &segs);
+        assert_eq!(e.exact_segments, 1);
+        assert!((e.max_err_dbfs + 60.0).abs() < 0.1, "{e:?}");
+    }
+
     #[test]
     fn segment_lags_follow_a_delay_jump() {
         let x: Vec<f64> = (0..96_000u64)
