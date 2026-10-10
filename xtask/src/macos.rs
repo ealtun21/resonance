@@ -48,7 +48,7 @@ fn make_overlay(run: &Path) -> Result<()> {
         run.join(format!("{NAME}.conf")),
         format!(
             "#!/usr/bin/quickemu --vm\nguest_os=\"macos\"\ndisk_img=\"{NAME}/disk.qcow2\"\n\
-             img=\"{NAME}/RecoveryImage.img\"\nmacos_release=\"sequoia\"\ncpu_cores=\"4\"\nram=\"8G\"\n"
+             img=\"{NAME}/RecoveryImage.img\"\nmacos_release=\"sequoia\"\ncpu_cores=\"16\"\nram=\"10G\"\n"
         ),
     )?;
     Ok(())
@@ -79,7 +79,9 @@ pub fn run(o: &Opts) -> Result<ExitCode> {
         g.wait_ssh(Duration::from_secs(900))?;
         g.run("mkdir -p $HOME/resonance")?;
         g.sync_source(&root, "$HOME/resonance")?;
+        let t = std::time::Instant::now();
         prepare(&g)?;
+        println!("macos: guest build+prepare took {:.0?}", t.elapsed());
         // The agent must live in the GUI session: write its command line, then start it
         // through launchd. The daemon agent is only registered; the agent starts it.
         let mut cmd = format!(

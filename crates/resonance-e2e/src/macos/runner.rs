@@ -265,6 +265,10 @@ fn measure(
             // this chain's own delay (exact, from the render). The recording's lag in *this*
             // run is not used: it only reflects where the ring happened to start.
             let delay = chain_delay_frames(&stim.samples, &expected, s.channels, s.rate);
+            // Report-only: the same scenario measures anywhere from -100 to +100 ms between
+            // runs in the VM (the tap ring starts at a different offset each time, MAC-E2),
+            // so a baseline gate here only fails on noise. Windows and Linux still gate.
+            let gated = r.failures.len();
             record_latency(
                 r,
                 s,
@@ -275,6 +279,7 @@ fn measure(
                 opts.update_baseline,
                 MAC_LATENCY_MARGIN,
             );
+            r.failures.truncate(gated);
         }
         Ok(())
     })();

@@ -564,7 +564,7 @@ scenario with two switches got two nodes of the same name and the audio went to 
 one device however many events). A daemon switch from a mono device back to stereo takes up to ~1.6 s
 (reconnect backoff), longer than the 500 ms default gap; `bt-rate-stress` states `max_gap_ms = 2500`.
 
-## 16. Windows long-run slip: the recorder, not the product (2026-10-09)
+## 17. Windows long-run slip: the recorder, not the product (2026-10-09)
 
 `long-full-eq@96000x8` (60 s, 8 ch) failed deterministically after the soaks: the recording was bit-exact
 against the render, then at one fixed frame lost 768 frames (8 ms) and was bit-exact again, shifted.
@@ -577,3 +577,19 @@ Fix: the recording buffer is reserved and page-committed before the stream start
 allocates. A recording that still slips is now reported as `slip of N frames (skipped) at frame F`
 (re-aligning the last 16384 frames of the window), the slowest capture callback is logged, and a failing
 Windows scenario also saves `apo.log`.
+
+## 16. Parallel legs, guest sizing, macOS latency (2026-10-09)
+
+- `cargo xtask e2e --os linux,windows,macos` runs the legs in parallel (each has its own run
+  directory and a free ssh port); `--serial` restores one-after-another. A full nightly drops from
+  about 66 min serial to about 44 min, bounded by the longest leg (Linux, because of the soaks).
+  The legs are wall-clock bound (real-time audio, ssh, boots), so the host stays about 95 % idle.
+- The Windows and macOS guests are 16 vCPUs / 10 GB each. They compile in the guest on every run
+  (warm cache from the image); with 16 vCPUs the Windows prepare step takes about 73 s.
+- macOS added latency is report-only. The same scenario measured anywhere from -100 to +100 ms
+  between runs (the tap ring starts at a different offset each run, MAC-E2), so a baseline gate
+  only fails on noise; refreshing `baselines/macos.toml` was tried and gives another random sample.
+  Windows and Linux still gate on latency.
+- Observed once under parallel load at 8 vCPUs: Windows `long-full-eq@96000x8` differed from the
+  render at frame 3931392 (-13.2 dBFS). It passed twice alone at 16 vCPUs.
+
