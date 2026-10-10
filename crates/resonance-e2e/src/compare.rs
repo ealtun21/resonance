@@ -52,6 +52,9 @@ pub struct CompareOutcome {
     pub truncated: bool,
     /// The recording is all zeros over the aligned window.
     pub silent: bool,
+    /// Frames the end of the window sits off from where the start aligned (negative: the
+    /// recording skipped audio; positive: it repeated some), when that is not zero.
+    pub slip: Option<isize>,
 }
 
 impl CompareOutcome {
@@ -88,6 +91,15 @@ impl CompareOutcome {
         }
         match self.first_diff {
             None => format!("bit-exact (lag {} frames)", self.lag),
+            Some((f, _)) if self.slip.is_some() => {
+                let n = self.slip.unwrap_or_default();
+                format!(
+                    "slip of {} frames ({}) at frame {f}: the end of the recording is offset by {n:+} frames from its start; max error {:.1} dBFS",
+                    n.abs(),
+                    if n < 0 { "skipped" } else { "repeated" },
+                    20.0 * f64::from(self.max_abs_err).max(1e-30).log10()
+                )
+            }
             Some((f, c)) => {
                 let db = 20.0 * f64::from(self.max_abs_err).max(1e-30).log10();
                 format!("first difference at frame {f} channel {c}; max error {db:.1} dBFS")
@@ -129,6 +141,7 @@ pub fn compare(
         (l != lag).then_some((c, l))
     });
     let rec_frames = recorded.len() / channels;
+    let window_end = window.end;
     let (mut max_abs_err, mut first_diff, mut truncated, mut silent) = (0.0f32, None, false, true);
     for f in window {
         let Some(rf) = f.checked_add_signed(lag).filter(|&rf| rf < rec_frames) else {
@@ -144,6 +157,14 @@ pub fn compare(
             }
         }
     }
+    let slip = first_diff.filter(|_| !truncated && !silent).and_then(|_| {
+        tail_slip(
+            &channel(expected, channels, 0),
+            &channel(recorded, channels, 0),
+            window_end,
+            lag,
+        )
+    });
     CompareOutcome {
         lag,
         channel_lag_mismatch,
@@ -151,7 +172,21 @@ pub fn compare(
         first_diff,
         truncated,
         silent,
+        slip,
     }
+}
+
+/// Re-align the last `TAIL` frames before `end` on their own: the extra lag (beyond `lag`) of
+/// that stretch, if any. A one-time lost or repeated run of frames shows up as a constant offset.
+fn tail_slip(exp: &[f64], rec: &[f64], end: usize, lag: isize) -> Option<isize> {
+    const TAIL: usize = 16384;
+    const SEARCH: usize = 4096;
+    let start = end.checked_sub(TAIL)?;
+    let a = exp.get(start..end)?;
+    let b0 = start.checked_add_signed(lag)?.checked_sub(SEARCH)?;
+    let b = rec.get(b0..b0 + TAIL + 2 * SEARCH)?;
+    let extra = best_integer_lag(a, b, 2 * SEARCH) - SEARCH as isize;
+    (extra != 0).then_some(extra)
 }
 
 #[cfg(test)]
@@ -230,6 +265,20 @@ mod tests {
         let mut rec = delayed(&exp, 2, 37);
         rec.drain((37 + 2000) * 2..(37 + 2001) * 2);
         assert!(!compare(&exp, &rec, 2, 200..4200, 512).passes(CompareMode::Exact));
+    }
+
+    #[test]
+    fn skipped_run_is_reported_as_a_slip() {
+        let exp = padded(&noise(40000, 2), 2);
+        let mut rec = delayed(&exp, 2, 37);
+        rec.drain((37 + 20000) * 2..(37 + 20768) * 2);
+        let o = compare(&exp, &rec, 2, 200..35000, 512);
+        assert_eq!(o.slip, Some(-768));
+        assert_eq!(o.first_diff.map(|d| d.0), Some(20000));
+        assert!(
+            o.describe()
+                .contains("slip of 768 frames (skipped) at frame 20000")
+        );
     }
 
     #[test]
