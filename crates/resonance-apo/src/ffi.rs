@@ -298,7 +298,17 @@ fn worker_loop(weak: Weak<Shared>) {
         // next publish (a generation change) rebuilds the chain and
         // restores normal processing.
         let hb = crate::state::read_heartbeat_fresh(&path);
-        let stale = watch.observe(hb, std::time::Instant::now());
+        // Silence for STALE_AFTER on this instance's own clock, OR a wall-clock stamp that is
+        // already old — the latter catches a stream that starts after the daemon died (every
+        // new instance would otherwise get a fresh grace window and EQ short sounds).
+        let stamp_old = hb.is_some_and(|h| {
+            state::heartbeat_stamp_is_old(
+                h,
+                state::unix_ms(),
+                u64::try_from(STALE_AFTER.as_millis()).unwrap_or(u64::MAX),
+            )
+        });
+        let stale = watch.observe(hb, std::time::Instant::now()) || stamp_old;
         if stale {
             if let Ok(mut g) = shared.state.try_lock() {
                 if let Some(l) = g.as_mut() {
@@ -1239,6 +1249,78 @@ mod hires_harness {
                 .channels(2)
                 .sample_rate(48_000.0)
                 .build(),
+        );
+    }
+
+    /// A stream that starts AFTER the daemon died (a notification sound, a new
+    /// browser tab) must be bypassed at once — not get a fresh 2 s grace window
+    /// of EQ per instance. The heartbeat stamp is wall-clock, so a new instance
+    /// sees it is old immediately. Found live on the Windows VM: with a counter
+    /// heartbeat every short stream after `taskkill /f resonanced` was still EQ'd.
+    #[test]
+    fn instance_started_after_daemon_death_is_bypassed_at_once() {
+        let (rate, tone_hz, max_frames) = (48_000.0, 1_000.0, 1024u32);
+        let band = ApoFilter::builder()
+            .filter_type(FilterType::Peaking)
+            .freq(tone_hz)
+            .gain_db(12.0)
+            .q(4.0)
+            .enabled(true)
+            .channels(2)
+            .sample_rate(rate)
+            .build()
+            .unwrap();
+        let chain = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(rate)
+            .add_filter(band)
+            .build();
+        let mut w = ApoStateWriter::create(&default_state_path()).expect("state writer");
+        w.publish(&chain);
+        w.beat();
+        // The daemon "dies": no more beats. Let the stamp age past STALE_AFTER.
+        std::thread::sleep(std::time::Duration::from_millis(2300));
+
+        let p = resonance_apo_create();
+        assert!(!p.is_null(), "create returned null");
+        resonance_apo_lock(p, 2, rate, max_frames);
+        // A few worker ticks (25 ms each) — far less than the 2 s a counter-only watch needs.
+        std::thread::sleep(std::time::Duration::from_millis(250));
+
+        let (amp, frames) = (0.2f64, (rate * 0.25) as usize);
+        let w0 = 2.0 * PI * tone_hz / rate;
+        let mut buf: Vec<f32> = (0..frames)
+            .flat_map(|i| {
+                let s = (amp * (w0 * i as f64).sin()) as f32;
+                [s, s]
+            })
+            .collect();
+        let mut off = 0usize;
+        while off < frames {
+            let n = (frames - off).min(max_frames as usize);
+            resonance_apo_process(p, buf[off * 2..].as_mut_ptr(), n as u32, 2);
+            off += n;
+        }
+        let skip = frames / 4;
+        let out_rms = ((skip..frames)
+            .map(|i| f64::from(buf[i * 2]).powi(2))
+            .sum::<f64>()
+            / (frames - skip) as f64)
+            .sqrt();
+        let gain_db = 20.0 * (out_rms / (amp / 2f64.sqrt())).log10();
+        resonance_apo_unlock(p);
+        resonance_apo_destroy(p);
+
+        let mut w = ApoStateWriter::create(&default_state_path()).expect("state writer");
+        w.publish(
+            &ProcessorChain::builder()
+                .channels(2)
+                .sample_rate(48_000.0)
+                .build(),
+        );
+        assert!(
+            gain_db.abs() < 1.0,
+            "a stream started after the daemon died must be bypassed, got {gain_db:.2} dB"
         );
     }
 }

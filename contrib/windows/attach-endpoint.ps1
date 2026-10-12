@@ -69,11 +69,13 @@ try {
 
   # back up the original slots so uninstall-apo can restore them
   $bk = "$backupRoot\$g"
-  New-Item -Force -Path $bk | Out-Null
-  foreach ($slot in $allSlots) {
-    $name = "$fx,$slot"
-    $orig = (Get-ItemProperty -Path $fxp -Name $name -EA SilentlyContinue).$name
-    if ($null -ne $orig) { Set-ItemProperty -Path $bk -Name $name -Value $orig } else { Set-ItemProperty -Path $bk -Name $name -Value '<none>' }
+  if (-not (Test-Path $bk)) {   # an existing backup is the pre-install original: never overwrite it
+    New-Item -Force -Path $bk | Out-Null
+    foreach ($slot in $allSlots) {
+      $name = "$fx,$slot"
+      $orig = (Get-ItemProperty -Path $fxp -Name $name -EA SilentlyContinue).$name
+      if ($null -ne $orig) { Set-ItemProperty -Path $bk -Name $name -Value $orig } else { Set-ItemProperty -Path $bk -Name $name -Value '<none>' }
+    }
   }
 
   # pick exactly ONE slot from what the driver provides (matches install-apo.ps1)

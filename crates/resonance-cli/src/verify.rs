@@ -226,7 +226,13 @@ fn probe_tone(freq: f64, rate: f64, o: &Options) -> Result<Row> {
 }
 
 /// Compare, print and pass/fail.
-fn report(state: Option<&DaemonState>, mode: &Mode, rows: &[Row], o: &Options, rate: f64) -> Result<()> {
+fn report(
+    state: Option<&DaemonState>,
+    mode: &Mode,
+    rows: &[Row],
+    o: &Options,
+    rate: f64,
+) -> Result<()> {
     let expected: Option<Vec<f64>> = match mode {
         Mode::Predicted => Some(
             rows.iter()

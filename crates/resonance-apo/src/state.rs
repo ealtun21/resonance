@@ -772,7 +772,6 @@ impl SharedFile {
             st.generation.store(0, Ordering::Release);
             st.telemetry_enabled.store(0, Ordering::Release);
             st.telemetry.generation.store(0, Ordering::Release);
-            st.heartbeat.store(0, Ordering::Release);
         }
         Ok(this)
     }
@@ -783,7 +782,12 @@ impl SharedFile {
     ///
     /// Returns an [`io::Error`] under the same conditions as [`Self::open`].
     pub fn create(path: &Path) -> io::Result<Self> {
-        Self::open(path)
+        let this = Self::open(path)?;
+        // A new daemon lifetime: forget the previous one's stamp (0 = "not beaten yet", which the
+        // APO's silence watch covers) so it never counts as this daemon's. Writer-side only:
+        // `open` is also how the APO itself maps the file and must not touch the heartbeat.
+        this.state().heartbeat.store(0, Ordering::Release);
+        Ok(this)
     }
 
     // mmap base is page-aligned, exceeding SharedState's alignment.
@@ -817,13 +821,17 @@ impl SharedFile {
         st.generation.store(g.wrapping_add(2), Ordering::Release); // even: done
     }
 
-    /// Bump the daemon-liveness stamp (called ~every 30 ms by the daemon's
-    /// telemetry pump). Not a seqlock write: a torn read of a monotonically
-    /// increasing u64 still reads as "changed", which is all the APO needs.
+    /// Stamp the daemon-liveness heartbeat with the wall clock (called ~every
+    /// 30 ms by the daemon's telemetry pump). The stamp is a unix-ms time, so an
+    /// APO instance that starts AFTER the daemon died sees an old stamp at once
+    /// instead of waiting out a fresh 2 s grace window per stream. Not a seqlock
+    /// write: a torn read of a u64 that changes every beat still reads as
+    /// "changed" (the APO's silence watch), and a clock step only moves it.
     pub fn beat(&mut self) {
-        let st = self.state_mut();
-        let h = st.heartbeat.load(Ordering::Relaxed);
-        st.heartbeat.store(h.wrapping_add(1), Ordering::Release);
+        // `max(1)`: 0 means "never beaten".
+        self.state_mut()
+            .heartbeat
+            .store(unix_ms().max(1), Ordering::Release);
     }
 
     /// Publish a bypass: keep the last chain parameters but force
@@ -1021,6 +1029,24 @@ pub fn read_chain_fresh(path: &Path) -> Option<(u64, ChainSnapshot, bool)> {
         }
     }
     None
+}
+
+/// Wall clock as unix milliseconds (the unit of the daemon heartbeat stamp).
+#[must_use]
+pub fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// True when a heartbeat stamp is more than `max_age_ms` away from `now_ms`. A live daemon
+/// restamps every ~30 ms, so a stamp far in the PAST means it died and one far in the FUTURE
+/// means the clock stepped back since its last beat (it died too, or restamps within 30 ms).
+/// A zero stamp means "daemon has not beaten yet" and is NOT judged here (the APO's silence
+/// window covers it).
+#[must_use]
+pub fn heartbeat_stamp_is_old(stamp: u64, now_ms: u64, max_age_ms: u64) -> bool {
+    stamp != 0 && now_ms.abs_diff(stamp) >= max_age_ms
 }
 
 /// Read the daemon-liveness heartbeat with a fresh file read (a long-lived
@@ -1885,10 +1911,24 @@ mod tests {
     fn heartbeat_beats_and_reads_fresh() {
         let path = temp_path("hb");
         let mut w = ApoStateWriter::create(&path).unwrap();
-        let h0 = read_heartbeat_fresh(&path).unwrap();
+        assert_eq!(read_heartbeat_fresh(&path).unwrap(), 0, "no beat yet");
         w.beat();
+        let h1 = read_heartbeat_fresh(&path).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
         w.beat();
-        assert_eq!(read_heartbeat_fresh(&path).unwrap(), h0 + 2);
+        let h2 = read_heartbeat_fresh(&path).unwrap();
+        assert!(h2 > h1, "advances while the daemon beats");
+        assert!(unix_ms().abs_diff(h1) < 5_000, "stamp is the wall clock");
+        assert!(!heartbeat_stamp_is_old(h2, unix_ms(), 2_000));
+        assert!(heartbeat_stamp_is_old(h2, h2 + 2_000, 2_000));
+        assert!(
+            !heartbeat_stamp_is_old(0, u64::MAX, 2_000),
+            "unbeaten is not judged"
+        );
+        assert!(
+            !heartbeat_stamp_is_old(h2, h2 - 1, 2_000),
+            "future stamp is fresh"
+        );
         std::fs::remove_file(&path).ok();
     }
 
