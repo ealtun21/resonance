@@ -25,10 +25,11 @@ pub const RECENT_ALL: usize = usize::MAX;
 pub struct TrayConfig {
     pub left_click: LeftClick,
     pub poll_secs: u64,
-    /// When set, the tray's "Quit Resonance" item also stops the daemon — that
-    /// quit closes *everything*. On by default. When cleared, it exits just the
-    /// tray, leaving the daemon (and the rest of the stack) running. Closing a
-    /// UI window never stops the daemon regardless of this flag.
+    /// When set, the tray's "Quit Resonance" item closes *everything*: the
+    /// GUI window, the daemon (graceful IPC shutdown, taskkill fallback) and
+    /// the tray itself. On by default. When cleared, it exits just the tray,
+    /// leaving the daemon (and the rest of the stack) running. Closing a UI
+    /// window never stops the daemon regardless of this flag.
     pub quit_stops_daemon: bool,
     /// Number of recent presets to list in the tray menu. [`RECENT_ALL`] =
     /// unlimited (show every one).

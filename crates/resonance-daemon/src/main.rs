@@ -338,7 +338,10 @@ fn spawn_sinks_vol_task(
 /// and start the device-watch thread that auto-attaches the APO to every
 /// appearing render endpoint and tracks the system default.
 #[cfg(target_os = "windows")]
-fn init_windows_control_plane(shared: &state::SharedState) {
+fn init_windows_control_plane(
+    shared: &state::SharedState,
+    output_tx: tokio::sync::mpsc::UnboundedSender<String>,
+) {
     let path = resonance_apo::state::default_state_path();
     match resonance_apo::state::ApoStateWriter::create(&path) {
         Ok(writer) => {
@@ -369,6 +372,7 @@ fn init_windows_control_plane(shared: &state::SharedState) {
         // hot-plugged DAC or a Bluetooth headset is attached on the spot,
         // without re-running the installer.
         let mut attached: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut last_default: Option<String> = None;
         loop {
             let endpoints = audio::win_devices::enumerate_render_endpoints();
             let default = audio::win_devices::default_render_id();
@@ -378,6 +382,15 @@ fn init_windows_control_plane(shared: &state::SharedState) {
                         let r = audio::win_devices::attach_apo_endpoint(guid);
                         info!("APO auto-attach {guid}: {r}");
                     }
+                }
+            }
+            // Feed the (cross-platform) output-mapping task: first sight at
+            // startup counts as a change, which is what auto-applies the
+            // device's mapped profile after a daemon restart.
+            if default.is_some() && default != last_default {
+                last_default.clone_from(&default);
+                if let Some(id) = default.clone() {
+                    let _ = output_tx.send(id);
                 }
             }
             {
@@ -425,7 +438,6 @@ async fn main() -> Result<()> {
     if !acquire_singleton_or_exit()? {
         return Ok(());
     }
-    shutdown::install_signal_handlers();
 
     let (cmd_tx, cmd_rx) = RingBuffer::<state::AudioCommand>::new(256);
     let (spectrum_tx, spectrum_rx) = RingBuffer::<f32>::new(audio::SPECTRUM_BUF);
@@ -449,6 +461,7 @@ async fn main() -> Result<()> {
 
     let meters = std::sync::Arc::new(meters::AtomicMeters::default());
     let shared = state::SharedState::new(cmd_tx, route_tx, meters.clone(), app_ctl_tx, sink_ctl_tx);
+    shutdown::install_signal_handlers(&shared);
 
     spawn_spectrum_task(spectrum_rx, &shared);
     spawn_output_mapping_task(output_rx, &shared);
@@ -482,7 +495,6 @@ async fn main() -> Result<()> {
             cmd_rx,
             spectrum_tx,
             initial_chain,
-            output_tx,
             route_rx,
             sinks_tx,
             meters,
@@ -496,7 +508,7 @@ async fn main() -> Result<()> {
         // on dedicated COM threads. The enumeration thread feeds `apps_tx` →
         // `spawn_apps_task` → shared state, like the audio backends do.
         audio::win_apps::spawn_app_tasks(apps_tx, app_ctl_rx);
-        init_windows_control_plane(&shared);
+        init_windows_control_plane(&shared, output_tx);
     }
 
     // IPC server (blocks until shutdown)

@@ -98,6 +98,7 @@ where
             use tokio::io::AsyncWriteExt;
             let _ = writer.flush().await;
             info!("shutdown requested");
+            state.publish_apo_bypass();
             crate::shutdown::cleanup();
             std::process::exit(0);
         }
