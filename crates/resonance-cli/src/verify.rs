@@ -48,6 +48,10 @@ pub struct Options {
     /// Length of the broadband stimulus capture, in seconds (compare mode).
     pub compare_secs: f64,
     pub json: bool,
+    /// Measure without a daemon (Windows only: the APO runs inside audiodg whether or not the
+    /// daemon is alive, so this checks what a dead/absent daemon leaves on the wire).
+    /// Response is not compared (no EQ prediction); pitch is.
+    pub no_daemon: bool,
 }
 
 /// A saved full-waveform capture of the broadband stimulus (A/B compare).
@@ -92,11 +96,18 @@ pub fn run(o: &Options) -> Result<()> {
     if o.freqs.is_empty() {
         bail!("no probe frequencies given");
     }
-    let state = match crate::send(Command::GetState)? {
-        Response::State(s) => s,
-        other => bail!("unexpected reply to GetState: {other:?}"),
+    let state = if o.no_daemon {
+        if !cfg!(windows) {
+            bail!("--no-daemon needs the Windows loopback path (elsewhere the daemon captures)");
+        }
+        None
+    } else {
+        match crate::send(Command::GetState)? {
+            Response::State(s) => Some(s),
+            other => bail!("unexpected reply to GetState: {other:?}"),
+        }
     };
-    let rate = state.sample_rate;
+    let rate = state.as_ref().map_or(48_000.0, |s| s.sample_rate);
     if rate <= 0.0 || rate.is_nan() {
         bail!("daemon reports no live sample rate — is audio running?");
     }
@@ -115,7 +126,7 @@ pub fn run(o: &Options) -> Result<()> {
         }
     }
 
-    let mode = pick_mode(&state, o)?;
+    let mode = pick_mode(state.as_ref(), o)?;
 
     // Quiet pre-check: other audio playing pollutes every measurement.
     let pre = ambient_capture(rate, 400)?;
@@ -151,11 +162,11 @@ pub fn run(o: &Options) -> Result<()> {
             .with_context(|| format!("write baseline '{path}'"))?;
     }
 
-    report(&state, &mode, &rows, o, rate)
+    report(state.as_ref(), &mode, &rows, o, rate)
 }
 
 /// Decide what to compare against, validating the baseline if given.
-fn pick_mode(state: &DaemonState, o: &Options) -> Result<Mode> {
+fn pick_mode(state: Option<&DaemonState>, o: &Options) -> Result<Mode> {
     if let Some(path) = &o.baseline {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("read baseline '{path}'"))?;
@@ -171,6 +182,9 @@ fn pick_mode(state: &DaemonState, o: &Options) -> Result<Mode> {
         }
         return Ok(Mode::Baseline(b));
     }
+    let Some(state) = state else {
+        return Ok(Mode::MeasureOnly);
+    };
     // An effect only shapes the response when it's enabled AND has non-zero
     // intensity (enabled-at-0% is a common resting state and a no-op).
     let effects_active = FxEffectId::ALL.iter().any(|&id| {
@@ -212,11 +226,12 @@ fn probe_tone(freq: f64, rate: f64, o: &Options) -> Result<Row> {
 }
 
 /// Compare, print and pass/fail.
-fn report(state: &DaemonState, mode: &Mode, rows: &[Row], o: &Options, rate: f64) -> Result<()> {
+fn report(state: Option<&DaemonState>, mode: &Mode, rows: &[Row], o: &Options, rate: f64) -> Result<()> {
     let expected: Option<Vec<f64>> = match mode {
         Mode::Predicted => Some(
             rows.iter()
                 .map(|r| {
+                    let state = state.expect("Predicted mode needs the daemon state");
                     if state.enabled {
                         fr::response_db(&state.bands, r.freq, rate)
                     } else {
