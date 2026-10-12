@@ -379,6 +379,12 @@ pub fn spawn(ctx: super::BackendCtx) -> Result<JoinHandle<()>> {
                     Err(e) => tracing::warn!("PipeWire setup failed: {e:#}; retrying…"),
                 }
 
+                // A deliberate restart (the output's channel count changed) is
+                // not a failure: rebuild immediately, no backoff.
+                if gs.lock().unwrap().pending_channels.is_some() {
+                    backoff = Duration::from_millis(200);
+                    continue;
+                }
                 // A session that lived a while is a real reconnect, not a flap:
                 // reset the backoff so the next outage retries promptly.
                 if started.elapsed() > Duration::from_secs(10) {
