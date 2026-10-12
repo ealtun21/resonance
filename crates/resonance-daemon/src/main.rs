@@ -13,6 +13,7 @@ mod config;
 mod ipc_server;
 mod ir;
 mod meters;
+mod session;
 mod shutdown;
 mod spectrum;
 mod state;
@@ -498,6 +499,11 @@ async fn main() -> Result<()> {
         audio::win_apps::spawn_app_tasks(apps_tx, app_ctl_rx);
         init_windows_control_plane(&shared);
     }
+
+    // Bring back the pre-crash/restart state before any client can connect (and
+    // before the output-mapping task can run: a mapped profile still wins).
+    session::restore(&shared);
+    session::spawn(&shared);
 
     // IPC server (blocks until shutdown)
     ipc_server::run(shared).await?;

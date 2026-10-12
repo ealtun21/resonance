@@ -42,6 +42,7 @@ static LOCK_FILE: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new(
 /// Remove the IPC endpoint (Unix socket / Windows port file) and the pidfile.
 /// Idempotent; missing files are ignored.
 pub fn cleanup() {
+    crate::session::flush();
     #[cfg(unix)]
     let _ = std::fs::remove_file(socket_path());
     #[cfg(windows)]
