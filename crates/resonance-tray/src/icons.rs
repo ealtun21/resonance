@@ -48,14 +48,21 @@ pub fn bypassed() -> IconRgba {
     icon
 }
 
-/// macOS template image: pure black, original alpha — the OS tints it for the
-/// current menu-bar appearance. macOS-only: the desktop backend is the sole
-/// caller, and only under `cfg(target_os = "macos")`.
-#[cfg(target_os = "macos")]
+/// macOS template image: pure black, and the *glyph* as alpha — the OS tints it
+/// for the current menu-bar appearance. The committed PNG is an opaque dark tile
+/// with a bright glyph, so the tile's own alpha (83 % opaque) would render as a
+/// solid black square; instead alpha = tile alpha x smoothstep(luma), which keeps
+/// the bars and curve and drops the dark tile. macOS-only: the desktop backend is
+/// the sole caller (tests also run it on every platform).
+#[cfg(any(target_os = "macos", test))]
 #[must_use]
 pub fn template() -> IconRgba {
     let mut icon = decode();
     for px in icon.rgba.chunks_exact_mut(4) {
+        let luma = (0.299 * f32::from(px[0]) + 0.587 * f32::from(px[1]) + 0.114 * f32::from(px[2]))
+            / 255.0;
+        let t = ((luma - 0.2) / 0.18).clamp(0.0, 1.0);
+        px[3] = (f32::from(px[3]) * t * t * (3.0 - 2.0 * t)).round() as u8;
         px[0] = 0;
         px[1] = 0;
         px[2] = 0;
@@ -92,17 +99,19 @@ mod tests {
         assert_eq!(a_alpha, b_alpha, "shape (alpha) unchanged");
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn template_zeroes_color_but_preserves_alpha() {
-        let plain = decode();
+    fn template_is_black_glyph_not_a_solid_tile() {
         let t = template();
-        assert_eq!((plain.width, plain.height), (t.width, t.height));
+        let n = t.rgba.len() / 4;
         for px in t.rgba.chunks_exact(4) {
             assert_eq!(&px[..3], &[0, 0, 0], "template color is pure black");
         }
-        let plain_alpha: Vec<u8> = plain.rgba.iter().skip(3).step_by(4).copied().collect();
-        let t_alpha: Vec<u8> = t.rgba.iter().skip(3).step_by(4).copied().collect();
-        assert_eq!(plain_alpha, t_alpha, "shape (alpha) unchanged");
+        let opaque = t.rgba.chunks_exact(4).filter(|p| p[3] > 128).count();
+        // Measured on the guest's menu bar: the old alpha-preserving template was an 83 %
+        // opaque solid square. The glyph alone is about 21 %.
+        assert!(
+            (n / 10..n * 4 / 10).contains(&opaque),
+            "glyph coverage {opaque}/{n} should be a shape, not a filled tile"
+        );
     }
 }
