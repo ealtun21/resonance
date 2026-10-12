@@ -73,6 +73,8 @@ struct AppNode {
     pid: Option<u32>,
     volume: f64,
     muted: bool,
+    /// When we last wrote this node's volume/mute (see [`echo_pending`]).
+    set_at: Option<Instant>,
     node: pw::node::Node,
     /// Kept alive so the node keeps emitting `Props` param events (read-back).
     _param_listener: pw::node::NodeListener,
@@ -104,6 +106,8 @@ struct SinkNode {
     channels: usize,
     volume: f64,
     muted: bool,
+    /// When we last wrote this sink's volume/mute (see [`echo_pending`]).
+    set_at: Option<Instant>,
 }
 
 /// A bound `Device` proxy plus its `Route` param listener (kept alive so the
@@ -861,6 +865,7 @@ fn on_global(
                         channels: 2,
                         volume: 1.0,
                         muted: false,
+                        set_at: None,
                     },
                 );
                 publish_sinks(g);
@@ -915,6 +920,7 @@ fn on_global(
                             pid,
                             volume: 1.0,
                             muted: false,
+                            set_at: None,
                             node,
                             _param_listener: listener,
                         },
@@ -1077,6 +1083,19 @@ fn publish_apps(g: &GraphState) {
     let _ = g.apps_tx.send(apps);
 }
 
+/// How long after our own volume/mute write a read-back is treated as a stale
+/// echo. `PipeWire` reports every intermediate value of a drag back to us, late
+/// and out of step with the value we just set; applying them reverts the
+/// optimistic value, and `sync_master_volume` then mirrors that stale value onto
+/// the "resonance" sink — the system volume bar visibly jumps back and forth.
+/// Longer than the 200 ms route poll so the first poll after the window lands.
+const ECHO_GRACE: Duration = Duration::from_millis(300);
+
+/// True while a read-back for a node we wrote at `set_at` may still be an echo.
+fn echo_pending(set_at: Option<Instant>, now: Instant) -> bool {
+    set_at.is_some_and(|t| now.saturating_duration_since(t) < ECHO_GRACE)
+}
+
 /// Apply one per-app volume/mute request by setting the target stream node's
 /// `Props` param, then refresh the published list with our optimistic value.
 fn apply_app_ctl(g: &mut GraphState, ctl: &AppControl) {
@@ -1113,6 +1132,7 @@ fn apply_app_ctl(g: &mut GraphState, ctl: &AppControl) {
                 if let Some(pod) = Pod::from_bytes(&bytes) {
                     app.node.set_param(ParamType::Props, 0, pod);
                     app.volume = v;
+                    app.set_at = Some(Instant::now());
                 }
             }
         }
@@ -1121,6 +1141,7 @@ fn apply_app_ctl(g: &mut GraphState, ctl: &AppControl) {
                 if let Some(pod) = Pod::from_bytes(&bytes) {
                     app.node.set_param(ParamType::Props, 0, pod);
                     app.muted = muted;
+                    app.set_at = Some(Instant::now());
                 }
             }
         }
@@ -1198,9 +1219,14 @@ fn apply_app_volumes(g: &mut GraphState) {
         }
         map.drain().collect()
     };
+    let now = Instant::now();
     let mut changed = false;
     for (id, (vol, muted)) in updates {
-        if let Some(app) = g.app_nodes.get_mut(&id) {
+        if let Some(app) = g
+            .app_nodes
+            .get_mut(&id)
+            .filter(|a| !echo_pending(a.set_at, now))
+        {
             if let Some(v) = vol {
                 let v = v.clamp(0.0, 4.0);
                 if (app.volume - v).abs() > 0.0005 {
@@ -1404,6 +1430,7 @@ fn apply_sink_ctl(g: &mut GraphState, ctl: &SinkCtl) {
             SinkCtl::SetVolume { volume, .. } => sink.volume = volume.clamp(0.0, 4.0),
             SinkCtl::SetMute { muted, .. } => sink.muted = muted,
         }
+        sink.set_at = Some(Instant::now());
     }
     publish_sinks(g);
 }
@@ -1435,6 +1462,7 @@ fn apply_sink_volumes(g: &mut GraphState) {
         }
         map.drain().collect()
     };
+    let now = Instant::now();
     let mut changed = false;
     for ((device_id, card_device), r) in updates {
         if let Some(sink) = g
@@ -1445,6 +1473,9 @@ fn apply_sink_volumes(g: &mut GraphState) {
             sink.route_index = r.index;
             sink.route_device = r.device;
             sink.channels = r.channels;
+            if echo_pending(sink.set_at, now) {
+                continue;
+            }
             if let Some(v) = r.volume {
                 let v = v.clamp(0.0, 4.0);
                 if (sink.volume - v).abs() > 0.0005 {
@@ -1969,6 +2000,17 @@ fn pw_props_raw(pairs: &[(&str, &str)]) -> *mut pw_sys::pw_properties {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn echo_window_covers_only_recent_writes() {
+        let t0 = Instant::now();
+        assert!(!echo_pending(None, t0));
+        assert!(echo_pending(Some(t0), t0));
+        assert!(echo_pending(Some(t0), t0 + ECHO_GRACE / 2));
+        assert!(!echo_pending(Some(t0), t0 + ECHO_GRACE));
+        // A clock reading before the write never panics.
+        assert!(echo_pending(Some(t0 + ECHO_GRACE), t0));
+    }
 
     #[test]
     fn parse_metadata_name_extracts_sink() {
