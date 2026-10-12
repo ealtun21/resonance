@@ -27,8 +27,8 @@
 
 use super::hal_input::HalInputStream;
 use super::system_tap::{
-    SystemAudioTap, TAP_DEVICE_NAME, default_output_rate, default_output_uid,
-    set_aggregate_nominal_rate,
+    SystemAudioTap, TAP_DEVICE_NAME, audio_capture_allowed, default_output_rate,
+    default_output_uid, set_aggregate_nominal_rate,
 };
 use super::{CHANNELS, apply_command};
 use crate::meters::{AtomicMeters, Sample, peak_rms, peak_rms_f32};
@@ -45,7 +45,7 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Ring-buffer capacity (interleaved stereo f32 samples) between input and
 /// output streams. ~340 ms at 48 kHz stereo — generous headroom for jitter
@@ -316,6 +316,12 @@ struct SharedRt {
     meters: Arc<AtomicMeters>,
 }
 
+/// A system tap is bound to one device's UID; it is stale when the OS default moved elsewhere.
+/// Per-app mixer taps have no UID (empty) and never go stale this way.
+fn tap_follows_stale_default(bound_uid: &str, default_uid: Option<&str>) -> bool {
+    !bound_uid.is_empty() && default_uid.is_some_and(|d| d != bound_uid)
+}
+
 enum StreamExit {
     /// The supervisor noticed a `route_rx` update; rebuild against the new
     /// preferred output (returned in the variant).
@@ -465,9 +471,16 @@ fn run_streams(
             diag_poll = Instant::now();
             let cb = input_callbacks.load(Ordering::Relaxed);
             let nz = input_nonzero.load(Ordering::Relaxed);
-            info!("HAL tap IOProc: {cb} callbacks, {nz} with audio");
-            // After 5 s with no non-zero blocks, surface a one-shot TCC hint.
-            if !warned_silent && cb > 50 && nz == 0 && started.elapsed() >= Duration::from_secs(5) {
+            // Every 2 s forever into an unrotated launchd log (about 10 MB/day), so debug only.
+            debug!("HAL tap IOProc: {cb} callbacks, {nz} with audio");
+            // After 5 s with no non-zero blocks, surface a one-shot TCC hint, unless the grant
+            // is known good (then the system is simply silent).
+            if !warned_silent
+                && !audio_capture_allowed()
+                && cb > 50
+                && nz == 0
+                && started.elapsed() >= Duration::from_secs(5)
+            {
                 warn!(
                     "tap IOProc has fired {cb} times but every block was silent — \
                      macOS is most likely refusing system audio capture. Open the \
@@ -490,6 +503,14 @@ fn run_streams(
                         return Ok(StreamExit::Ended);
                     }
                 }
+            } else if tap_follows_stale_default(
+                tap.device_uid(),
+                default_output_uid().ok().as_deref(),
+            ) {
+                // Pinned output: the tap still captures whatever the OS default is, so a
+                // default switch moves app audio to a device this tap no longer hears.
+                info!("CoreAudio: default output changed under a pinned output; rebinding the tap");
+                return Ok(StreamExit::Ended);
             }
             // Follow a sample-rate change on the SAME device (Audio MIDI Setup
             // change, BT codec renegotiation). cpal's default config reflects
@@ -800,6 +821,20 @@ fn publish_sinks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tap_goes_stale_only_when_the_default_moves_off_its_device() {
+        assert!(!tap_follows_stale_default("A", Some("A")));
+        assert!(tap_follows_stale_default("A", Some("B")));
+        assert!(
+            !tap_follows_stale_default("A", None),
+            "no default yet: keep the tap"
+        );
+        assert!(
+            !tap_follows_stale_default("", Some("B")),
+            "per-app mixer has no UID"
+        );
+    }
 
     // Compile-time invariants on the buffer constants — the audio thread
     // depends on these holding, so we fail the build (not the test run) if

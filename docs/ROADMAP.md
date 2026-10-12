@@ -24,6 +24,12 @@ exists.)_
 
 _(empty — per-band listen/bandpass shipped 2026-07-03, see below.)_
 
+## Long-term backlog
+
+- **macOS: stable signing identity (Apple Developer ID)** — so upgrades keep the
+  capture permission grant. Release builds are ad-hoc signed today, acceptable
+  for now.
+
 ## Where Resonance is already ahead
 
 Cross-platform from one codebase (Linux/PipeWire + Windows/APO + macOS/CoreAudio);

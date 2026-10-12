@@ -211,7 +211,7 @@ fn sane_preamp(db: f64) -> f64 {
 /// Atomically replace `path`'s contents: write a sibling temp file, then rename
 /// over the target. A crash mid-write leaves the old file intact instead of a
 /// truncated one that the lenient loaders would silently treat as empty.
-fn write_atomic(path: &std::path::Path, contents: &str) -> Result<(), String> {
+pub(crate) fn write_atomic(path: &std::path::Path, contents: &str) -> Result<(), String> {
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, contents).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())
