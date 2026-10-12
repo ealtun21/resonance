@@ -82,6 +82,8 @@ pub struct SystemAudioTap {
     tap_ids: Vec<AudioObjectID>,
     aggregate_id: AudioObjectID,
     native_rate: f64,
+    /// UID of the output device a system tap is bound to; empty for the per-app mixer.
+    device_uid: String,
 }
 
 impl SystemAudioTap {
@@ -217,6 +219,7 @@ impl SystemAudioTap {
             tap_ids: vec![tap_id],
             aggregate_id: agg_id,
             native_rate,
+            device_uid: device_uid.to_owned(),
         })
     }
 
@@ -322,6 +325,7 @@ impl SystemAudioTap {
                 tap_ids,
                 aggregate_id: agg_id,
                 native_rate,
+                device_uid: String::new(),
             },
             keys,
         ))
@@ -348,6 +352,11 @@ impl SystemAudioTap {
     /// the tap here and `hal_input` resamples up instead.
     pub fn native_rate(&self) -> f64 {
         self.native_rate
+    }
+
+    /// UID of the output device this tap captures (empty for the per-app mixer).
+    pub fn device_uid(&self) -> &str {
+        &self.device_uid
     }
 }
 
@@ -822,6 +831,15 @@ fn build_aggregate_dict(
 use objc2_core_foundation::CFString as TccCFString;
 use std::os::raw::c_int;
 
+/// `TCCAccessPreflight` result at the last tap creation; -1 until probed.
+static TCC_PREFLIGHT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+/// True once the audio-capture grant was seen as allowed: a silent tap then means silence
+/// in the system mix, not a refused capture.
+pub fn audio_capture_allowed() -> bool {
+    TCC_PREFLIGHT.load(std::sync::atomic::Ordering::Relaxed) == 0
+}
+
 type TccPreflightFn = unsafe extern "C" fn(*const TccCFString, *const c_void) -> c_int;
 
 /// Best-effort preflight of the audio-capture TCC service so we can LOG
@@ -847,6 +865,7 @@ fn request_audio_capture_permission() {
         let preflight: TccPreflightFn = std::mem::transmute(pre);
         let service = TccCFString::from_static_str("kTCCServiceAudioCapture");
         let status = preflight(std::ptr::from_ref(&*service), std::ptr::null());
+        TCC_PREFLIGHT.store(status, std::sync::atomic::Ordering::Relaxed);
         match status {
             0 => info!("kTCCServiceAudioCapture: ALLOWED (tap will deliver audio)"),
             1 => warn!(

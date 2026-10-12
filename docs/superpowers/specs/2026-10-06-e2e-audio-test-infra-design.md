@@ -593,3 +593,51 @@ Windows scenario also saves `apo.log`.
 - Observed once under parallel load at 8 vCPUs: Windows `long-full-eq@96000x8` differed from the
   render at frame 3931392 (-13.2 dBFS). It passed twice alone at 16 vCPUs.
 
+## 18. macOS lifecycle, driven through the guest desktop (2026-10-12)
+
+Setup and technique: `contrib/e2e/macos/README.md` ("Driving the guest desktop"). Run on the Intel macOS
+15.8.1 guest (not Apple silicon hardware) with a release `.app` built by the product's own `build-app.sh`,
+installed with `resonance daemon enable`; audio judged by `resonance verify` (pitch and response of real tones
+through the live tap), not by ear. Measured unless marked inferred.
+
+Works: the launchd agent starts and serves within the call's 6 s settle; `kill -9` is back in 0.2-1.5 s with
+audio flowing (stale socket handled); `daemon stop` is final (KeepAlive honours exit 0), also while a consent
+dialog is pending; rate changes 44.1/96/48 kHz and an output switch rebuild in 0.7-2.3 s with `verify` PASS and
+no resampling; a loaded EQ (+6 dB peak, -5 dB shelf) measured within 0.00 dB of the prediction at 7 frequencies
+(closes the macOS live part of #42); replacing the bundle under a running daemon leaves it serving, and
+`daemon restart` onto the new cert-signed build keeps the capture grant; uninstall removes the plist, process,
+socket, pid file and leaves no aggregate device.
+
+Findings:
+
+1. **Pinned output + OS default change = silent loss of the EQ (fixed).** The tap is bound to the default
+   output's UID, but `run_streams` only rebuilt on a default change when no output was pinned. With a pin, the
+   default moved to another device, app audio went there, and `levels in` stayed -inf (measured); unpinned it
+   followed. The supervisor now rebinds the tap when the default leaves the tap's device. Test:
+   `tap_goes_stale_only_when_the_default_moves_off_its_device` plus the lifecycle step.
+2. **Tray icon was a solid black square on the macOS menu bar (fixed).** The template image kept the PNG's
+   alpha (the dark tile is 83 % opaque), so the glyph vanished. Alpha now comes from the glyph's luminance
+   (21 % coverage); test `template_is_black_glyph_not_a_solid_tile`.
+3. **False "macOS is most likely refusing system audio capture" warning on an idle system (fixed).** It fired
+   whenever the tap was silent for 5 s, even right after `kTCCServiceAudioCapture: ALLOWED`. It now requires
+   that the grant was not seen as allowed.
+4. **Unbounded log growth (fixed).** `HAL tap IOProc: ...` was logged at info every 2 s into the launchd
+   stdout log (88 KB in 13 min, about 10 MB/day, never rotated); it is debug now.
+5. **Every release upgrade re-prompts (not fixed, needs a signing decision).** `release.yml` builds with the
+   ad-hoc signature (inferred from its comment). Re-signing a cert-signed install ad-hoc and restarting
+   (measured) gave `kTCCServiceAudioCapture: not-determined`, the microphone dialog, then the system-audio
+   dialog; the daemon sat after "Process tap ready" until both were answered. Grants are one row per bundle id
+   that follows the last signature, so ad-hoc <-> cert switches and every ad-hoc cdhash change repeat it. A
+   stable identity for release builds is the fix; until then the dialogs are unavoidable per upgrade.
+6. **Nothing is restored after a daemon crash or restart (design gap, not fixed).** After `kill -9`, preamp,
+   a 40 % effect and the pinned output were back at defaults (measured); only an output->profile mapping
+   restores state. The mapped path was not exercised here.
+7. **GUI could not be exercised**: no Metal adapter in the VM (`RequestAdapterError(NotFound)`), so the egui GUI
+   and the tray's "Open UI" were not driven; the tray menu (Power, Daemon start/stop) was.
+8. One transient: the first `verify` right after an output switch lost tones 5-7 (a 5.9 s gap between two
+   2 s IOProc log lines); about 20 later switches and runs did not repeat it (inferred: VM scheduling, see
+   MAC-E2).
+9. Cosmetic: macOS posts a "Background Items Added" notification per plist (re)write; six accumulated in this
+   session. `resonance-gui.lock`, `resonance-tray.lock/pid` and `resonanced.lock` stay in `$TMPDIR` after
+   uninstall (inert).
+
