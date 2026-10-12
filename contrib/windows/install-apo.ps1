@@ -108,12 +108,17 @@ $fx   = '{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D}'   # PKEY_FX_*  ,1/,2 legacy  ,5
 $mode = '{D3993A3F-99C2-4402-B5EC-A92A0367664B}'   # per-slot processing-mode list
 $defaultMode = '{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}'   # DEFAULT processing mode
 $combinedName = '{b3f8fa53-0004-438e-9003-51a46e139bfc},41'   # combined-device flag
-New-Item -Force -Path $backupRoot | Out-Null
-# Persist the prior signature-check state alongside the slot backups.
-if ($null -eq $priorDpadg) {
-  Set-ItemProperty -Path $backupRoot -Name 'DisableProtectedAudioDG_prior' -Value '<none>'
-} else {
-  Set-ItemProperty -Path $backupRoot -Name 'DisableProtectedAudioDG_prior' -Value ([string]$priorDpadg)
+# Backups describe the machine as it was BEFORE our first install. On an upgrade/reinstall the
+# live values are already ours, so re-recording them would make uninstall "restore" our own APO
+# and leave DisableProtectedAudioDG on (and lose the driver's original SFX/MFX entries): keep
+# any backup that already exists and only record what is still missing.
+if (-not (Test-Path $backupRoot)) { New-Item -Force -Path $backupRoot | Out-Null }
+if ($null -eq (Get-ItemProperty -Path $backupRoot -Name 'DisableProtectedAudioDG_prior' -EA SilentlyContinue).DisableProtectedAudioDG_prior) {
+  if ($null -eq $priorDpadg) {
+    Set-ItemProperty -Path $backupRoot -Name 'DisableProtectedAudioDG_prior' -Value '<none>'
+  } else {
+    Set-ItemProperty -Path $backupRoot -Name 'DisableProtectedAudioDG_prior' -Value ([string]$priorDpadg)
+  }
 }
 $allSlots = '1','2','5','6','7'
 
@@ -128,11 +133,13 @@ Get-ChildItem $render -EA SilentlyContinue | ForEach-Object {
 
     # back up the original slot values (all five) so uninstall can restore them
     $bk = "$backupRoot\$g"
-    New-Item -Force -Path $bk | Out-Null
-    foreach ($slot in $allSlots) {
-      $name = "$fx,$slot"
-      $orig = (Get-ItemProperty -Path $fxp -Name $name -EA SilentlyContinue).$name
-      if ($null -ne $orig) { Set-ItemProperty -Path $bk -Name $name -Value $orig } else { Set-ItemProperty -Path $bk -Name $name -Value '<none>' }
+    if (-not (Test-Path $bk)) {   # an existing backup is the pre-install original: never overwrite it
+      New-Item -Force -Path $bk | Out-Null
+      foreach ($slot in $allSlots) {
+        $name = "$fx,$slot"
+        $orig = (Get-ItemProperty -Path $fxp -Name $name -EA SilentlyContinue).$name
+        if ($null -ne $orig) { Set-ItemProperty -Path $bk -Name $name -Value $orig } else { Set-ItemProperty -Path $bk -Name $name -Value '<none>' }
+      }
     }
 
     # decide the mode from what the driver already provides (EqualizerAPO logic)

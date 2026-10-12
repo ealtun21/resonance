@@ -42,10 +42,10 @@ pub const STATE_MAGIC: u32 = 0x4F50_4152;
 /// v7: + linear-phase EQ mode flag.
 /// v8: + transient per-band solo (audition one band; `SOLO_NONE` = off).
 /// v9: + audition mode (solo/listen) beside the `solo_band` index.
-/// v10: reserved by the unmerged `worktree-win-lifecycle-fixes` branch
-///     (+ daemon liveness heartbeat field) — do not reuse.
+/// v10: (unused) the heartbeat landed after loudness removal, see v12.
 /// v11: − Loudness effect removed (buggy, redundant with Dynamic Boost).
-pub const STATE_VERSION: u32 = 11;
+/// v12: + daemon liveness heartbeat (APO auto-bypass when stale).
+pub const STATE_VERSION: u32 = 12;
 
 /// `solo_band` sentinel meaning "no band soloed" (the field is a fixed `u32`, so
 /// `Option` is encoded as this reserved value rather than a niche).
@@ -255,6 +255,10 @@ pub struct SharedState {
     pub telemetry_enabled: AtomicU32,
     _pad2: u32,
     pub telemetry: Telemetry,
+    /// Daemon liveness stamp: a counter the daemon bumps ~every 30 ms while it
+    /// runs. The APO worker bypasses the chain when it stops advancing (daemon
+    /// quit, killed, or crashed) so EQ never outlives its control plane.
+    pub heartbeat: AtomicU64,
 }
 
 /// Total mapped size.
@@ -778,7 +782,12 @@ impl SharedFile {
     ///
     /// Returns an [`io::Error`] under the same conditions as [`Self::open`].
     pub fn create(path: &Path) -> io::Result<Self> {
-        Self::open(path)
+        let this = Self::open(path)?;
+        // A new daemon lifetime: forget the previous one's stamp (0 = "not beaten yet", which the
+        // APO's silence watch covers) so it never counts as this daemon's. Writer-side only:
+        // `open` is also how the APO itself maps the file and must not touch the heartbeat.
+        this.state().heartbeat.store(0, Ordering::Release);
+        Ok(this)
     }
 
     // mmap base is page-aligned, exceeding SharedState's alignment.
@@ -809,6 +818,30 @@ impl SharedFile {
         let g = st.generation.load(Ordering::Relaxed);
         st.generation.store(g.wrapping_add(1), Ordering::Release); // odd: writing
         st.snapshot = snap;
+        st.generation.store(g.wrapping_add(2), Ordering::Release); // even: done
+    }
+
+    /// Stamp the daemon-liveness heartbeat with the wall clock (called ~every
+    /// 30 ms by the daemon's telemetry pump). The stamp is a unix-ms time, so an
+    /// APO instance that starts AFTER the daemon died sees an old stamp at once
+    /// instead of waiting out a fresh 2 s grace window per stream. Not a seqlock
+    /// write: a torn read of a u64 that changes every beat still reads as
+    /// "changed" (the APO's silence watch), and a clock step only moves it.
+    pub fn beat(&mut self) {
+        // `max(1)`: 0 means "never beaten".
+        self.state_mut()
+            .heartbeat
+            .store(unix_ms().max(1), Ordering::Release);
+    }
+
+    /// Publish a bypass: keep the last chain parameters but force
+    /// `enabled = 0`, so the APO passes audio through untouched. Called on
+    /// graceful daemon shutdown — EQ must not outlive the control plane.
+    pub fn publish_bypass(&mut self) {
+        let st = self.state_mut();
+        let g = st.generation.load(Ordering::Relaxed);
+        st.generation.store(g.wrapping_add(1), Ordering::Release); // odd: writing
+        st.snapshot.enabled = 0;
         st.generation.store(g.wrapping_add(2), Ordering::Release); // even: done
     }
 
@@ -996,6 +1029,40 @@ pub fn read_chain_fresh(path: &Path) -> Option<(u64, ChainSnapshot, bool)> {
         }
     }
     None
+}
+
+/// Wall clock as unix milliseconds (the unit of the daemon heartbeat stamp).
+#[must_use]
+pub fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// True when a heartbeat stamp is more than `max_age_ms` away from `now_ms`. A live daemon
+/// restamps every ~30 ms, so a stamp far in the PAST means it died and one far in the FUTURE
+/// means the clock stepped back since its last beat (it died too, or restamps within 30 ms).
+/// A zero stamp means "daemon has not beaten yet" and is NOT judged here (the APO's silence
+/// window covers it).
+#[must_use]
+pub fn heartbeat_stamp_is_old(stamp: u64, now_ms: u64, max_age_ms: u64) -> bool {
+    stamp != 0 && now_ms.abs_diff(stamp) >= max_age_ms
+}
+
+/// Read the daemon-liveness heartbeat with a fresh file read (a long-lived
+/// mapped view does not observe the daemon's writes across sessions on
+/// Windows — see `read_chain_fresh`). `None` = file missing/invalid, which
+/// callers must treat as "daemon gone".
+#[must_use]
+pub fn read_heartbeat_fresh(path: &Path) -> Option<u64> {
+    let b = std::fs::read(path).ok()?;
+    if b.len() < STATE_SIZE
+        || read_u32(&b, 0)? != STATE_MAGIC
+        || read_u32(&b, std::mem::offset_of!(SharedState, version))? != STATE_VERSION
+    {
+        return None;
+    }
+    read_u64(&b, std::mem::offset_of!(SharedState, heartbeat))
 }
 
 /// Fresh read of the APO's telemetry block (meters + spectrum), used by the
@@ -1837,6 +1904,56 @@ mod tests {
         let r = SharedFile::open(&path).unwrap();
         assert!(r.generation() >= 2, "generation preserved on re-open");
         assert!(r.read().is_some());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn heartbeat_beats_and_reads_fresh() {
+        let path = temp_path("hb");
+        let mut w = ApoStateWriter::create(&path).unwrap();
+        assert_eq!(read_heartbeat_fresh(&path).unwrap(), 0, "no beat yet");
+        w.beat();
+        let h1 = read_heartbeat_fresh(&path).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        w.beat();
+        let h2 = read_heartbeat_fresh(&path).unwrap();
+        assert!(h2 > h1, "advances while the daemon beats");
+        assert!(unix_ms().abs_diff(h1) < 5_000, "stamp is the wall clock");
+        assert!(!heartbeat_stamp_is_old(h2, unix_ms(), 2_000));
+        assert!(heartbeat_stamp_is_old(h2, h2 + 2_000, 2_000));
+        assert!(
+            !heartbeat_stamp_is_old(0, u64::MAX, 2_000),
+            "unbeaten is not judged"
+        );
+        assert!(
+            !heartbeat_stamp_is_old(h2, h2 - 1, 2_000),
+            "future stamp is fresh"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn publish_bypass_zeroes_enabled_and_advances_generation() {
+        let mut chain = ProcessorChain::builder()
+            .channels(2)
+            .sample_rate(48000.0)
+            .preamp_db(-3.5)
+            .build();
+        chain.enabled = true;
+        let path = temp_path("byp");
+        let mut w = ApoStateWriter::create(&path).unwrap();
+        w.publish(&chain);
+        let (g1, s1, _) = read_chain_fresh(&path).unwrap();
+        assert_eq!(s1.enabled, 1);
+
+        w.publish_bypass();
+        let (g2, s2, _) = read_chain_fresh(&path).unwrap();
+        assert_eq!(s2.enabled, 0, "bypass must publish enabled=0");
+        assert!(g2 > g1, "generation must advance so the worker notices");
+        assert!(
+            (s2.preamp_db - (-3.5)).abs() < 1e-12,
+            "other params preserved"
+        );
         std::fs::remove_file(&path).ok();
     }
 }

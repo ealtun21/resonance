@@ -114,6 +114,9 @@ enum Sub {
         /// Print machine-readable JSON
         #[arg(long)]
         json: bool,
+        /// Windows only: measure without a daemon (pitch + levels; no EQ prediction)
+        #[arg(long)]
+        no_daemon: bool,
     },
     /// Save the current settings as a named profile
     Save {
@@ -479,6 +482,7 @@ fn main() -> Result<()> {
         compare,
         compare_secs,
         json,
+        no_daemon,
     } = sub
     {
         let freqs = freqs
@@ -501,6 +505,7 @@ fn main() -> Result<()> {
             compare,
             compare_secs,
             json,
+            no_daemon,
         });
     }
 

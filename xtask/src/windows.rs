@@ -87,6 +87,55 @@ fn prepare(g: &Guest) -> Result<()> {
     }
 }
 
+/// The evaluation licence has expired and `wlms` powers the guest off an hour after every boot,
+/// which kills any run that outlasts it (the full tier does). `harden.ps1` disables it; that only
+/// takes effect on the next boot, so reboot once. A reboot makes qemu exit (`wait_ssh` relaunches).
+fn harden(g: &Guest) -> Result<()> {
+    if g.output("sc qc wlms")?.contains("DISABLED") {
+        return Ok(());
+    }
+    run_as_system(
+        g,
+        r"C:\src\contrib\e2e\windows\harden.ps1",
+        r"C:\harden.log",
+        "HARDEN DONE",
+        Duration::from_secs(60 * 5),
+    )?;
+    g.run("shutdown /r /t 0")?;
+    std::thread::sleep(Duration::from_secs(30));
+    g.wait_ssh(Duration::from_secs(60 * 15))
+}
+
+/// Build the real installer in the guest and drive install -> crash/restart -> upgrade ->
+/// uninstall with measured audio at each step (`lifecycle.ps1`). The transcript lands in
+/// `<out>/lifecycle.txt`; the exit code is the failure count.
+fn lifecycle(g: &Guest, out: &Path) -> Result<bool> {
+    println!("windows: lifecycle (building the installer, then driving it)");
+    let log = run_as_system(
+        g,
+        r"C:\src\contrib\e2e\windows\lifecycle-build.ps1",
+        r"C:\lc-build.log",
+        "LC BUILD DONE",
+        Duration::from_secs(60 * 45),
+    )?;
+    for step in ["cargo", "apo", "iscc-new"] {
+        ensure!(
+            log.contains(&format!("== {step} exit 0")),
+            "lifecycle build step `{step}` failed; C:\\lc-build.log:\n{log}"
+        );
+    }
+    let ok = g.run(
+        r"powershell -NoProfile -ExecutionPolicy Bypass -File C:\src\contrib\e2e\windows\lifecycle.ps1 > C:\lc-run.txt 2>&1",
+    )?;
+    let text = g.output(r"type C:\lc-run.txt")?;
+    std::fs::create_dir_all(out)?;
+    std::fs::write(out.join("lifecycle.txt"), &text)?;
+    for l in text.lines().filter(|l| l.starts_with("FAIL")) {
+        println!("windows: lifecycle {l}");
+    }
+    Ok(ok)
+}
+
 pub fn run(o: &Opts) -> Result<ExitCode> {
     let root = repo_root();
     let stamp = stamp()?;
@@ -98,6 +147,7 @@ pub fn run(o: &Opts) -> Result<ExitCode> {
     let result = (|| -> Result<bool> {
         g.wait_ssh(Duration::from_secs(60 * 30))?;
         g.sync_source(&root, r"C:\src")?;
+        harden(&g)?;
         let t = std::time::Instant::now();
         prepare(&g)?;
         println!("windows: guest build+prepare took {:.0?}", t.elapsed());
@@ -111,8 +161,13 @@ pub fn run(o: &Opts) -> Result<ExitCode> {
         if o.update_baseline {
             agent.push_str(" --update-baseline");
         }
-        let ok = g.run(&agent)?;
+        let mut ok = g.run(&agent)?;
         g.pull(r"C:\e2e-out", &out)?;
+        // The installed product's lifecycle is slow (installer build + ~10 min of driven steps):
+        // full tier only, and not when a single scenario was asked for.
+        if o.tier == "full" && o.scenario.is_none() {
+            ok &= lifecycle(&g, &out)?;
+        }
         if o.update_baseline {
             let tmp = root
                 .join("target/e2e")
