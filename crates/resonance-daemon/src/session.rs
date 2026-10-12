@@ -105,11 +105,12 @@ pub fn restore(state: &SharedState) {
     };
     info!("restoring last session");
     crate::ipc_server::apply_profile_chain(&s.profile, state);
-    // Windows pins by changing the OS default endpoint, which the OS persists
-    // itself — never re-assert it behind the user's back at startup.
-    #[cfg(not(target_os = "windows"))]
     if let Some(name) = s.pinned_output {
         let mut inner = state.0.lock().unwrap();
+        // Windows pins by changing the OS default endpoint, which the OS
+        // persists itself — never re-assert it behind the user's back; only
+        // restore the field so clients keep showing the pin.
+        #[cfg(not(target_os = "windows"))]
         // A missing device is harmless: the backend falls back to the default
         // sink and re-pins if the device reappears.
         let _ = inner.route_tx.send(name.clone());
